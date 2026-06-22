@@ -567,7 +567,3 @@ Or call the renderer directly:
 from kpi_pipeline.html_report import render_kpi_html, DEFAULT_METRIC_DEFINITIONS
 render_kpi_html(ctx, "/dbfs/mnt/.../report.html", report_title="My KPI Report")
 ```
-
-## Related notes
-
-Design background and scope concepts are documented in the `Notes/` folder in the workspace.
