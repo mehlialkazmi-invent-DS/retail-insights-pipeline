@@ -12,7 +12,8 @@ from kpi_pipeline.comparisons import build_comparisons, build_scope_diff
 from kpi_pipeline.context import KPIContext
 from kpi_pipeline.fiscal import build_fiscal_and_products
 from kpi_pipeline.html_report import render_kpi_html
-from kpi_pipeline.io import build_save_plan, save_outputs
+from kpi_pipeline.fiscal import build_fiscal_week_only
+from kpi_pipeline.io import build_save_plan, load_saved_outputs, save_outputs
 from kpi_pipeline.kpi_long import build_kpi_long
 from kpi_pipeline.pipeline import build_pipeline_frames
 from kpi_pipeline.scope import apply_scope_adjustments, build_defined_scope, build_hybrid_scope, scope_summary_by_origin
@@ -80,6 +81,7 @@ class KPIRunner:
             "| fiscal:",
             s["USE_FISCAL_CALENDAR"],
         )
+        print("RUN_MODE:", s.get("RUN_MODE", "full"))
         print("SCOPE MODE:", "hybrid" if s["USE_HYBRID_SCOPE"] else "defined only")
         if s["USE_HYBRID_SCOPE"]:
             print(
@@ -94,6 +96,8 @@ class KPIRunner:
             print(
                 "SAVE_OUTPUTS: True | mode:",
                 s["OUTPUT_SAVE_MODE"],
+                "| run_date:",
+                s["OUTPUT_RUN_DATE"],
                 "| allow overwrite:",
                 s["ALLOW_OVERWRITE_EXISTING"],
                 "| root:",
@@ -114,7 +118,33 @@ class KPIRunner:
         self.ctx.save_plan = plan
         return plan
 
+    def _infer_active_slices_from_kpi_long(self) -> None:
+        """Infer slice dimensions from kpi_long (configured order first, then any extras in data)."""
+        if self.ctx.kpi_long is None or self.ctx.kpi_long.empty:
+            self.ctx.active_slice_dimensions = []
+            return
+        configured = list(self.settings.get("SLICE_DIMENSIONS") or [])
+        data_dims = set(self.ctx.kpi_long["dimension"].unique()) - {"overall"}
+        active = [d for d in configured if d in data_dims]
+        for d in sorted(data_dims):
+            if d not in active:
+                active.append(d)
+        self.ctx.active_slice_dimensions = active
+        print("ACTIVE_SLICE_DIMENSIONS (inferred):", active)
+
+    def run_html_only(self, fund_paste=None) -> KPIContext:
+        """Load saved Delta outputs and prepare ctx for HTML report only (no pipeline compute)."""
+        if fund_paste is None:
+            raise ValueError("fund_paste is required for html_only mode (to resolve output paths).")
+        load_saved_outputs(self.ctx, fund_paste)
+        self._infer_active_slices_from_kpi_long()
+        build_fiscal_week_only(self.ctx)
+        print("html_only: skipped pipeline — loaded saved outputs for HTML report.")
+        return self.ctx
+
     def run(self, fund_paste=None, save: bool = True) -> KPIContext:
+        if self.settings.get("RUN_MODE", "full") == "html_only":
+            return self.run_html_only(fund_paste=fund_paste)
         self._reset_run_caches()
         self.build_dimensions()
         self.build_scopes(fund_paste=fund_paste)

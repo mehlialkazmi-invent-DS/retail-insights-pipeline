@@ -7,6 +7,11 @@ from typing import Any, Callable, Dict, Optional
 
 CONFIG: Dict[str, Any] = {
     "customer": "your_client",
+    "run": {
+        # full       = compute KPIs from source Delta tables (default)
+        # html_only  = load saved outputs from output.path_segments and render HTML only
+        "mode": "full",
+    },
     "reporting_window": {
         # as_of_date: end anchor for the run.
         # run_min_date: optional narrow start (null/"" = YTD from Jan 1). Both align to Sun-Sat weeks.
@@ -155,6 +160,9 @@ CONFIG: Dict[str, Any] = {
     "output": {
         "save_outputs": False,
         "path_segments": ["analysis", "kpi_reports", "outputs"],
+        # Delta path per table: .../outputs/{table_name}/run_date={run_date}/
+        # run_date defaults to reporting_window.as_of_date; set explicitly to target another partition.
+        "run_date": None,
         # initial       = first-time setup; fails if output tables already exist
         # incremental   = append rows with new merge keys; skip overlaps unless allow_overwrite_existing=True
         # full_refresh  = overwrite each table with this run's output only (no merge with prior saved history)
@@ -180,6 +188,9 @@ CONFIG: Dict[str, Any] = {
         #       "total_sales_revenue": {"definition": "Net sales excluding returns."},
         #   }
         "metric_definitions": {},
+        # Weekly tab: show only the N most recent fiscal weeks (by week_start_date).
+        # Set to null to show all weeks present in kpi_long.
+        "weekly_display_weeks": 5,
     },
 }
 
@@ -199,6 +210,10 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     if "KPI_CUSTOMER" in os.environ:
         out["customer"] = os.environ["KPI_CUSTOMER"]
+
+    rn = out.setdefault("run", {})
+    if "KPI_RUN_MODE" in os.environ:
+        rn["mode"] = os.environ["KPI_RUN_MODE"].strip().lower()
 
     rw = out.setdefault("reporting_window", {})
     if "KPI_AS_OF_DATE" in os.environ:
@@ -225,6 +240,8 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
         op["save_outputs"] = _parse_bool(os.environ["KPI_SAVE_OUTPUTS"])
     if "KPI_OUTPUT_PATH" in os.environ:
         op["path_segments"] = [s.strip() for s in os.environ["KPI_OUTPUT_PATH"].split(",") if s.strip()]
+    if "KPI_OUTPUT_RUN_DATE" in os.environ:
+        op["run_date"] = os.environ["KPI_OUTPUT_RUN_DATE"].strip() or None
     if "KPI_OUTPUT_SAVE_MODE" in os.environ:
         op["save_mode"] = os.environ["KPI_OUTPUT_SAVE_MODE"].strip().lower()
     if "KPI_ALLOW_OVERWRITE_EXISTING" in os.environ:
@@ -245,6 +262,9 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
         hr["output_path_segments"] = [
             s.strip() for s in os.environ["KPI_HTML_OUTPUT_PATH"].split(",") if s.strip()
         ]
+    if "KPI_HTML_WEEKLY_WEEKS" in os.environ:
+        raw = os.environ["KPI_HTML_WEEKLY_WEEKS"].strip()
+        hr["weekly_display_weeks"] = int(raw) if raw else None
 
     return out
 
@@ -324,6 +344,12 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
 
     output_cfg = cfg["output"]
     output_root = fund_paste(bucket, *output_cfg["path_segments"])
+    run_date_raw = output_cfg.get("run_date")
+    output_run_date = (
+        run_date_raw.strip()
+        if isinstance(run_date_raw, str) and run_date_raw.strip()
+        else str(window["AS_OF_DATE"])
+    )
     save_mode = output_cfg.get("save_mode", "incremental").lower()
     if save_mode not in {"initial", "incremental", "full_refresh"}:
         raise ValueError("output.save_mode must be one of: initial, incremental, full_refresh")
@@ -347,9 +373,14 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         else None
     )
 
+    run_mode = cfg.get("run", {}).get("mode", "full").lower()
+    if run_mode not in {"full", "html_only"}:
+        raise ValueError("run.mode must be one of: full, html_only")
+
     return {
         "CONFIG": cfg,
         "CUSTOMER": customer,
+        "RUN_MODE": run_mode,
         "BUCKET": bucket,
         **window,
         "EXCLUDED_STORE_IDS_FOR_SERVICE_METRICS": cfg["service_metrics"]["excluded_store_ids"],
@@ -372,10 +403,12 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "OUTPUT_SAVE_MODE": save_mode,
         "ALLOW_OVERWRITE_EXISTING": output_cfg.get("allow_overwrite_existing", False),
         "PATH_OUTPUT_ROOT": output_root,
+        "OUTPUT_RUN_DATE": output_run_date,
         # HTML report
         "HTML_REPORT_ENABLED": html_cfg.get("enabled", True),
         "HTML_REPORT_FILENAME": html_filename,
         "HTML_REPORT_TITLE": html_cfg.get("report_title") or None,
         "HTML_REPORT_METRIC_DEFS": html_cfg.get("metric_definitions") or {},
         "HTML_REPORT_OUTPUT_PATH": html_output_path,
+        "HTML_REPORT_WEEKLY_DISPLAY_WEEKS": html_cfg.get("weekly_display_weeks"),
     }

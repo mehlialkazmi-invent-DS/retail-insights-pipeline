@@ -76,6 +76,25 @@ def build_time_grain_from_daily_data(
     return fiscal_cal_out, _build_fiscal_week_frame(fiscal_cal_out)
 
 
+def build_fiscal_week_only(ctx: KPIContext) -> None:
+    """Load fiscal_cal and fiscal_week only — used by html_only run mode for weekly column order."""
+    s = ctx.settings
+    start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
+
+    if s["USE_FISCAL_CALENDAR"]:
+        fiscal_cal, fiscal_week = build_fiscal_cal_and_week_from_upload(ctx, s["PATH_FISCAL"], start, end)
+        grain_label = "fiscal_cal upload"
+    else:
+        fiscal_cal, fiscal_week = build_time_grain_from_daily_data(
+            ctx, s["PATH_DAILY_DATA"], s["DAILY_TIME_COLUMNS"], start, end
+        )
+        grain_label = "daily-data year/week"
+
+    ctx.fiscal_cal = fiscal_cal.cache()
+    ctx.fiscal_week = fiscal_week.cache()
+    print("html_only time grain:", grain_label, "| fiscal weeks:", ctx.fiscal_week.count())
+
+
 def build_fiscal_and_products(ctx: KPIContext) -> None:
     """Populate ctx.fiscal_cal, ctx.fiscal_week, ctx.products_attr, ctx.active_slice_dimensions."""
     s = ctx.settings

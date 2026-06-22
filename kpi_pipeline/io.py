@@ -1,4 +1,11 @@
-"""Persist pipeline outputs to Delta with incremental merge support."""
+"""Persist pipeline outputs to Delta with incremental merge support.
+
+Output layout per table::
+
+    {PATH_OUTPUT_ROOT}/{table_name}/run_date={OUTPUT_RUN_DATE}/
+
+``OUTPUT_RUN_DATE`` defaults to ``reporting_window.as_of_date`` (override via ``output.run_date``).
+"""
 
 from __future__ import annotations
 
@@ -26,6 +33,7 @@ class SavePlan:
     output_root: str
     save_mode: str
     allow_overwrite_existing: bool
+    run_date: str = ""
     tables: List[TableSavePlan] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
@@ -35,6 +43,8 @@ class SavePlan:
 
     def print_summary(self) -> None:
         print(f"Save mode: {self.save_mode} | root: {self.output_root}")
+        if getattr(self, "run_date", None):
+            print(f"Run date partition: run_date={self.run_date}")
         print(f"Allow overwrite existing: {self.allow_overwrite_existing}")
         for table in self.tables:
             print(
@@ -54,8 +64,9 @@ TABLE_ROW_KEYS: Dict[str, Sequence[str]] = {
 }
 
 
-def _table_path(output_root: str, name: str, fund_paste) -> str:
-    return fund_paste(output_root, name)
+def _table_path(output_root: str, name: str, run_date: str, fund_paste) -> str:
+    """Resolve Delta path: {output_root}/{table_name}/run_date={run_date}/"""
+    return fund_paste(output_root, name, f"run_date={run_date}")
 
 
 def _delta_exists(spark, path: str) -> bool:
@@ -161,6 +172,7 @@ def _annotate_run_metadata(pdf: pd.DataFrame, run_as_of: str) -> pd.DataFrame:
 def build_save_plan(ctx: KPIContext, fund_paste) -> SavePlan:
     settings = ctx.settings
     output_root = settings["PATH_OUTPUT_ROOT"]
+    run_date = settings["OUTPUT_RUN_DATE"]
     save_mode = settings["OUTPUT_SAVE_MODE"]
     allow_overwrite = settings["ALLOW_OVERWRITE_EXISTING"]
 
@@ -176,10 +188,11 @@ def build_save_plan(ctx: KPIContext, fund_paste) -> SavePlan:
         output_root=output_root,
         save_mode=save_mode,
         allow_overwrite_existing=allow_overwrite,
+        run_date=run_date,
     )
 
     for name, pdf in outputs.items():
-        path = _table_path(output_root, name, fund_paste)
+        path = _table_path(output_root, name, run_date, fund_paste)
         exists = _delta_exists(ctx.spark, path)
         key_cols = TABLE_ROW_KEYS[name]
 
@@ -223,12 +236,13 @@ def save_pandas_table(
     name: str,
     pdf: pd.DataFrame,
     output_root: str,
+    run_date: str,
     fund_paste,
     save_mode: str,
     allow_overwrite_existing: bool,
     run_as_of: str,
 ) -> TableSavePlan:
-    path = _table_path(output_root, name, fund_paste)
+    path = _table_path(output_root, name, run_date, fund_paste)
     key_cols = TABLE_ROW_KEYS[name]
 
     if pdf is None or pdf.empty:
@@ -275,6 +289,38 @@ def save_pandas_table(
     return table_plan
 
 
+_SAVED_OUTPUT_TABLES = {
+    "kpi_long": "kpi_long",
+    "comparison_yoy": "comparison_yoy",
+    "comparison_qoq": "comparison_qoq",
+    "comparison_wow": "comparison_wow",
+}
+
+
+def load_saved_outputs(ctx: KPIContext, fund_paste) -> None:
+    """Load previously saved Delta output tables into ctx (for run.mode=html_only)."""
+    output_root = ctx.settings["PATH_OUTPUT_ROOT"]
+    run_date = ctx.settings["OUTPUT_RUN_DATE"]
+    spark = ctx.spark
+
+    for attr, name in _SAVED_OUTPUT_TABLES.items():
+        path = _table_path(output_root, name, run_date, fund_paste)
+        if not _delta_exists(spark, path):
+            raise ValueError(
+                f"Saved output table {name!r} not found at {path}. "
+                "Run the full pipeline with output.save_outputs=True first, "
+                f"or set output.run_date to match an existing partition."
+            )
+        pdf = _load_existing_table(spark, path)
+        setattr(ctx, attr, pdf)
+
+    if ctx.kpi_long is None or ctx.kpi_long.empty:
+        raise ValueError("Saved kpi_long is empty — nothing to render in the HTML report.")
+
+    print(f"Loaded saved outputs from {output_root} (run_date={run_date})")
+    print("kpi_long shape:", ctx.kpi_long.shape)
+
+
 def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
     if not ctx.settings["SAVE_OUTPUTS"]:
         print(
@@ -285,6 +331,7 @@ def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
             output_root=ctx.settings["PATH_OUTPUT_ROOT"],
             save_mode=ctx.settings["OUTPUT_SAVE_MODE"],
             allow_overwrite_existing=ctx.settings["ALLOW_OVERWRITE_EXISTING"],
+            run_date=ctx.settings["OUTPUT_RUN_DATE"],
         )
 
     plan = build_save_plan(ctx, fund_paste)
@@ -303,6 +350,7 @@ def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
         )
 
     output_root = ctx.settings["PATH_OUTPUT_ROOT"]
+    run_date = ctx.settings["OUTPUT_RUN_DATE"]
     save_mode = ctx.settings["OUTPUT_SAVE_MODE"]
     allow_overwrite = ctx.settings["ALLOW_OVERWRITE_EXISTING"]
     run_as_of = str(ctx.settings["AS_OF_DATE"])
@@ -321,6 +369,7 @@ def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
             name,
             pdf,
             output_root,
+            run_date,
             fund_paste,
             save_mode,
             allow_overwrite,

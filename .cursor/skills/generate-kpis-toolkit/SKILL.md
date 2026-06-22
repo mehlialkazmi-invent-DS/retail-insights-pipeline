@@ -49,6 +49,7 @@ main.ipynb         Cell 1: config summary
 kpi_pipeline/
   context.py       KPIContext dataclass — shared state
   runner.py        KPIRunner: build_dimensions → build_scopes → build_kpis → build_comparisons → build_html_report
+                   run.mode=html_only → load_saved_outputs + build_fiscal_week_only (skip pipeline)
   fiscal.py        fiscal_cal + fiscal_week frames; product attributes + slice dims
   inputs.py        cached Delta reads (daily_data_raw, lost_sales_weekly_base) + input_filters
   scope.py         defined scope, score scope (hybrid), manual adjustments
@@ -56,8 +57,8 @@ kpi_pipeline/
   metrics.py       compute_kpis: sales, WOS, mean_stock, instock
   kpi_long.py      build_kpi_long: loops periods × slices → pandas
   comparisons.py   YoY / QoQ / WoW + build_scope_diff
-  io.py            incremental Delta saves, save plan, metadata stamping
-  html_report.py   standalone HTML renderer (tabbed, offline)
+  io.py            incremental Delta saves, save plan, load_saved_outputs (html_only mode)
+  html_report.py   standalone HTML renderer — period → dimension → value tabs; slices inferred from kpi_long
 ```
 
 ---
@@ -139,12 +140,15 @@ All-store sales totals include these stores; only service-specific metrics exclu
 "output": {
     "save_outputs": False,          # True to write Delta tables
     "path_segments": ["analysis", "kpi_reports", "outputs"],
+    "run_date": None,               # null = reporting_window.as_of_date → run_date=YYYY-MM-DD partition
     "save_mode": "incremental",     # initial | incremental | full_refresh
     "allow_overwrite_existing": False,
 }
 ```
 
-**Path:** `{bucket}/{path_segments}/{table_name}/` — default `analysis/kpi_reports/outputs/`.
+**Path:** `{bucket}/{path_segments}/{table_name}/run_date={run_date}/` — e.g. `analysis/kpi_reports/outputs/kpi_long/run_date=2026-06-15/`.
+
+`run_date` defaults to `as_of_date`. Each run date gets its own Delta partition; incremental merge applies **within** that partition only.
 
 **Tables saved:** `kpi_long`, `comparison_yoy`, `comparison_qoq`, `comparison_wow`, `scope_diff`.
 
@@ -198,7 +202,31 @@ All-store sales totals include these stores; only service-specific metrics exclu
 - Comparison tables are saved from the current run window, not recomputed from merged history.
 - Empty tables (e.g. comparisons on a narrow window) are skipped on write — prior Delta data left unchanged.
 
-### 3.7 HTML report
+### 3.7 Run mode
+
+```python
+"run": {
+    "mode": "full",   # full = compute from source Delta; html_only = load saved outputs + render HTML
+}
+```
+
+| mode | Behaviour |
+|------|-----------|
+| `full` (default) | Full pipeline: scope → KPIs → comparisons → optional save → HTML |
+| `html_only` | Load `kpi_long` and comparison tables from `.../outputs/{table}/run_date={OUTPUT_RUN_DATE}/`; render HTML only — no pipeline compute |
+
+**html_only requirements:**
+- Saved outputs must exist at the `run_date` partition under `PATH_OUTPUT_ROOT` (from a prior `save_outputs=True` run).
+- `OUTPUT_RUN_DATE` = `output.run_date` or `as_of_date` — set explicitly to load a different snapshot.
+- `fund.paste` is still required to resolve output paths.
+- Fiscal week frame is loaded for weekly column ordering in the HTML report.
+- Slice dimensions are inferred from `kpi_long` (configured order first, then any extras in data).
+
+**Notebook:** Cell 3 calls `runner.run()` which branches automatically. Input preview and save cells are not needed in `html_only` mode.
+
+Environment override: `KPI_RUN_MODE=html_only`
+
+### 3.8 HTML report
 
 ```python
 "html_report": {
@@ -207,14 +235,22 @@ All-store sales totals include these stores; only service-specific metrics exclu
     "report_title": None,                                         # None = "<CUSTOMER> KPI Report"
     "output_path_segments": None,                                 # None = local only; or path segs to also save under datastore
     "metric_definitions": {},                                     # override any entry in DEFAULT_METRIC_DEFINITIONS
+    "weekly_display_weeks": 5,                                      # Weekly tab: most recent N weeks; null = all
 }
 ```
 
-The report has four tabs:
-- **Annual** — KPI table by year + YoY comparison, per slice sub-tab
+The report has four top-level tabs:
+- **Annual** — KPI table by year + YoY comparison
 - **Quarter** — KPI table by fiscal quarter + QoQ comparison
-- **Weekly** — KPI table by fiscal week + WoW comparison (weekly columns sorted by `week_start_date`, not `Year_Week` string order)
+- **Weekly** — KPI table for the **most recent N fiscal weeks** (default 5; sorted by `week_start_date`) + WoW comparison
 - **Metric Details** — plain-English definition, store scope, and formula for every active metric
+
+Within each period tab, navigation is three levels:
+1. **Period** (horizontal) — Annual / Quarter / Weekly
+2. **Slice dimension** (horizontal pills) — Overall + every slice column present in `kpi_long` (inferred automatically; not hard-coded to brand)
+3. **Dimension value** (vertical sidebar) — one clickable tab per value (e.g. each brand); Overall shows a single panel
+
+The executive header shows client, reporting window, scope mode, slice dimensions, and generated timestamp.
 
 Metric definitions can be customised per-client:
 ```python
@@ -252,9 +288,12 @@ Metric definitions can be customised per-client:
 | Filter inputs | `input_filters.{defined_scope,lost_sales,daily_data}` |
 | Enable output saves | `output.save_outputs: True` |
 | Change output path | `output.path_segments` |
+| Change run_date partition | `output.run_date` (default `as_of_date`) |
 | Toggle HTML report | `html_report.enabled` |
+| HTML only from saved data | `run.mode: "html_only"` |
 | Change HTML title | `html_report.report_title` |
 | Override a metric definition | `html_report.metric_definitions` |
+| Weekly columns shown in HTML | `html_report.weekly_display_weeks` (default 5; `null` = all weeks) |
 | Add a scope addition/removal | `scope_adjustments.additions` / `.removals` |
 
 ---
@@ -354,8 +393,9 @@ render_kpi_html → standalone HTML file
 | Empty slice dimension | Column missing from products table or derived SQL failed validation |
 | Score backfills all weeks | Defined scope path wrong or defined scope table empty for the window |
 | WOS unexpectedly high/low | Check `excluded_store_ids` — missing e-com IDs inflate network inventory |
-| `kpi_long is empty — run pipeline first` | Called `build_html_report` before `runner.run()` |
+| `kpi_long is empty — run pipeline first` | Called `build_html_report` before `runner.run()`, or saved outputs missing in `html_only` mode |
 | HTML file not generated | `html_report.enabled` is False, or check the Cell 6 output for errors |
+| `html_only` fails on load | Output tables not at `.../run_date={OUTPUT_RUN_DATE}/` — run full save first or set `output.run_date` |
 | WoW looks wrong with sparse weeks | WoW compares last two weeks in `kpi_long`, not necessarily consecutive fiscal weeks |
 
 ---
@@ -408,10 +448,13 @@ render_kpi_html → standalone HTML file
 | `KPI_OUTPUT_SAVE_MODE` | `output.save_mode` |
 | `KPI_ALLOW_OVERWRITE_EXISTING` | `output.allow_overwrite_existing` |
 | `KPI_OUTPUT_PATH` | `output.path_segments` (comma-separated) |
+| `KPI_OUTPUT_RUN_DATE` | `output.run_date` partition key |
 | `KPI_HTML_ENABLED` | `html_report.enabled` |
 | `KPI_HTML_FILENAME` | `html_report.filename` |
 | `KPI_HTML_TITLE` | `html_report.report_title` |
 | `KPI_HTML_OUTPUT_PATH` | `html_report.output_path_segments` (comma-separated) |
+| `KPI_HTML_WEEKLY_WEEKS` | `html_report.weekly_display_weeks` (`null`/empty = all weeks) |
+| `KPI_RUN_MODE` | `run.mode` (`full` or `html_only`) |
 
 ---
 

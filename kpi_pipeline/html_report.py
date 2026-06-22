@@ -5,17 +5,22 @@ Entry point
     render_kpi_html(ctx, output_path, ...)
 
 Produces a self-contained, offline HTML file with:
-  * site-header with report-info chips (client, period, scope mode, generated timestamp)
+  * Executive-style header (client, reporting window, scope, slices)
   * CSS-only major tabs: Annual / Quarter / Weekly / Metric Details
-  * Within each period tab: dim sub-tabs (Overall + each active slice dimension)
+  * Within each period tab: dimension tabs (Overall + every slice column in data)
+  * Within each slice dimension: vertical value tabs (one KPI panel per value)
+  * Weekly tab columns limited to the most recent N fiscal weeks (configurable, default 5)
   * KPI tables with category row coloring (revenue / service / inventory / scale)
-  * Comparison section per dim (YoY in Annual, QoQ in Quarter, WoW in Weekly)
+  * Comparison section per value panel (YoY / QoQ / WoW)
   * Metric Details tab: definition, store scope, and formula for every active metric
+
+Slice dimensions and values are inferred from ``kpi_long`` — no hard-coded brand logic.
 """
 from __future__ import annotations
 
 import datetime
 import html as _html
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -181,19 +186,21 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
 
 _CSS_BASE = """\
   :root {
-    --ink: #0f172a;
-    --ink-soft: #334155;
-    --bg: #f1f5f9;
+    --ink: #0c1222;
+    --ink-soft: #3d4a63;
+    --bg: #eef1f6;
     --surface: #ffffff;
-    --text: #334155;
-    --muted: #64748b;
-    --border: #e2e8f0;
-    --accent: #1e40af;
+    --text: #3d4a63;
+    --muted: #6b7a94;
+    --border: #dde3ed;
+    --accent: #1a3a6b;
+    --accent-light: #e8eef8;
     --good: #047857;
     --bad: #b91c1c;
-    --neutral-bg: #f8fafc;
-    --radius: 8px;
-    --shadow: 0 1px 3px rgba(15,23,42,.07);
+    --neutral-bg: #f7f9fc;
+    --header-bg: linear-gradient(135deg, #0c1a33 0%, #1a3a6b 100%);
+    --radius: 10px;
+    --shadow: 0 2px 8px rgba(12,18,34,.08);
   }
   *, *::before, *::after { box-sizing: border-box; }
   body {
@@ -201,46 +208,83 @@ _CSS_BASE = """\
     min-height: 100vh;
     background: var(--bg);
     color: var(--text);
-    font-family: ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    font-family: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
     font-feature-settings: "tnum" 1;
     -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: min(1680px, 100vw - 32px); margin: 0 auto; padding: 20px 16px 56px; }
+  .wrap { max-width: min(1720px, 100vw - 40px); margin: 0 auto; padding: 24px 20px 64px; }
 
-  /* --- Site header --- */
+  /* --- Executive header --- */
   .site-header {
-    margin-bottom: 20px;
-    padding: 18px 22px 20px;
-    background: var(--surface);
-    border: 1px solid var(--border);
+    margin-bottom: 24px;
+    padding: 28px 32px;
+    background: var(--header-bg);
     border-radius: var(--radius);
     box-shadow: var(--shadow);
+    color: #fff;
+  }
+  .header-top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 16px 32px;
+    margin-bottom: 22px;
+  }
+  .header-brand .eyebrow {
+    margin: 0 0 6px;
+    font-size: .7rem;
+    font-weight: 600;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,.65);
   }
   .site-header h1 {
     margin: 0;
-    font-size: 1.25rem;
+    font-size: 1.65rem;
     font-weight: 700;
-    letter-spacing: -.02em;
-    color: var(--ink);
+    letter-spacing: -.025em;
+    color: #fff;
+    line-height: 1.2;
   }
-
-  /* --- Report info chips --- */
-  .report-info {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 14px;
+  .header-asof {
+    text-align: right;
+    font-size: .8rem;
+    color: rgba(255,255,255,.75);
   }
-  .info-chip {
-    padding: 4px 11px;
-    border-radius: 20px;
-    border: 1px solid var(--border);
-    background: var(--neutral-bg);
-    font-size: .75rem;
-    color: var(--ink-soft);
-    white-space: nowrap;
+  .header-asof strong {
+    display: block;
+    font-size: 1rem;
+    color: #fff;
+    margin-top: 2px;
   }
-  .info-chip strong { color: var(--ink); }
+  .header-meta {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+  }
+  .meta-card {
+    padding: 12px 16px;
+    background: rgba(255,255,255,.08);
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 8px;
+  }
+  .meta-label {
+    display: block;
+    font-size: .65rem;
+    font-weight: 600;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,.55);
+    margin-bottom: 4px;
+  }
+  .meta-value {
+    display: block;
+    font-size: .875rem;
+    font-weight: 600;
+    color: #fff;
+    line-height: 1.35;
+  }
 
   /* --- Main panel card --- */
   .panel {
@@ -255,7 +299,8 @@ _CSS_BASE = """\
 
   /* --- Hidden radio anchors --- */
   .top-tab-anchor,
-  .dim-tab-anchor {
+  .dim-tab-anchor,
+  .value-tab-anchor {
     position: absolute;
     opacity: 0;
     width: 0;
@@ -263,7 +308,7 @@ _CSS_BASE = """\
     pointer-events: none;
   }
 
-  /* --- Top-level tab bar (Annual / Quarter / Weekly / Metric Details) --- */
+  /* --- Top-level period tabs --- */
   .top-tab-bar {
     display: flex;
     border-bottom: 1px solid var(--border);
@@ -271,7 +316,7 @@ _CSS_BASE = """\
   }
   .top-tab {
     flex: 1;
-    padding: 11px 10px;
+    padding: 13px 12px;
     text-align: center;
     font-size: .875rem;
     font-weight: 600;
@@ -282,19 +327,20 @@ _CSS_BASE = """\
     transition: color .12s, background .12s;
   }
   .top-tab:last-child { border-right: none; }
+  .top-panel { display: none; padding: 22px 24px 28px; }
 
-  .top-panel { display: none; padding: 20px 22px 24px; }
-
-  /* --- Dim sub-tab bar --- */
+  /* --- Dimension tabs (horizontal) --- */
   .dim-tab-bar {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
-    margin-bottom: 18px;
+    gap: 8px;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
   }
   .dim-tab {
-    padding: 6px 15px;
-    border-radius: 20px;
+    padding: 7px 18px;
+    border-radius: 6px;
     border: 1px solid var(--border);
     background: var(--neutral-bg);
     font-size: .8125rem;
@@ -304,9 +350,47 @@ _CSS_BASE = """\
     user-select: none;
     transition: background .12s, color .12s, border-color .12s;
   }
-
-  /* --- Dim panels --- */
   .kpi-dim-panel { display: none; }
+
+  /* --- Value tabs (vertical sidebar) --- */
+  .value-shell { position: relative; }
+  .value-layout {
+    display: flex;
+    gap: 0;
+    min-height: 200px;
+  }
+  .value-tab-bar {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    width: 168px;
+    max-height: 520px;
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+    background: var(--neutral-bg);
+    border-radius: 6px 0 0 6px;
+  }
+  .value-tab {
+    display: block;
+    padding: 10px 14px;
+    font-size: .8125rem;
+    font-weight: 500;
+    color: var(--ink-soft);
+    cursor: pointer;
+    user-select: none;
+    border-bottom: 1px solid var(--border);
+    transition: background .12s, color .12s;
+    text-align: left;
+    line-height: 1.3;
+    word-break: break-word;
+  }
+  .value-tab:last-child { border-bottom: none; }
+  .value-panels {
+    flex: 1;
+    min-width: 0;
+    padding: 0 0 0 20px;
+  }
+  .value-panel { display: none; }
 
   /* --- KPI table --- */
   .table-wrap { overflow-x: auto; }
@@ -325,10 +409,10 @@ _CSS_BASE = """\
     white-space: nowrap;
   }
   .kpi-table thead th {
-    background: #eef2ff;
-    color: #1e3a8a;
+    background: var(--accent-light);
+    color: var(--accent);
     font-weight: 700;
-    font-size: .75rem;
+    font-size: .73rem;
     letter-spacing: .04em;
     text-transform: uppercase;
   }
@@ -343,30 +427,17 @@ _CSS_BASE = """\
   .kpi-table thead .cell-kpi { border-left-color: transparent; }
   tbody tr:nth-child(even) td { background-color: #fafbfc; }
 
-  /* KPI category row coloring */
   tr.cat-revenue .cell-kpi  { border-left-color: #1e3a5f; }
   tr.cat-service .cell-kpi  { border-left-color: #0f766e; }
   tr.cat-inventory .cell-kpi { border-left-color: #9a3412; }
   tr.cat-scale .cell-kpi    { border-left-color: #6b21a8; }
   tr.cat-general .cell-kpi  { border-left-color: #475569; }
 
-  /* Dimension group header row inside KPI table */
-  tr.group-header td {
-    font-weight: 700;
-    font-size: .8rem;
-    color: var(--ink-soft);
-    background: #f0f4ff;
-    border-top: 2px solid #d5ddf5;
-    padding: 6px 14px;
-    text-align: left;
-  }
-  tr.group-header:first-child td { border-top: none; }
-
   /* --- Comparison table --- */
   .cmp-section { margin-top: 28px; }
   .cmp-label {
     margin: 0 0 10px;
-    font-size: .75rem;
+    font-size: .73rem;
     font-weight: 700;
     letter-spacing: .06em;
     text-transform: uppercase;
@@ -394,14 +465,6 @@ _CSS_BASE = """\
   }
   .cmp-table td { text-align: right; }
   .cmp-table td:first-child { text-align: left; }
-  .cmp-table .cell-dim {
-    font-weight: 700;
-    font-size: .8rem;
-    color: var(--ink-soft);
-    background: #f0f4ff;
-    border-top: 2px solid #d5ddf5;
-    text-align: left;
-  }
   .chg-pos { color: var(--good); font-weight: 700; }
   .chg-neg { color: var(--bad);  font-weight: 700; }
 
@@ -419,8 +482,8 @@ _CSS_BASE = """\
     vertical-align: top;
   }
   .def-table thead th {
-    background: #eef2ff;
-    color: #1e3a8a;
+    background: var(--accent-light);
+    color: var(--accent);
     font-size: .73rem;
     font-weight: 700;
     text-transform: uppercase;
@@ -439,12 +502,11 @@ _CSS_BASE = """\
   .scope-all     { background: #eff6ff; color: #1e40af; }
   .scope-service { background: #ecfdf5; color: #065f46; }
   .def-table .formula {
-    font-family: ui-monospace,"Cascadia Code",Menlo,monospace;
+    font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
     font-size: .75rem;
     color: var(--muted);
   }
 
-  /* --- Footnote --- */
   .footnote {
     margin-top: 24px;
     padding-top: 12px;
@@ -455,51 +517,103 @@ _CSS_BASE = """\
 
   @media print {
     body { background: #fff; }
+    .site-header { background: #0c1a33; }
     .site-header, .panel { box-shadow: none; }
-    .top-tab-anchor, .dim-tab-anchor { display: none; }
-    .top-panel, .kpi-dim-panel { display: block !important; }
+    .top-tab-anchor, .dim-tab-anchor, .value-tab-anchor { display: none; }
+    .top-panel, .kpi-dim-panel, .value-panel { display: block !important; }
   }
 """
 
 
-def _tab_visibility_css(period_types: List[str], dims: List[str]) -> str:
-    """Generate CSS rules for tab visibility based on the actual period types and dims present."""
+def _safe_id(*parts: str) -> str:
+    """Build a CSS-safe id fragment from arbitrary strings."""
+    raw = "-".join(str(p) for p in parts)
+    return re.sub(r"[^a-zA-Z0-9_-]", "-", raw)
+
+
+def _dim_label(dimension: str) -> str:
+    if dimension == "overall":
+        return "Overall"
+    return dimension.replace("_", " ").title()
+
+
+def _infer_dimensions(kpi_long: pd.DataFrame, configured_slices: List[str]) -> List[str]:
+    """Return dimension tab order: overall first, then configured slices, then any extras in data."""
+    data_dims = set(kpi_long["dimension"].unique())
+    dims = ["overall"] if "overall" in data_dims else []
+    for d in configured_slices:
+        if d in data_dims and d not in dims:
+            dims.append(d)
+    for d in sorted(data_dims):
+        if d != "overall" and d not in dims:
+            dims.append(d)
+    return dims or ["overall"]
+
+
+def _dimension_values(
+    kpi_long: pd.DataFrame,
+    period_type: str,
+    dimension: str,
+) -> List[str]:
+    sub = kpi_long[
+        (kpi_long["period_type"] == period_type) & (kpi_long["dimension"] == dimension)
+    ]
+    if sub.empty:
+        return []
+    return sorted(sub["dimension_value"].unique().tolist(), key=lambda x: str(x))
+
+
+def _tab_visibility_css(period_types: List[str], dims_by_period: Dict[str, List[str]], values_by_dim: Dict[str, List[str]]) -> str:
+    """Generate CSS rules for three-level tab visibility."""
     lines: List[str] = []
 
-    # Top-level panel visibility
     for pt in period_types:
         lines.append(
-            f"  #kpi-tab-{pt}:checked ~ .top-panels .top-panel-{pt} {{ display: block; }}"
+            f"  #kpi-tab-{_safe_id(pt)}:checked ~ .top-panels .top-panel-{_safe_id(pt)} {{ display: block; }}"
         )
-    lines.append(
-        "  #kpi-tab-details:checked ~ .top-panels .top-panel-details { display: block; }"
-    )
-
-    # Top tab active label highlight
-    for pt in period_types:
         lines.append(
-            f"  #kpi-tab-{pt}:checked ~ .top-tab-bar label[for='kpi-tab-{pt}'] "
+            f"  #kpi-tab-{_safe_id(pt)}:checked ~ .top-tab-bar label[for='kpi-tab-{_safe_id(pt)}'] "
             f"{{ background: var(--surface); color: var(--ink); "
             f"box-shadow: inset 0 -3px 0 var(--accent); }}"
         )
+
+        dims = dims_by_period.get(pt, ["overall"])
+        for di, dim in enumerate(dims):
+            dim_id = _safe_id(pt, dim)
+            lines.append(
+                f"  #kpi-dim-{dim_id}:checked "
+                f"~ .dim-panels-{_safe_id(pt)} .dim-panel-{dim_id} {{ display: block; }}"
+            )
+            lines.append(
+                f"  #kpi-dim-{dim_id}:checked "
+                f"~ .dim-tab-bar-{_safe_id(pt)} label[for='kpi-dim-{dim_id}'] "
+                f"{{ background: var(--accent); color: #fff; border-color: var(--accent); }}"
+            )
+
+            if dim == "overall":
+                continue
+            val_key = f"{pt}|{dim}"
+            for vi, _ in enumerate(values_by_dim.get(val_key, [])):
+                val_id = _safe_id(pt, dim, str(vi))
+                lines.append(
+                    f"  #kpi-val-{val_id}:checked "
+                    f"~ .value-layout .value-panel-{val_id} {{ display: block; }}"
+                )
+                lines.append(
+                    f"  #kpi-val-{val_id}:checked "
+                    f"~ .value-layout .value-tab-bar label[for='kpi-val-{val_id}'] "
+                    f"{{ background: var(--accent-light); color: var(--accent); font-weight: 700; "
+                    f"border-left: 3px solid var(--accent); }}"
+                )
+
+    lines.append(
+        "  #kpi-tab-details:checked ~ .top-panels .top-panel-details { display: block; }"
+    )
     lines.append(
         "  #kpi-tab-details:checked ~ .top-tab-bar label[for='kpi-tab-details'] "
         "{ background: var(--surface); color: var(--ink); "
         "box-shadow: inset 0 -3px 0 var(--accent); }"
     )
-
-    # Dim panel visibility and active label highlight per period
-    for pt in period_types:
-        for i in range(len(dims)):
-            lines.append(
-                f"  #kpi-dim-{pt}-{i}:checked "
-                f"~ .dim-panels-{pt} .dim-panel-{pt}-{i} {{ display: block; }}"
-            )
-            lines.append(
-                f"  #kpi-dim-{pt}-{i}:checked "
-                f"~ .dim-tab-bar-{pt} label[for='kpi-dim-{pt}-{i}'] "
-                f"{{ background: var(--accent); color: #fff; border-color: var(--accent); }}"
-            )
 
     return "\n".join(lines)
 
@@ -509,7 +623,6 @@ def _tab_visibility_css(period_types: List[str], dims: List[str]) -> str:
 # ---------------------------------------------------------------------------
 
 def _fmt(metric: str, value: Any) -> str:
-    """Format a KPI value for display in the HTML table."""
     if value is None:
         return "—"
     try:
@@ -566,36 +679,54 @@ def _sort_period_labels(
     period_type: str,
     week_start_by_period: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
-    """Sort period labels chronologically (weekly uses week_start_date, not Year_Week strings)."""
     if period_type == "weekly" and week_start_by_period:
         return sorted(periods, key=lambda p: week_start_by_period.get(p, p))
     return sorted(periods)
 
 
-def _pivot_period(
+def _display_period_labels(
+    periods: List[str],
+    period_type: str,
+    week_start_by_period: Optional[Dict[str, Any]] = None,
+    weekly_display_weeks: Optional[int] = None,
+) -> List[str]:
+    """Return period labels for HTML display; weekly is capped to the most recent N weeks."""
+    sorted_periods = _sort_period_labels(periods, period_type, week_start_by_period)
+    if (
+        period_type == "weekly"
+        and weekly_display_weeks is not None
+        and weekly_display_weeks > 0
+        and len(sorted_periods) > weekly_display_weeks
+    ):
+        return sorted_periods[-weekly_display_weeks:]
+    return sorted_periods
+
+
+def _pivot_single_value(
     kpi_long: pd.DataFrame,
     period_type: str,
     dimension: str,
+    dimension_value: str,
     metric_cols: List[str],
     week_start_by_period: Optional[Dict[str, Any]] = None,
+    weekly_display_weeks: Optional[int] = None,
 ) -> Tuple[pd.DataFrame, List[str]]:
-    """
-    Filter kpi_long to (period_type, dimension) and return a tidy frame
-    plus the sorted list of periods.
-    """
     sub = kpi_long[
         (kpi_long["period_type"] == period_type)
         & (kpi_long["dimension"] == dimension)
+        & (kpi_long["dimension_value"].astype(str) == str(dimension_value))
     ].copy()
     if sub.empty:
         return pd.DataFrame(), []
-    periods = _sort_period_labels(
+    periods = _display_period_labels(
         sub["period"].unique().tolist(),
         period_type,
         week_start_by_period,
+        weekly_display_weeks,
     )
-    keep = ["period", "dimension_value"] + [m for m in metric_cols if m in sub.columns]
-    return sub[keep], periods
+    sub = sub[sub["period"].isin(periods)]
+    keep = ["period"] + [m for m in metric_cols if m in sub.columns]
+    return sub[keep].drop_duplicates(subset=["period"]), periods
 
 
 def _kpi_table_html(
@@ -605,42 +736,28 @@ def _kpi_table_html(
     labels: Dict[str, str],
 ) -> str:
     if sub.empty or not periods:
-        return '<p style="color:#64748b;font-size:.875rem">No data for this period and dimension.</p>'
+        return '<p style="color:#64748b;font-size:.875rem">No data for this selection.</p>'
 
-    dvals = sorted(sub["dimension_value"].unique().tolist(), key=lambda x: str(x))
-    show_group_header = len(dvals) > 1
-
+    grp = sub.drop_duplicates(subset=["period"]).set_index("period")
     per_ths = "".join(f"<th>{_esc(p)}</th>" for p in periods)
     head = f"<thead><tr><th class='cell-kpi'>Metric</th>{per_ths}</tr></thead>"
 
     rows: List[str] = []
-    for dval in dvals:
-        grp = (
-            sub[sub["dimension_value"] == dval]
-            .drop_duplicates(subset=["period"])
-            .set_index("period")
+    for metric in metric_cols:
+        if metric not in grp.columns:
+            continue
+        cat = _CAT.get(metric, "general")
+        label = labels.get(metric, metric.replace("_", " ").title())
+        cells = "".join(
+            f"<td>{_esc(_fmt(metric, grp.at[p, metric]) if p in grp.index else '—')}</td>"
+            for p in periods
         )
-        if show_group_header:
-            rows.append(
-                f"<tr class='group-header'>"
-                f"<td colspan='{1 + len(periods)}'>{_esc(str(dval))}</td>"
-                f"</tr>"
-            )
-        for metric in metric_cols:
-            if metric not in grp.columns:
-                continue
-            cat = _CAT.get(metric, "general")
-            label = labels.get(metric, metric.replace("_", " ").title())
-            cells = "".join(
-                f"<td>{_esc(_fmt(metric, grp.at[p, metric]) if p in grp.index else '—')}</td>"
-                for p in periods
-            )
-            rows.append(
-                f"<tr class='cat-{_esc(cat)}'>"
-                f"<td class='cell-kpi'>{_esc(label)}</td>"
-                f"{cells}"
-                f"</tr>"
-            )
+        rows.append(
+            f"<tr class='cat-{_esc(cat)}'>"
+            f"<td class='cell-kpi'>{_esc(label)}</td>"
+            f"{cells}"
+            f"</tr>"
+        )
 
     return (
         "<div class='table-wrap'>"
@@ -649,18 +766,21 @@ def _kpi_table_html(
     )
 
 
-# ---------------------------------------------------------------------------
-# Comparison section
-# ---------------------------------------------------------------------------
-
-def _comparison_html(comp_df: Optional[pd.DataFrame], dimension: str, comp_label: str) -> str:
+def _comparison_html(
+    comp_df: Optional[pd.DataFrame],
+    dimension: str,
+    dimension_value: str,
+    comp_label: str,
+) -> str:
     if comp_df is None or comp_df.empty:
         return ""
-    sub = comp_df[comp_df["dimension"] == dimension]
+    sub = comp_df[
+        (comp_df["dimension"] == dimension)
+        & (comp_df["dimension_value"].astype(str) == str(dimension_value))
+    ]
     if sub.empty:
         return ""
 
-    # Derive column headers from first row (consistent within one comparison run)
     first = sub.iloc[0]
     prior_col = str(first.get("prior_period", "Prior"))
     current_col = str(first.get("current_period", "Current"))
@@ -674,26 +794,17 @@ def _comparison_html(comp_df: Optional[pd.DataFrame], dimension: str, comp_label
         f"</tr></thead>"
     )
 
-    dvals = sorted(sub["dimension_value"].unique().tolist(), key=lambda x: str(x))
-    show_group_header = len(dvals) > 1
-
     rows: List[str] = []
-    for dval in dvals:
-        grp = sub[sub["dimension_value"] == dval]
-        if show_group_header:
-            rows.append(
-                f"<tr><td colspan='4' class='cell-dim'>{_esc(str(dval))}</td></tr>"
-            )
-        for _, row in grp.iterrows():
-            chg = str(row.get("change_display", "—"))
-            rows.append(
-                f"<tr>"
-                f"<td>{_esc(str(row.get('KPI', '—')))}</td>"
-                f"<td>{_esc(str(row.get('prior_display', '—')))}</td>"
-                f"<td>{_esc(str(row.get('current_display', '—')))}</td>"
-                f"<td class='{_esc(_chg_class(chg))}'>{_esc(chg)}</td>"
-                f"</tr>"
-            )
+    for _, row in sub.iterrows():
+        chg = str(row.get("change_display", "—"))
+        rows.append(
+            f"<tr>"
+            f"<td>{_esc(str(row.get('KPI', '—')))}</td>"
+            f"<td>{_esc(str(row.get('prior_display', '—')))}</td>"
+            f"<td>{_esc(str(row.get('current_display', '—')))}</td>"
+            f"<td class='{_esc(_chg_class(chg))}'>{_esc(chg)}</td>"
+            f"</tr>"
+        )
 
     return (
         "<div class='cmp-section'>"
@@ -705,11 +816,28 @@ def _comparison_html(comp_df: Optional[pd.DataFrame], dimension: str, comp_label
     )
 
 
-# ---------------------------------------------------------------------------
-# Dim panel content (KPI table + comparison)
-# ---------------------------------------------------------------------------
+def _value_panel_content(
+    kpi_long: pd.DataFrame,
+    period_type: str,
+    dimension: str,
+    dimension_value: str,
+    metric_cols: List[str],
+    labels: Dict[str, str],
+    comp_df: Optional[pd.DataFrame],
+    comp_label: str,
+    week_start_by_period: Optional[Dict[str, Any]] = None,
+    weekly_display_weeks: Optional[int] = None,
+) -> str:
+    sub, periods = _pivot_single_value(
+        kpi_long, period_type, dimension, dimension_value, metric_cols,
+        week_start_by_period, weekly_display_weeks,
+    )
+    table = _kpi_table_html(sub, periods, metric_cols, labels)
+    cmp = _comparison_html(comp_df, dimension, dimension_value, comp_label)
+    return table + cmp
 
-def _dim_panel_content(
+
+def _value_tabs_html(
     kpi_long: pd.DataFrame,
     period_type: str,
     dimension: str,
@@ -718,18 +846,46 @@ def _dim_panel_content(
     comp_df: Optional[pd.DataFrame],
     comp_label: str,
     week_start_by_period: Optional[Dict[str, Any]] = None,
+    weekly_display_weeks: Optional[int] = None,
 ) -> str:
-    sub, periods = _pivot_period(
-        kpi_long, period_type, dimension, metric_cols, week_start_by_period
+    values = _dimension_values(kpi_long, period_type, dimension)
+    if not values:
+        return '<p style="color:#64748b;font-size:.875rem">No values for this dimension.</p>'
+    if len(values) == 1:
+        return _value_panel_content(
+            kpi_long, period_type, dimension, values[0],
+            metric_cols, labels, comp_df, comp_label, week_start_by_period, weekly_display_weeks,
+        )
+
+    radios = "".join(
+        f"<input type='radio' class='value-tab-anchor' name='val-{_safe_id(period_type, dimension)}' "
+        f"id='kpi-val-{_safe_id(period_type, dimension, str(i))}'{' checked' if i == 0 else ''}>"
+        for i, _ in enumerate(values)
     )
-    table = _kpi_table_html(sub, periods, metric_cols, labels)
-    cmp = _comparison_html(comp_df, dimension, comp_label)
-    return table + cmp
 
+    tab_labels = "".join(
+        f"<label for='kpi-val-{_safe_id(period_type, dimension, str(i))}' class='value-tab'>"
+        f"{_esc(str(v))}</label>"
+        for i, v in enumerate(values)
+    )
 
-# ---------------------------------------------------------------------------
-# Period tab builder (dim sub-tabs + content)
-# ---------------------------------------------------------------------------
+    panels = "".join(
+        f"<div class='value-panel value-panel-{_safe_id(period_type, dimension, str(i))}'>"
+        f"{_value_panel_content(kpi_long, period_type, dimension, v, metric_cols, labels, comp_df, comp_label, week_start_by_period, weekly_display_weeks)}"
+        f"</div>"
+        for i, v in enumerate(values)
+    )
+
+    return (
+        f"<div class='value-shell'>"
+        f"{radios}"
+        f"<div class='value-layout'>"
+        f"<div class='value-tab-bar'>{tab_labels}</div>"
+        f"<div class='value-panels'>{panels}</div>"
+        f"</div>"
+        f"</div>"
+    )
+
 
 def _period_tab_html(
     kpi_long: pd.DataFrame,
@@ -740,38 +896,43 @@ def _period_tab_html(
     comp_df: Optional[pd.DataFrame],
     comp_label: str,
     week_start_by_period: Optional[Dict[str, Any]] = None,
+    weekly_display_weeks: Optional[int] = None,
 ) -> str:
-    # Radio inputs for dim tabs (must precede tab bar and panels in DOM)
+    pt_id = _safe_id(period_type)
+
     radios = "".join(
-        f"<input type='radio' class='dim-tab-anchor' name='dim-{_esc(period_type)}' "
-        f"id='kpi-dim-{_esc(period_type)}-{i}'{' checked' if i == 0 else ''}>"
-        for i, _ in enumerate(dims)
+        f"<input type='radio' class='dim-tab-anchor' name='dim-{pt_id}' "
+        f"id='kpi-dim-{_safe_id(period_type, dim)}'{' checked' if i == 0 else ''}>"
+        for i, dim in enumerate(dims)
     )
 
-    # Dim tab labels
     tab_labels = "".join(
-        f"<label for='kpi-dim-{_esc(period_type)}-{i}' class='dim-tab'>"
-        f"{_esc(dim.replace('_', ' ').title() if dim != 'overall' else 'Overall')}"
-        f"</label>"
-        for i, dim in enumerate(dims)
+        f"<label for='kpi-dim-{_safe_id(period_type, dim)}' class='dim-tab'>"
+        f"{_esc(_dim_label(dim))}</label>"
+        for dim in dims
     )
-    tab_bar = f"<div class='dim-tab-bar dim-tab-bar-{_esc(period_type)}'>{tab_labels}</div>"
+    tab_bar = f"<div class='dim-tab-bar dim-tab-bar-{pt_id}'>{tab_labels}</div>"
 
-    # Dim panels
-    panels = "".join(
-        f"<div class='kpi-dim-panel dim-panel-{_esc(period_type)}-{i}'>"
-        f"{_dim_panel_content(kpi_long, period_type, dim, metric_cols, labels, comp_df, comp_label, week_start_by_period)}"
-        f"</div>"
-        for i, dim in enumerate(dims)
-    )
-    panels_wrap = f"<div class='dim-panels-{_esc(period_type)}'>{panels}</div>"
+    panels: List[str] = []
+    for dim in dims:
+        dim_id = _safe_id(period_type, dim)
+        if dim == "overall":
+            values = _dimension_values(kpi_long, period_type, "overall")
+            dval = values[0] if values else "overall"
+            content = _value_panel_content(
+                kpi_long, period_type, "overall", dval,
+                metric_cols, labels, comp_df, comp_label, week_start_by_period, weekly_display_weeks,
+            )
+        else:
+            content = _value_tabs_html(
+                kpi_long, period_type, dim, metric_cols, labels,
+                comp_df, comp_label, week_start_by_period, weekly_display_weeks,
+            )
+        panels.append(f"<div class='kpi-dim-panel dim-panel-{dim_id}'>{content}</div>")
 
+    panels_wrap = f"<div class='dim-panels-{pt_id}'>{''.join(panels)}</div>"
     return radios + tab_bar + panels_wrap
 
-
-# ---------------------------------------------------------------------------
-# Metric Details tab
-# ---------------------------------------------------------------------------
 
 def _metric_details_html(
     metric_cols: List[str],
@@ -807,42 +968,57 @@ def _metric_details_html(
     )
 
 
-# ---------------------------------------------------------------------------
-# Report header info chips
-# ---------------------------------------------------------------------------
-
-def _report_info_html(settings: Dict[str, Any], active_slice_dimensions: Optional[List[str]] = None) -> str:
+def _report_info_html(
+    settings: Dict[str, Any],
+    active_slice_dimensions: Optional[List[str]] = None,
+    inferred_dimensions: Optional[List[str]] = None,
+) -> str:
     customer = settings.get("CUSTOMER", "—")
     as_of = settings.get("AS_OF_DATE", "—")
     report_start = settings.get("REPORT_START_DATE", "—")
     report_end = settings.get("REPORT_END_DATE", "—")
     scope_mode = (
-        "Hybrid (defined + score backfill)"
+        "Hybrid"
         if settings.get("USE_HYBRID_SCOPE")
-        else "Defined scope only"
+        else "Defined only"
     )
-    slices = active_slice_dimensions if active_slice_dimensions is not None else (settings.get("SLICE_DIMENSIONS") or [])
-    slices_str = ", ".join(slices) if slices else "none"
-    generated = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    slice_dims = inferred_dimensions or active_slice_dimensions or settings.get("SLICE_DIMENSIONS") or []
+    slice_labels = ", ".join(_dim_label(d) for d in slice_dims if d != "overall") or "Overall only"
+    generated = datetime.datetime.now().strftime("%d %b %Y, %H:%M")
 
-    chips = [
-        ("Client", customer),
-        ("Period", f"{report_start} → {report_end}"),
-        ("As of date", str(as_of)),
-        ("Scope mode", scope_mode),
-        ("Slice dimensions", slices_str),
-        ("Generated", generated),
-    ]
-    chip_html = "".join(
-        f"<span class='info-chip'><strong>{_esc(k)}:</strong> {_esc(str(v))}</span>"
-        for k, v in chips
-    )
-    return f"<div class='report-info'>{chip_html}</div>"
+    return f"""<div class="header-top">
+      <div class="header-brand">
+        <p class="eyebrow">Retail Performance</p>
+        <h1>{_esc(settings.get('HTML_REPORT_TITLE') or f'{str(customer).upper()} KPI Report')}</h1>
+      </div>
+      <div class="header-asof">
+        Data as of
+        <strong>{_esc(str(as_of))}</strong>
+      </div>
+    </div>
+    <div class="header-meta">
+      <div class="meta-card">
+        <span class="meta-label">Reporting window</span>
+        <span class="meta-value">{_esc(str(report_start))} – {_esc(str(report_end))}</span>
+      </div>
+      <div class="meta-card">
+        <span class="meta-label">Client</span>
+        <span class="meta-value">{_esc(str(customer))}</span>
+      </div>
+      <div class="meta-card">
+        <span class="meta-label">Scope</span>
+        <span class="meta-value">{_esc(scope_mode)}</span>
+      </div>
+      <div class="meta-card">
+        <span class="meta-label">Slice dimensions</span>
+        <span class="meta-value">{_esc(slice_labels)}</span>
+      </div>
+      <div class="meta-card">
+        <span class="meta-label">Generated</span>
+        <span class="meta-value">{_esc(generated)}</span>
+      </div>
+    </div>"""
 
-
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
 
 _PERIOD_ORDER = ["annual", "quarter", "weekly"]
 _PERIOD_LABELS = {"annual": "Annual", "quarter": "Quarter", "weekly": "Weekly"}
@@ -859,29 +1035,15 @@ def render_kpi_html(
     """
     Render a standalone, offline HTML KPI report from a completed KPIContext.
 
-    Parameters
-    ----------
-    ctx:
-        KPIContext with .kpi_long, .comparison_yoy/qoq/wow, .settings, and
-        .active_slice_dimensions populated (i.e. runner.run() has completed).
-    output_path:
-        Path to write the HTML file. Parent directories are created if needed.
-    report_title:
-        Override the default "<Customer> KPI Report" title.
-    metric_definitions:
-        Override or extend DEFAULT_METRIC_DEFINITIONS.  Keys are metric column
-        names; each value is a dict with keys: label, definition, store_scope, formula.
-
-    Returns
-    -------
-    str — absolute path of the written file.
+    Slice dimensions and values are inferred from ``ctx.kpi_long`` automatically.
     """
     kpi_long = ctx.kpi_long
     settings = ctx.settings
 
     if kpi_long is None or kpi_long.empty:
         raise ValueError(
-            "ctx.kpi_long is empty — run the pipeline first (runner.run(...))."
+            "ctx.kpi_long is empty — run the pipeline first (runner.run(...)) "
+            "or load saved outputs (run.mode=html_only)."
         )
 
     defs: Dict[str, Dict[str, str]] = {
@@ -896,8 +1058,11 @@ def render_kpi_html(
         c for c in (settings.get("METRIC_COLS") or []) if c in kpi_long.columns
     ]
     labels: Dict[str, str] = settings.get("METRIC_LABELS") or {}
-    active_dims: List[str] = list(ctx.active_slice_dimensions or [])
-    dims: List[str] = ["overall"] + active_dims
+
+    configured_slices = list(settings.get("SLICE_DIMENSIONS") or [])
+    active_dims = list(ctx.active_slice_dimensions or [])
+    slice_source = active_dims or configured_slices
+    dims = _infer_dimensions(kpi_long, slice_source)
 
     present_period_types = kpi_long["period_type"].unique().tolist()
     period_types = [pt for pt in _PERIOD_ORDER if pt in present_period_types]
@@ -916,36 +1081,38 @@ def render_kpi_html(
         fw = ctx.fiscal_week.select("Year_Week", "week_start_date").distinct().toPandas()
         week_start_by_period = dict(zip(fw["Year_Week"], fw["week_start_date"]))
 
-    # --- Build dynamic CSS (tab visibility rules) ---
-    dyn_css = _tab_visibility_css(period_types, dims)
+    weekly_display_weeks = settings.get("HTML_REPORT_WEEKLY_DISPLAY_WEEKS")
 
-    # --- Radio inputs for top-level tabs (must precede tab bar and panels) ---
+    dims_by_period = {pt: dims for pt in period_types}
+    values_by_dim: Dict[str, List[str]] = {}
+    for pt in period_types:
+        for dim in dims:
+            if dim != "overall":
+                values_by_dim[f"{pt}|{dim}"] = _dimension_values(kpi_long, pt, dim)
+
+    dyn_css = _tab_visibility_css(period_types, dims_by_period, values_by_dim)
+
     top_radios = "".join(
         f"<input type='radio' class='top-tab-anchor' name='kpi-top' "
-        f"id='kpi-tab-{pt}'{' checked' if i == 0 else ''}>"
+        f"id='kpi-tab-{_safe_id(pt)}'{' checked' if i == 0 else ''}>"
         for i, pt in enumerate(period_types)
     )
-    top_radios += (
-        "<input type='radio' class='top-tab-anchor' name='kpi-top' id='kpi-tab-details'>"
-    )
+    top_radios += "<input type='radio' class='top-tab-anchor' name='kpi-top' id='kpi-tab-details'>"
 
-    # --- Top tab bar ---
     tab_labels = "".join(
-        f"<label for='kpi-tab-{pt}' class='top-tab'>{_esc(_PERIOD_LABELS.get(pt, pt.title()))}</label>"
+        f"<label for='kpi-tab-{_safe_id(pt)}' class='top-tab'>{_esc(_PERIOD_LABELS.get(pt, pt.title()))}</label>"
         for pt in period_types
     )
     tab_labels += "<label for='kpi-tab-details' class='top-tab'>Metric Details</label>"
     top_tab_bar = f"<div class='top-tab-bar'>{tab_labels}</div>"
 
-    # --- Period panels ---
     period_panels = "".join(
-        f"<div class='top-panel top-panel-{pt}'>"
-        f"{_period_tab_html(kpi_long, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period)}"
+        f"<div class='top-panel top-panel-{_safe_id(pt)}'>"
+        f"{_period_tab_html(kpi_long, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period, weekly_display_weeks)}"
         f"</div>"
         for pt in period_types
     )
 
-    # --- Metric Details panel ---
     details_panel = (
         f"<div class='top-panel top-panel-details'>"
         f"{_metric_details_html(metric_cols, labels, defs)}"
@@ -962,7 +1129,12 @@ def render_kpi_html(
         f"</div>"
     )
 
-    report_info = _report_info_html(settings, active_slice_dimensions=active_dims)
+    slice_dim_labels = [d for d in dims if d != "overall"]
+    report_info = _report_info_html(
+        {**settings, "HTML_REPORT_TITLE": title},
+        active_slice_dimensions=slice_dim_labels,
+        inferred_dimensions=slice_dim_labels,
+    )
 
     html_doc = f"""<!DOCTYPE html>
 <html lang="en">
@@ -978,13 +1150,12 @@ def render_kpi_html(
 <body>
   <div class="wrap">
     <header class="site-header">
-      <h1>{_esc(title)}</h1>
       {report_info}
     </header>
     <main>
       {main_panel}
       <p class="footnote">
-        * Dollar values are in local currency.
+        Dollar values are in local currency.
         Service metrics (WOS, In-Stock Rate, Lost Sales %, Mean Stock) exclude e-com stores
         configured in <code>service_metrics.excluded_store_ids</code>.
       </p>

@@ -15,7 +15,13 @@ Designed to run on **Databricks** against the customer Delta datastore (`/mnt/in
 | **HTML report**              | Standalone offline HTML with tabbed layout, Metric Details, and client/period info panel (see [HTML report](#html-report) section below).              |
 
 
-Saved Delta tables live under a **single persistent root** (`PATH_OUTPUT_ROOT`), with incremental merge by period keys.
+Saved Delta tables live under `PATH_OUTPUT_ROOT`, partitioned by `run_date` per table:
+
+```
+{bucket}/{output.path_segments}/{table_name}/run_date={as_of_date}/
+```
+
+Default example: `.../analysis/kpi_reports/outputs/kpi_long/run_date=2026-06-15/`
 
 ## Repository layout
 
@@ -184,10 +190,12 @@ Resolved automatically:
 Persist pipeline results to Delta under a **single persistent root**:
 
 ```
-{bucket}/{output.path_segments}/{table_name}/
+{bucket}/{output.path_segments}/{table_name}/run_date={run_date}/
 ```
 
-Default: `/mnt/invent-{customer}-datastore/analysis/kpi_reports/outputs/{table_name}/`
+Default: `/mnt/invent-{customer}-datastore/analysis/kpi_reports/outputs/kpi_long/run_date=2026-06-15/`
+
+`run_date` defaults to `reporting_window.as_of_date`. Override with `output.run_date` or `KPI_OUTPUT_RUN_DATE` when loading a specific snapshot (`html_only` mode uses the same partition).
 
 Set `output.save_outputs: True` in `config.py` (default is `False`). The notebook runs with `save=False` by default — Cell 4 previews the save plan, Cell 5 writes.
 
@@ -298,14 +306,15 @@ Review Cell 4 output before Cell 5. If `skipped_rows > 0` and you intended to re
 
 ```python
 "output": {
-    "save_outputs": False,          # True to enable Delta writes
+    "save_outputs": False,          # True to write Delta tables
     "path_segments": ["analysis", "kpi_reports", "outputs"],
+    "run_date": None,               # null = use reporting_window.as_of_date for run_date= partition
     "save_mode": "incremental",     # initial | incremental | full_refresh
     "allow_overwrite_existing": False,
 }
 ```
 
-Environment overrides: `KPI_SAVE_OUTPUTS`, `KPI_OUTPUT_SAVE_MODE`, `KPI_ALLOW_OVERWRITE_EXISTING`, `KPI_OUTPUT_PATH` (comma-separated path segments).
+Environment overrides: `KPI_SAVE_OUTPUTS`, `KPI_OUTPUT_SAVE_MODE`, `KPI_ALLOW_OVERWRITE_EXISTING`, `KPI_OUTPUT_PATH` (comma-separated path segments), `KPI_OUTPUT_RUN_DATE`.
 
 ## Config reference
 
@@ -354,10 +363,21 @@ See [Output saves](#output-saves) for full mode behaviour, merge keys, workflows
 "output": {
     "save_outputs": True,
     "path_segments": ["analysis", "kpi_reports", "outputs"],
+    "run_date": None,
     "save_mode": "incremental",
     "allow_overwrite_existing": False,
 }
 ```
+
+### `run`
+
+```python
+"run": {
+    "mode": "full",   # full | html_only
+}
+```
+
+See [HTML report — Run mode](#run-mode-html-only-from-saved-data).
 
 ### `html_report`
 
@@ -381,7 +401,10 @@ See [HTML report](#html-report) section.
 | `KPI_OUTPUT_SAVE_MODE`           | `initial`, `incremental`, or `full_refresh`                  |
 | `KPI_ALLOW_OVERWRITE_EXISTING`   | `true`/`false`                                               |
 | `KPI_OUTPUT_PATH`                | Comma-separated path segments                                |
+| `KPI_OUTPUT_RUN_DATE`            | `output.run_date` partition (default: `as_of_date`)          |
 | `KPI_HTML_OUTPUT_PATH`           | Comma-separated path segments for `html_report.output_path_segments` |
+| `KPI_HTML_WEEKLY_WEEKS`          | Recent fiscal weeks in Weekly tab (default 5; empty = all)       |
+| `KPI_RUN_MODE`                     | `full` or `html_only` — skip pipeline and render HTML from saved outputs |
 
 
 ## Metrics
@@ -402,12 +425,18 @@ Default metrics (configurable in `CONFIG["metrics"]`):
 
 ```python
 from kpi_pipeline import KPIRunner
-from kpi_pipeline.io import save_outputs
+from kpi_pipeline.io import save_outputs, load_saved_outputs
 
+# Full run
 runner = KPIRunner(spark, settings)
 ctx = runner.run(fund_paste=fund.paste, save=False)
 runner.preview_save_plan(fund.paste)
 save_outputs(ctx, fund.paste)
+
+# HTML only from saved outputs
+# settings = materialize(fund.paste)  with run.mode = "html_only"
+ctx = runner.run(fund_paste=fund.paste, save=False)  # loads saved Delta, skips pipeline
+html_path = runner.build_html_report(local_dir=".")
 ```
 
 ## Performance notes
@@ -444,28 +473,46 @@ If you see slow runs, check: (1) scope table path is correct so defined scope is
 
 ## HTML report
 
-Cell 6 of `main.ipynb` generates a standalone, offline HTML file after the pipeline run.  
+Cell 6 of `main.ipynb` generates a standalone, offline HTML file after the pipeline run (or after loading saved outputs in `html_only` mode).  
 Enabled by default (`html_report.enabled: True` in `config.py`).
+
+### Run mode: HTML only from saved data
+
+Set `run.mode: "html_only"` in `config.py` to skip the full pipeline and render the HTML report from previously saved Delta outputs:
+
+```python
+"run": {"mode": "html_only"},
+"output": {"path_segments": ["analysis", "kpi_reports", "outputs"]},
+```
+
+Requires `kpi_long` and comparison tables at `{PATH_OUTPUT_ROOT}/{table}/run_date={OUTPUT_RUN_DATE}/`. Cell 3 loads them via `runner.run()`; Cell 6 renders HTML. Set `output.run_date` to load a different snapshot.
+
+Environment override: `KPI_RUN_MODE=html_only`
 
 ### What the report contains
 
 | Section | Description |
 | ------- | ----------- |
-| **Report info panel** | Client name, period window, as-of date, scope mode, active slice dimensions, generated timestamp |
-| **Annual tab** | KPI table (metrics as rows, years as columns) + YoY comparison; Overall + per-slice sub-tabs |
-| **Quarter tab** | Same layout for fiscal quarters + QoQ comparison |
-| **Weekly tab** | Same layout for fiscal weeks + WoW comparison (columns sorted by `week_start_date`, not `Year_Week` string order) |
-| **Metric Details tab** | Plain-English definition, store scope (all vs service-only), and formula for every active metric |
+| **Executive header** | Client, reporting window, as-of date, scope mode, slice dimensions, generated timestamp |
+| **Period tabs** | Annual / Quarter / Weekly (horizontal) |
+| **Slice dimension tabs** | Overall + every slice column in `kpi_long` (inferred automatically from data and config) |
+| **Value tabs** | Vertical sidebar within each slice dimension — one panel per value (e.g. each brand) |
+| **KPI tables** | Metrics as rows (colour-coded), periods as columns |
+| **Comparison** | YoY / QoQ / WoW per value panel |
+| **Metric Details tab** | Definition, store scope, and formula for every active metric |
+
+Slice dimensions and values are **inferred from `kpi_long`** — if you configure `category` instead of `brand`, or add multiple slice columns, the report adapts without code changes.
 
 ### Config keys
 
 ```python
 "html_report": {
-    "enabled": True,                          # False = skip HTML generation
-    "filename": "kpi_report_{customer}_{report_end}.html",   # {customer} and {report_end} are interpolated
-    "report_title": None,                     # None = "<CUSTOMER> KPI Report"
-    "output_path_segments": None,             # None = write only locally; or ["analysis", "kpi_html"] to also save under datastore
-    "metric_definitions": {},                 # Override DEFAULT_METRIC_DEFINITIONS for any metric(s)
+    "enabled": True,
+    "filename": "kpi_report_{customer}_{report_end}.html",
+    "report_title": None,
+    "output_path_segments": None,
+    "metric_definitions": {},
+    "weekly_display_weeks": 5,   # Weekly tab shows only the 5 most recent weeks; null = all weeks
 }
 ```
 
@@ -477,6 +524,7 @@ Enabled by default (`html_report.enabled: True` in `config.py`).
 | `KPI_HTML_FILENAME` | Output filename |
 | `KPI_HTML_TITLE` | Report title |
 | `KPI_HTML_OUTPUT_PATH` | Comma-separated path segments for datastore HTML copy |
+| `KPI_HTML_WEEKLY_WEEKS` | Number of recent fiscal weeks in the Weekly tab (`null`/empty = all weeks) |
 
 ### Overriding metric definitions
 
