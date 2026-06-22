@@ -151,11 +151,13 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
     "inventory_turnover_rate": {
         "label": "Inventory Turnover Rate",
         "definition": (
-            "Rate at which inventory is sold and replaced over the period. "
-            "Higher values indicate faster sell-through relative to the stock held."
+            "Rate at which inventory is sold and replaced over the reporting period in each tab — "
+            "annual turnover in the Annual tab, quarterly turnover in the Quarter tab, and weekly "
+            "turnover in the Weekly tab. Higher values indicate faster sell-through relative to "
+            "the stock held during that period."
         ),
         "store_scope": "Service stores only (e-com excluded)",
-        "formula": "Sales Units ÷ Mean Stock",
+        "formula": "Sales Units ÷ Mean Stock (for the same period grain)",
     },
     "in_stock_rate": {
         "label": "In-Stock Rate",
@@ -734,6 +736,7 @@ def _kpi_table_html(
     periods: List[str],
     metric_cols: List[str],
     labels: Dict[str, str],
+    period_type: Optional[str] = None,
 ) -> str:
     if sub.empty or not periods:
         return '<p style="color:#64748b;font-size:.875rem">No data for this selection.</p>'
@@ -747,7 +750,7 @@ def _kpi_table_html(
         if metric not in grp.columns:
             continue
         cat = _CAT.get(metric, "general")
-        label = labels.get(metric, metric.replace("_", " ").title())
+        label = _metric_display_label(metric, labels, period_type)
         cells = "".join(
             f"<td>{_esc(_fmt(metric, grp.at[p, metric]) if p in grp.index else '—')}</td>"
             for p in periods
@@ -771,6 +774,8 @@ def _comparison_html(
     dimension: str,
     dimension_value: str,
     comp_label: str,
+    labels: Optional[Dict[str, str]] = None,
+    period_type: Optional[str] = None,
 ) -> str:
     if comp_df is None or comp_df.empty:
         return ""
@@ -795,11 +800,17 @@ def _comparison_html(
     )
 
     rows: List[str] = []
+    labels = labels or {}
     for _, row in sub.iterrows():
         chg = str(row.get("change_display", "—"))
+        metric_key = row.get("metric_key")
+        if metric_key and period_type:
+            kpi_label = _metric_display_label(str(metric_key), labels, period_type)
+        else:
+            kpi_label = str(row.get("KPI", "—"))
         rows.append(
             f"<tr>"
-            f"<td>{_esc(str(row.get('KPI', '—')))}</td>"
+            f"<td>{_esc(kpi_label)}</td>"
             f"<td>{_esc(str(row.get('prior_display', '—')))}</td>"
             f"<td>{_esc(str(row.get('current_display', '—')))}</td>"
             f"<td class='{_esc(_chg_class(chg))}'>{_esc(chg)}</td>"
@@ -832,8 +843,8 @@ def _value_panel_content(
         kpi_long, period_type, dimension, dimension_value, metric_cols,
         week_start_by_period, weekly_display_weeks,
     )
-    table = _kpi_table_html(sub, periods, metric_cols, labels)
-    cmp = _comparison_html(comp_df, dimension, dimension_value, comp_label)
+    table = _kpi_table_html(sub, periods, metric_cols, labels, period_type)
+    cmp = _comparison_html(comp_df, dimension, dimension_value, comp_label, labels, period_type)
     return table + cmp
 
 
@@ -947,7 +958,7 @@ def _metric_details_html(
     rows: List[str] = []
     for metric in metric_cols:
         d = defs.get(metric, {})
-        label = labels.get(metric, metric.replace("_", " ").title())
+        label = d.get("label") or _metric_display_label(metric, labels)
         definition = d.get("definition", "—")
         scope_str = d.get("store_scope", "All scoped stores")
         formula = d.get("formula", "—")
@@ -1023,6 +1034,26 @@ def _report_info_html(
 _PERIOD_ORDER = ["annual", "quarter", "weekly"]
 _PERIOD_LABELS = {"annual": "Annual", "quarter": "Quarter", "weekly": "Weekly"}
 _PERIOD_COMP_LABEL = {"annual": "YoY", "quarter": "QoQ", "weekly": "WoW"}
+
+_TURNOVER_PERIOD_LABELS = {
+    "annual": "Annual Inventory Turnover Rate",
+    "quarter": "Quarterly Inventory Turnover Rate",
+    "weekly": "Weekly Inventory Turnover Rate",
+}
+
+
+def _metric_display_label(
+    metric: str,
+    labels: Dict[str, str],
+    period_type: Optional[str] = None,
+) -> str:
+    """Return the HTML row label for a metric; turnover is period-specific per tab."""
+    if metric == "inventory_turnover_rate" and period_type:
+        return _TURNOVER_PERIOD_LABELS.get(
+            period_type,
+            labels.get(metric, "Inventory Turnover Rate"),
+        )
+    return labels.get(metric, metric.replace("_", " ").title())
 
 
 def render_kpi_html(

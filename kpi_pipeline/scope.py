@@ -191,9 +191,13 @@ def build_hybrid_scope(ctx: KPIContext) -> None:
     s = ctx.settings
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
     use_hybrid = s["USE_HYBRID_SCOPE"]
+    run_scope_diff = s.get("RUN_SCOPE_DIFF", False)
+    need_score = use_hybrid or run_scope_diff
 
-    daily_all = read_daily_for_scope(ctx, start, end).cache()
-    ctx.score_only_psw = score_scope_psw(ctx, daily_all).select(*ctx.scope_keys).distinct().cache()
+    ctx.score_only_psw = None
+    if need_score:
+        daily_all = read_daily_for_scope(ctx, start, end).cache()
+        ctx.score_only_psw = score_scope_psw(ctx, daily_all).select(*ctx.scope_keys).distinct().cache()
 
     defined_tagged = ctx.defined_scope_psw.withColumn("scope_origin", F.lit("defined"))
 

@@ -41,8 +41,11 @@ CONFIG: Dict[str, Any] = {
     },
     "scope": {
         # True  = defined scope + score backfill for weeks missing from defined scope
-        # False = defined scope only (score still computed for scope diff diagnostics)
+        # False = defined scope only
         "use_hybrid_scope": True,
+        # True  = compute score scope and annual defined-vs-score KPI diff (scope_diff)
+        # False = skip score scope unless required for hybrid backfill (default)
+        "run_scope_diff": False,
     },
     "scope_adjustments": {
         # Optional manual adds/removes applied after hybrid/defined scope is built.
@@ -234,6 +237,8 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
     sc = out.setdefault("scope", {})
     if "KPI_USE_HYBRID_SCOPE" in os.environ:
         sc["use_hybrid_scope"] = _parse_bool(os.environ["KPI_USE_HYBRID_SCOPE"])
+    if "KPI_RUN_SCOPE_DIFF" in os.environ:
+        sc["run_scope_diff"] = _parse_bool(os.environ["KPI_RUN_SCOPE_DIFF"])
 
     op = out.setdefault("output", {})
     if "KPI_SAVE_OUTPUTS" in os.environ:
@@ -389,6 +394,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "SCOPE_MIN_PERCENTILE": min_pct,
         "SCOPE_MIN_WEEKS_FOR_FILTER": score_scope["min_weeks_for_filter"],
         "USE_HYBRID_SCOPE": cfg["scope"]["use_hybrid_scope"],
+        "RUN_SCOPE_DIFF": cfg["scope"].get("run_scope_diff", False),
         "SCOPE_ADJUSTMENTS": cfg.get("scope_adjustments", {}),
         **paths,
         "DEFINED_SCOPE": defined_scope,

@@ -83,7 +83,8 @@ class KPIRunner:
         )
         print("RUN_MODE:", s.get("RUN_MODE", "full"))
         print("SCOPE MODE:", "hybrid" if s["USE_HYBRID_SCOPE"] else "defined only")
-        if s["USE_HYBRID_SCOPE"]:
+        print("RUN_SCOPE_DIFF:", s.get("RUN_SCOPE_DIFF", False))
+        if s["USE_HYBRID_SCOPE"] or s.get("RUN_SCOPE_DIFF", False):
             print(
                 "score scope: p",
                 int(s["SCOPE_MIN_PERCENTILE"] * 100),
@@ -184,6 +185,15 @@ class KPIRunner:
         build_comparisons(self.ctx)
 
     def build_scope_comparison(self) -> None:
+        if not self.settings.get("RUN_SCOPE_DIFF", False):
+            self.ctx.scope_diff = None
+            print("scope diff: skipped (scope.run_scope_diff=False)")
+            return
+        if self.ctx.score_only_psw is None:
+            raise RuntimeError(
+                "scope.run_scope_diff=True but score scope was not computed — "
+                "check build_hybrid_scope and RUN_SCOPE_DIFF settings."
+            )
         self.ctx.defined_frames = build_pipeline_frames(self.ctx, self.ctx.defined_scope_psw)
         self.ctx.score_frames = build_pipeline_frames(self.ctx, self.ctx.score_only_psw)
         build_scope_diff(self.ctx)

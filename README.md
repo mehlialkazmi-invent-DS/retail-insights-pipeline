@@ -11,7 +11,7 @@ Designed to run on **Databricks** against the customer Delta datastore (`/mnt/in
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `kpi_long`                   | One tidy table: `period_type`, `period`, `dimension`, `dimension_value`, plus all configured metrics. Filter this to reproduce any slice/period panel. |
 | YoY / QoQ / WoW comparisons | Prior vs current period with formatted display columns (overall + each active slice dimension).                                                        |
-| Scope diff                   | Side-by-side annual KPIs for **defined-only** vs **score-only** scope (sanity check when hybrid is enabled). Compares scope **before** manual adjustments — intentional diagnostic of defined vs score coverage. |
+| Scope diff                   | Side-by-side annual KPIs for **defined-only** vs **score-only** scope (optional sanity check). Only computed when `scope.run_scope_diff=True`. Compares scope **before** manual adjustments — intentional diagnostic of defined vs score coverage. |
 | **HTML report**              | Standalone offline HTML with tabbed layout, Metric Details, and client/period info panel (see [HTML report](#html-report) section below).              |
 
 
@@ -72,7 +72,7 @@ generate-kpis-toolkit/
 
 ### Defined scope only
 
-Set `scope.use_hybrid_scope = False`. KPIs use only rows from your configured defined scope table. Score scope is still computed for the scope diff diagnostic.
+Set `scope.use_hybrid_scope = False`. KPIs use only rows from your configured defined scope table. Score scope is **not** computed unless `scope.run_scope_diff=True` or hybrid backfill is enabled.
 
 ### Hybrid scope (default)
 
@@ -207,7 +207,7 @@ Set `output.save_outputs: True` in `config.py` (default is `False`). The noteboo
 | `comparison_yoy` | YoY comparison rows | `comparison_type`, `dimension`, `dimension_value`, `metric_key`, `current_period` |
 | `comparison_qoq` | QoQ comparison rows | same as YoY |
 | `comparison_wow` | WoW comparison rows | same as YoY |
-| `scope_diff` | Defined vs score annual diff | `Year`, `metric` |
+| `scope_diff` | Defined vs score annual diff (when `run_scope_diff=True`) | `Year`, `metric` |
 
 Merge keys are defined in `kpi_pipeline/io.py` (`TABLE_ROW_KEYS`). Incremental mode uses these keys to decide append vs skip vs overwrite.
 
@@ -326,9 +326,12 @@ See [Input previews and filters](#input-previews-and-filters) above.
 
 ```python
 "scope": {
-    "use_hybrid_scope": True,  # False = defined scope only
+    "use_hybrid_scope": True,   # False = defined scope only
+    "run_scope_diff": False,    # True = compute score scope and defined-vs-score annual diff
 }
 ```
+
+When `run_scope_diff=False` (default), the pipeline skips score-scope computation entirely unless `use_hybrid_scope=True` (hybrid backfill still needs score scope). The notebook scope-diff cell and `scope_diff` Delta output are omitted.
 
 ### `defined_scope`
 
@@ -346,7 +349,7 @@ DATE path (when your scope table has a date column):
 
 ### `score_scope`
 
-Used only when `use_hybrid_scope=True`.
+Used when `use_hybrid_scope=True` or `run_scope_diff=True`.
 
 ```python
 "score_scope": {
@@ -393,6 +396,7 @@ See [HTML report](#html-report) section.
 | `KPI_AS_OF_DATE`                 | Overrides `as_of_date`                                       |
 | `KPI_RUN_MIN_DATE`               | Overrides `run_min_date`                                     |
 | `KPI_USE_HYBRID_SCOPE`           | `true`/`false`                                               |
+| `KPI_RUN_SCOPE_DIFF`             | `true`/`false` — enable defined-vs-score scope diff          |
 | `KPI_USE_FISCAL_CALENDAR`        | `true`/`false`                                               |
 | `KPI_SCOPE_MIN_PERCENTILE`       | e.g. `20` or `0.2`                                           |
 | `KPI_SCOPE_MIN_WEEKS_FOR_FILTER` | Integer                                                      |
@@ -420,6 +424,8 @@ Default metrics (configurable in `CONFIG["metrics"]`):
 **In-Stock Rate** = `sum(in_stock_days) / sum(available_days)` from top-down lost-sales output (service stores only).
 
 **WOS** = per-product per-fiscal-week WOS after summing daily inventory/sales across service stores at product×date (`avg_daily_inventory / weekly_sales`), then rolled up to the reporting period using a sales-weighted average. Not computed at product×store×week grain.
+
+**Inventory Turnover Rate** = Sales Units ÷ Mean Stock for the same period grain (service stores only). The HTML report labels it **Annual**, **Quarterly**, or **Weekly** Inventory Turnover Rate in the matching period tab.
 
 ## Programmatic use
 
@@ -497,7 +503,7 @@ Environment override: `KPI_RUN_MODE=html_only`
 | **Period tabs** | Annual / Quarter / Weekly (horizontal) |
 | **Slice dimension tabs** | Overall + every slice column in `kpi_long` (inferred automatically from data and config) |
 | **Value tabs** | Vertical sidebar within each slice dimension — one panel per value (e.g. each brand) |
-| **KPI tables** | Metrics as rows (colour-coded), periods as columns |
+| **KPI tables** | Metrics as rows (colour-coded), periods as columns; inventory turnover is labelled **Annual** / **Quarterly** / **Weekly** per tab |
 | **Comparison** | YoY / QoQ / WoW per value panel |
 | **Metric Details tab** | Definition, store scope, and formula for every active metric |
 

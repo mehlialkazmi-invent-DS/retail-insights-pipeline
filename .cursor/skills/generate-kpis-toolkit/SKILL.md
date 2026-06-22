@@ -84,12 +84,17 @@ When a user wants to configure the toolkit, ask them (or read from their message
 ### 3.2 Scope mode
 
 ```python
-"scope": {"use_hybrid_scope": True}   # True = defined + score backfill; False = defined only
+"scope": {
+    "use_hybrid_scope": True,   # True = defined + score backfill; False = defined only
+    "run_scope_diff": False,    # True = compute score scope and defined-vs-score annual diff
+}
 ```
 
-Use `True` (hybrid) unless the client has pristine defined scope coverage.
+Use `use_hybrid_scope=True` (hybrid) unless the client has pristine defined scope coverage.
 
-Score backfill parameters (hybrid only):
+**`run_scope_diff`** (default `False`): when `False`, score scope is **not** computed unless hybrid backfill needs it (`use_hybrid_scope=True`). The notebook scope-diff cell and `scope_diff` Delta output are skipped. Set `True` to run the defined-vs-score annual KPI comparison (sanity check).
+
+Score backfill parameters (hybrid or scope diff):
 ```python
 "score_scope": {
     "min_percentile": 0.2,         # keep weeks where weekly_sales ≥ p20 AND inventory ≥ p20 per pair
@@ -280,6 +285,7 @@ Metric definitions can be customised per-client:
 |------|-----------|
 | Change date window | `reporting_window` |
 | Switch hybrid ↔ defined | `scope.use_hybrid_scope` |
+| Enable defined-vs-score diff | `scope.run_scope_diff` |
 | Change scope table path | `path_segments.defined_scope` |
 | Change scope column names | `defined_scope.*_col` |
 | Exclude e-com stores | `service_metrics.excluded_store_ids` |
@@ -337,7 +343,7 @@ Add a path to `path_segments` in config, read in `fiscal.py` or a new module, an
 | `WOS` | WOS (units) | Service only | product × fiscal week; service stores aggregated; sales-weighted weekly→period rollup |
 | `wos_revenue` | WOS Revenue | Service only | product × fiscal week; service stores aggregated; revenue-based rollup |
 | `wos_cost` | WOS Cost | Service only | product × fiscal week; service stores aggregated; cost-based rollup |
-| `inventory_turnover_rate` | Inventory Turnover Rate | Service only | Sales Units ÷ Mean Stock |
+| `inventory_turnover_rate` | Inventory Turnover Rate | Service only | Sales Units ÷ Mean Stock; HTML shows **Annual** / **Quarterly** / **Weekly** label per tab |
 | `in_stock_rate` | In-Stock Rate | Service only | Σ(in_stock_days) ÷ Σ(available_days); pp-change in comparisons |
 | `lost_sales_pct` | Lost Sales % | Service only | 100×Σ(lost_sales)÷Σ(floor(sales+lost_sales)); pp-change |
 
@@ -363,7 +369,7 @@ Do not confuse scope grain (product×store×week) with WOS computation grain (pr
 
 ```
 daily_data_raw (cached Delta)
-  └─ equi-join fiscal_cal on date → score scope (build_weekly_scope)
+  └─ equi-join fiscal_cal on date → score scope (build_weekly_scope) when hybrid or run_scope_diff when hybrid or run_scope_diff
   └─ build_scoped_daily → scoped_daily (fiscal + products joined)
 
 lost_sales_source (cached as lost_sales_weekly_base)
@@ -376,7 +382,7 @@ build_pipeline_frames(scope) → {scoped_daily, inst_data, lost_base, ...}
 
 build_kpi_long → kpi_long (period_type|period|dimension|dimension_value|metrics)
 build_comparisons → yoy/qoq/wow pandas tables
-build_scope_diff → scope_diff pandas table (defined vs score **before** manual adjustments)
+build_scope_diff → scope_diff pandas table (defined vs score **before** manual adjustments; only when `scope.run_scope_diff=True`)
 render_kpi_html → standalone HTML file
 ```
 
@@ -414,7 +420,7 @@ render_kpi_html → standalone HTML file
 | `lost_sales_weekly_base` | cached weekly lost-sales aggregates |
 | `kpi_long` | primary pandas output |
 | `comparison_yoy/qoq/wow` | full comparison long-format DataFrames |
-| `scope_diff` | defined vs score annual diff |
+| `scope_diff` | defined vs score annual diff (when `run_scope_diff=True`) |
 
 ---
 
@@ -440,6 +446,7 @@ render_kpi_html → standalone HTML file
 | `KPI_AS_OF_DATE` | `reporting_window.as_of_date` |
 | `KPI_RUN_MIN_DATE` | `reporting_window.run_min_date` |
 | `KPI_USE_HYBRID_SCOPE` | `scope.use_hybrid_scope` |
+| `KPI_RUN_SCOPE_DIFF` | `scope.run_scope_diff` |
 | `KPI_USE_FISCAL_CALENDAR` | `fiscal_calendar.use_fiscal_calendar` |
 | `KPI_SCOPE_MIN_PERCENTILE` | `score_scope.min_percentile` |
 | `KPI_SCOPE_MIN_WEEKS_FOR_FILTER` | `score_scope.min_weeks_for_filter` |
@@ -466,5 +473,5 @@ render_kpi_html → standalone HTML file
 4. **No pair pre-filter in product-week mode** — when `store_col=None`, `build_scoped_daily` must not pre-filter by lost-sales pairs.
 5. **E-com exclusion from service metrics** — WOS/instock/lost_sales_pct/mean_stock exclude `excluded_store_ids`; total sales includes them.
 6. **Scope adjustment data quality is caller's responsibility** — the toolkit maps columns, never validates or cleans input files.
-7. **Scope diff is pre-adjustment** — `scope_diff` compares defined-only vs score-only scope before manual additions/removals (intentional sanity check).
+7. **Scope diff is optional and pre-adjustment** — `scope_diff` runs only when `scope.run_scope_diff=True`; compares defined-only vs score-only scope before manual additions/removals (intentional sanity check).
 8. **WoW with sparse weeks** — week-over-week uses the last two weeks present in `kpi_long`, not necessarily consecutive fiscal weeks when coverage is sparse.
