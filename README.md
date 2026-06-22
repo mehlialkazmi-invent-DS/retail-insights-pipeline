@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/readme-banner.png" alt="Retail KPI analytics — sales, inventory, in-stock rate, and weeks of supply" width="100%" />
+</p>
+
 # Generate KPIs Toolkit
 
 PySpark toolkit for weekly, quarterly, and annual retail KPIs with configurable scope (defined-only or hybrid with score backfill), optional manual scope adjustments, and incremental Delta output saves.
