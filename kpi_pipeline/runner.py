@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 import pandas as pd
 from pyspark.sql import SparkSession
 
+from kpi_pipeline.comparable import build_comparable_pairs
 from kpi_pipeline.comparisons import build_comparisons, build_scope_diff
 from kpi_pipeline.context import KPIContext
 from kpi_pipeline.fiscal import build_fiscal_and_products
@@ -152,6 +153,7 @@ class KPIRunner:
         self.build_scopes(fund_paste=fund_paste)
         self.build_kpis()
         self.build_comparisons()
+        self.build_comparable_pairs()
         self.build_scope_comparison()
         if save:
             if fund_paste is not None:
@@ -185,6 +187,9 @@ class KPIRunner:
     def build_comparisons(self) -> None:
         build_comparisons(self.ctx)
         self.ctx.kpi_long = trim_periods_to_recent(self.ctx.kpi_long, self.ctx)
+
+    def build_comparable_pairs(self) -> None:
+        build_comparable_pairs(self.ctx)
 
     def build_scope_comparison(self) -> None:
         if not self.settings.get("RUN_SCOPE_DIFF", False):

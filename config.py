@@ -47,6 +47,18 @@ CONFIG: Dict[str, Any] = {
         # False = skip score scope unless required for hybrid backfill (default)
         "run_scope_diff": False,
     },
+    "comparable_pairs": {
+        # GATED, opt-in like-for-like view (mirrors v4's same-pair YoY). When enabled, for each
+        # comparison (YoY/QoQ/MoM/WoW) the metrics are recomputed over ONLY the (product_id,
+        # store_id) pairs present in BOTH compared periods, then compared — isolating like-for-like
+        # change from mix shifts (new/closed pairs). Pair-level data exists only for the current run
+        # window, so a comparable comparison appears only when the run window SPANS both compared
+        # periods (e.g. a multi-year window for comparable YoY). Output:
+        #   * comparable_kpi_long Delta table (per-period comparable metrics + comparable_pair_count)
+        #   * comparable_comparison_{yoy,qoq,mom,wow} Delta tables
+        #   * a second "Comparable pairs" comparison table per panel in the HTML report
+        "enabled": False,
+    },
     "scope_adjustments": {
         # Optional manual adds/removes applied after hybrid/defined scope is built.
         # source: "delta" (default) or "csv" — auto-detected when path ends with .csv
@@ -209,6 +221,11 @@ CONFIG: Dict[str, Any] = {
         # See README "Output saves" for merge keys, workflows, and caveats.
         "save_mode": "incremental",
         "allow_overwrite_existing": False,
+        # Incremental only: after merging kpi_long onto the latest prior run_date partition,
+        # recompute YoY/QoQ/MoM/WoW from the full merged history (not just this run's window)
+        # and overwrite the comparison tables in this partition. Lets a single-week refresh still
+        # produce a YoY vs last year. Set False to keep comparisons scoped to the current run.
+        "recompute_comparisons_from_history": True,
     },
     "html_report": {
         # Set enabled=False to skip HTML generation entirely.
@@ -280,6 +297,10 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if "KPI_RUN_SCOPE_DIFF" in os.environ:
         sc["run_scope_diff"] = _parse_bool(os.environ["KPI_RUN_SCOPE_DIFF"])
 
+    cp = out.setdefault("comparable_pairs", {})
+    if "KPI_COMPARABLE_PAIRS" in os.environ:
+        cp["enabled"] = _parse_bool(os.environ["KPI_COMPARABLE_PAIRS"])
+
     op = out.setdefault("output", {})
     if "KPI_SAVE_OUTPUTS" in os.environ:
         op["save_outputs"] = _parse_bool(os.environ["KPI_SAVE_OUTPUTS"])
@@ -291,6 +312,8 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
         op["save_mode"] = os.environ["KPI_OUTPUT_SAVE_MODE"].strip().lower()
     if "KPI_ALLOW_OVERWRITE_EXISTING" in os.environ:
         op["allow_overwrite_existing"] = _parse_bool(os.environ["KPI_ALLOW_OVERWRITE_EXISTING"])
+    if "KPI_RECOMPUTE_COMPARISONS" in os.environ:
+        op["recompute_comparisons_from_history"] = _parse_bool(os.environ["KPI_RECOMPUTE_COMPARISONS"])
 
     sl = out.setdefault("slices", {})
     if "KPI_SLICE_DIMENSIONS" in os.environ:
@@ -454,6 +477,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "SCOPE_MIN_WEEKS_FOR_FILTER": score_scope["min_weeks_for_filter"],
         "USE_HYBRID_SCOPE": cfg["scope"]["use_hybrid_scope"],
         "RUN_SCOPE_DIFF": cfg["scope"].get("run_scope_diff", False),
+        "COMPARABLE_PAIRS_ENABLED": cfg.get("comparable_pairs", {}).get("enabled", False),
         "SCOPE_ADJUSTMENTS": cfg.get("scope_adjustments", {}),
         **paths,
         "DEFINED_SCOPE": defined_scope,
@@ -468,6 +492,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "SAVE_OUTPUTS": output_cfg["save_outputs"],
         "OUTPUT_SAVE_MODE": save_mode,
         "ALLOW_OVERWRITE_EXISTING": output_cfg.get("allow_overwrite_existing", False),
+        "RECOMPUTE_COMPARISONS_FROM_HISTORY": output_cfg.get("recompute_comparisons_from_history", True),
         "PATH_OUTPUT_ROOT": output_root,
         "OUTPUT_RUN_DATE": output_run_date,
         # HTML report
