@@ -12,6 +12,11 @@ written — not the partition being written — so weekly runs (whose ``run_date
 run_date partition is therefore a self-contained snapshot of the full merged history as of that
 run. Comparison tables are recomputed from that merged ``kpi_long`` so YoY/QoQ/MoM/WoW reflect the
 full saved history, not just the current run window.
+
+The same pattern applies to comparable (like-for-like) tables: ``comparable_kpi_long`` is merged
+incrementally across runs just like ``kpi_long``, and comparable comparison tables are then
+recomputed from the merged ``comparable_kpi_long``. A single-week refresh therefore produces
+comparable YoY/QoQ/MoM/WoW relative to the full saved history.
 """
 
 from __future__ import annotations
@@ -83,16 +88,16 @@ TABLE_ROW_KEYS: Dict[str, Sequence[str]] = {
 # partition (never key-merged), so the comparisons in a partition always match its kpi_long.
 COMPARISON_TABLES: Tuple[str, ...] = ("comparison_yoy", "comparison_qoq", "comparison_mom", "comparison_wow")
 
-# Comparable (like-for-like) tables are pair-level and computed only for the current run window —
-# they cannot be reconstructed from saved aggregates. Each is written as a self-contained snapshot
-# (full overwrite) into the current run_date partition rather than key-merged across runs.
-COMPARABLE_TABLES: Tuple[str, ...] = (
-    "comparable_kpi_long",
+# comparable_kpi_long is period-grain (same shape as kpi_long) and is merged incrementally across
+# runs. Comparable comparison tables are then recomputed from the merged comparable_kpi_long —
+# the same pattern as regular comparisons from kpi_long.
+COMPARABLE_COMPARISON_TABLES: Tuple[str, ...] = (
     "comparable_comparison_yoy",
     "comparable_comparison_qoq",
     "comparable_comparison_mom",
     "comparable_comparison_wow",
 )
+COMPARABLE_TABLES: Tuple[str, ...] = ("comparable_kpi_long",) + COMPARABLE_COMPARISON_TABLES
 
 
 def _output_frames(ctx: KPIContext) -> Dict[str, pd.DataFrame]:
@@ -271,14 +276,19 @@ def build_save_plan(ctx: KPIContext, fund_paste) -> SavePlan:
     run_date = settings["OUTPUT_RUN_DATE"]
     save_mode = settings["OUTPUT_SAVE_MODE"]
     allow_overwrite = settings["ALLOW_OVERWRITE_EXISTING"]
-    # Comparisons are recomputed from merged history only when incremental AND kpi_long already
-    # has a prior partition to accumulate onto (a first-ever save has nothing to merge).
+    recompute_enabled = save_mode == "incremental" and settings.get("RECOMPUTE_COMPARISONS_FROM_HISTORY", True)
+
+    # Comparisons recomputed only when incremental AND a prior kpi_long partition exists to merge onto.
     kpi_long_source = _latest_run_date_on_or_before(ctx.spark, output_root, "kpi_long", fund_paste, run_date)
-    recompute = (
-        save_mode == "incremental"
-        and settings.get("RECOMPUTE_COMPARISONS_FROM_HISTORY", True)
-        and kpi_long_source is not None
+    recompute = recompute_enabled and kpi_long_source is not None
+
+    # Comparable comparisons recomputed the same way, from merged comparable_kpi_long.
+    comparable_kpi_long_source = (
+        _latest_run_date_on_or_before(ctx.spark, output_root, "comparable_kpi_long", fund_paste, run_date)
+        if ctx.settings.get("COMPARABLE_PAIRS_ENABLED", False)
+        else None
     )
+    recompute_comparable = recompute_enabled and comparable_kpi_long_source is not None
 
     outputs = _output_frames(ctx)
 
@@ -294,10 +304,8 @@ def build_save_plan(ctx: KPIContext, fund_paste) -> SavePlan:
         source_run_date = _latest_run_date_on_or_before(ctx.spark, output_root, name, fund_paste, run_date)
         exists = source_run_date is not None or _delta_exists(ctx.spark, path)
         key_cols = TABLE_ROW_KEYS[name]
-        # Comparable tables are always written as a current-window snapshot (full overwrite).
-        effective_mode = "full_refresh" if name in COMPARABLE_TABLES else save_mode
 
-        if effective_mode == "full_refresh":
+        if save_mode == "full_refresh":
             plan.tables.append(
                 TableSavePlan(
                     name=name,
@@ -319,8 +327,8 @@ def build_save_plan(ctx: KPIContext, fund_paste) -> SavePlan:
             )
             continue
 
-        # Incremental preview. Comparison tables are recomputed from the merged kpi_long at save
-        # time and overwritten wholesale, so a key-merge preview would be misleading.
+        # Incremental preview. Comparison/comparable-comparison tables are recomputed from the
+        # merged kpi_long / comparable_kpi_long at save time and overwritten wholesale.
         if recompute and name in COMPARISON_TABLES:
             plan.tables.append(
                 TableSavePlan(
@@ -329,7 +337,20 @@ def build_save_plan(ctx: KPIContext, fund_paste) -> SavePlan:
                     exists=exists,
                     new_rows=0 if pdf is None else len(pdf),
                     overwrite_rows=0 if pdf is None else len(pdf),
-                    merge_source_run_date=source_run_date,
+                    merge_source_run_date=kpi_long_source,
+                )
+            )
+            continue
+
+        if recompute_comparable and name in COMPARABLE_COMPARISON_TABLES:
+            plan.tables.append(
+                TableSavePlan(
+                    name=name,
+                    path=path,
+                    exists=exists,
+                    new_rows=0 if pdf is None else len(pdf),
+                    overwrite_rows=0 if pdf is None else len(pdf),
+                    merge_source_run_date=comparable_kpi_long_source,
                 )
             )
             continue
@@ -355,6 +376,11 @@ def build_save_plan(ctx: KPIContext, fund_paste) -> SavePlan:
         plan.warnings.append(
             "Comparison tables (YoY/QoQ/MoM/WoW) will be recomputed from the merged kpi_long history "
             "and overwritten in this run_date partition (full saved history, not just this run window)."
+        )
+    if recompute_comparable:
+        plan.warnings.append(
+            "Comparable comparison tables will be recomputed from the merged comparable_kpi_long history "
+            "and overwritten in this run_date partition."
         )
 
     return plan
@@ -510,6 +536,42 @@ def _recompute_comparisons_from_saved_history(ctx: KPIContext, fund_paste) -> No
     print("recomputed comparisons from merged kpi_long history (run_date=%s)" % run_date)
 
 
+def _recompute_comparable_comparisons_from_saved_history(ctx: KPIContext, fund_paste) -> None:
+    """Re-read the merged comparable_kpi_long and recompute comparable comparison tables from it.
+
+    Mirrors ``_recompute_comparisons_from_saved_history``: after ``comparable_kpi_long`` has been
+    incrementally merged onto prior history, reload it and rebuild each comparable comparison so the
+    saved comparable numbers reflect the full accumulated history, not just the current run window.
+    ``ctx.comparable_comparison_*`` and display tables are updated in place.
+    """
+    from kpi_pipeline.comparable import (
+        _COMPARABLE_KINDS,
+        _KIND_DISPLAY_ATTR,
+        _KIND_SAVE_ATTR,
+        _comparisons_from_rows,
+    )
+
+    output_root = ctx.settings["PATH_OUTPUT_ROOT"]
+    run_date = ctx.settings["OUTPUT_RUN_DATE"]
+    merged = _load_existing_table(
+        ctx.spark, _table_path(output_root, "comparable_kpi_long", run_date, fund_paste)
+    )
+    if merged is None or merged.empty:
+        return
+
+    ctx.comparable_kpi_long = merged
+
+    for kind, _period_name, _ in _COMPARABLE_KINDS:
+        kind_rows = merged[merged["comparison_type"] == kind].drop(columns=["comparison_type"], errors="ignore")
+        if kind_rows.empty:
+            continue
+        display, save = _comparisons_from_rows(ctx, kind, kind_rows)
+        setattr(ctx, _KIND_SAVE_ATTR[kind], save)
+        setattr(ctx, _KIND_DISPLAY_ATTR[kind], display)
+
+    print("recomputed comparable comparisons from merged comparable_kpi_long history (run_date=%s)" % run_date)
+
+
 def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
     if not ctx.settings["SAVE_OUTPUTS"]:
         print(
@@ -545,10 +607,17 @@ def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
     run_as_of = str(ctx.settings["AS_OF_DATE"])
     recompute_enabled = save_mode == "incremental" and ctx.settings.get("RECOMPUTE_COMPARISONS_FROM_HISTORY", True)
 
-    # Whether kpi_long has prior history to merge onto (decided before the kpi_long write,
-    # after which the current run_date partition would itself count as a source).
+    # Decided before the write so the current run_date partition doesn't count as its own source.
     kpi_long_history_source = _latest_run_date_on_or_before(ctx.spark, output_root, "kpi_long", fund_paste, run_date)
     recompute = recompute_enabled and kpi_long_history_source is not None
+
+    comparable_enabled = ctx.settings.get("COMPARABLE_PAIRS_ENABLED", False)
+    comparable_kpi_long_source = (
+        _latest_run_date_on_or_before(ctx.spark, output_root, "comparable_kpi_long", fund_paste, run_date)
+        if comparable_enabled
+        else None
+    )
+    recompute_comparable = recompute_enabled and comparable_kpi_long_source is not None
 
     def _save(name: str, pdf: pd.DataFrame, mode: str) -> None:
         table_plan = save_pandas_table(
@@ -580,14 +649,20 @@ def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
     _save("comparison_wow", ctx.comparison_wow, comparison_mode)
     _save("scope_diff", ctx.scope_diff, save_mode)
 
-    # 4. Comparable (like-for-like) tables: current-window pair-level snapshots — always written as
-    #    a full overwrite of this run_date partition (cannot be reconstructed from saved aggregates).
-    if ctx.settings.get("COMPARABLE_PAIRS_ENABLED", False):
-        _save("comparable_kpi_long", ctx.comparable_kpi_long, "full_refresh")
-        _save("comparable_comparison_yoy", ctx.comparable_comparison_yoy, "full_refresh")
-        _save("comparable_comparison_qoq", ctx.comparable_comparison_qoq, "full_refresh")
-        _save("comparable_comparison_mom", ctx.comparable_comparison_mom, "full_refresh")
-        _save("comparable_comparison_wow", ctx.comparable_comparison_wow, "full_refresh")
+    # 4. Comparable (like-for-like) tables: comparable_kpi_long merges incrementally like kpi_long;
+    #    comparable comparison tables are then recomputed from the merged comparable_kpi_long.
+    if comparable_enabled:
+        _save("comparable_kpi_long", ctx.comparable_kpi_long, save_mode)
+
+        comparable_comp_mode = save_mode
+        if recompute_comparable:
+            _recompute_comparable_comparisons_from_saved_history(ctx, fund_paste)
+            comparable_comp_mode = "full_refresh"
+
+        _save("comparable_comparison_yoy", ctx.comparable_comparison_yoy, comparable_comp_mode)
+        _save("comparable_comparison_qoq", ctx.comparable_comparison_qoq, comparable_comp_mode)
+        _save("comparable_comparison_mom", ctx.comparable_comparison_mom, comparable_comp_mode)
+        _save("comparable_comparison_wow", ctx.comparable_comparison_wow, comparable_comp_mode)
 
     ctx.save_plan = plan
     return plan
