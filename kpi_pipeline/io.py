@@ -5,12 +5,19 @@ Output layout per table::
     {PATH_OUTPUT_ROOT}/{table_name}/run_date={OUTPUT_RUN_DATE}/
 
 ``OUTPUT_RUN_DATE`` defaults to ``reporting_window.as_of_date`` (override via ``output.run_date``).
+
+Incremental merge reads the **latest existing run_date partition on or before** the run being
+written — not the partition being written — so weekly runs (whose ``run_date`` advances with
+``as_of_date``) accumulate history instead of writing isolated single-window snapshots. Each
+run_date partition is therefore a self-contained snapshot of the full merged history as of that
+run. Comparison tables are recomputed from that merged ``kpi_long`` so YoY/QoQ/MoM/WoW reflect the
+full saved history, not just the current run window.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -26,6 +33,7 @@ class TableSavePlan:
     append_rows: int = 0
     overwrite_rows: int = 0
     skipped_rows: int = 0
+    merge_source_run_date: Optional[str] = None
 
 
 @dataclass
@@ -47,9 +55,10 @@ class SavePlan:
             print(f"Run date partition: run_date={self.run_date}")
         print(f"Allow overwrite existing: {self.allow_overwrite_existing}")
         for table in self.tables:
+            src = f" | merge_from=run_date={table.merge_source_run_date}" if table.merge_source_run_date else ""
             print(
                 f"  {table.name}: exists={table.exists} | new={table.new_rows} | "
-                f"append={table.append_rows} | overwrite={table.overwrite_rows} | skip={table.skipped_rows}"
+                f"append={table.append_rows} | overwrite={table.overwrite_rows} | skip={table.skipped_rows}{src}"
             )
         for warning in self.warnings:
             print(f"WARNING: {warning}")
@@ -62,12 +71,98 @@ TABLE_ROW_KEYS: Dict[str, Sequence[str]] = {
     "comparison_mom": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
     "comparison_wow": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
     "scope_diff": ("Year", "metric"),
+    "comparable_kpi_long": ("comparison_type", "period_type", "period", "dimension", "dimension_value"),
+    "comparable_comparison_yoy": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
+    "comparable_comparison_qoq": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
+    "comparable_comparison_mom": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
+    "comparable_comparison_wow": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
 }
+
+# Comparison tables are a deterministic function of the saved kpi_long snapshot. They are
+# recomputed from the merged kpi_long and overwritten wholesale into the current run_date
+# partition (never key-merged), so the comparisons in a partition always match its kpi_long.
+COMPARISON_TABLES: Tuple[str, ...] = ("comparison_yoy", "comparison_qoq", "comparison_mom", "comparison_wow")
+
+# Comparable (like-for-like) tables are pair-level and computed only for the current run window —
+# they cannot be reconstructed from saved aggregates. Each is written as a self-contained snapshot
+# (full overwrite) into the current run_date partition rather than key-merged across runs.
+COMPARABLE_TABLES: Tuple[str, ...] = (
+    "comparable_kpi_long",
+    "comparable_comparison_yoy",
+    "comparable_comparison_qoq",
+    "comparable_comparison_mom",
+    "comparable_comparison_wow",
+)
+
+
+def _output_frames(ctx: KPIContext) -> Dict[str, pd.DataFrame]:
+    """Tables to persist, in save order. Comparable tables are included only when gated on."""
+    frames: Dict[str, pd.DataFrame] = {
+        "kpi_long": ctx.kpi_long,
+        "comparison_yoy": ctx.comparison_yoy,
+        "comparison_qoq": ctx.comparison_qoq,
+        "comparison_mom": ctx.comparison_mom,
+        "comparison_wow": ctx.comparison_wow,
+        "scope_diff": ctx.scope_diff,
+    }
+    if ctx.settings.get("COMPARABLE_PAIRS_ENABLED", False):
+        frames["comparable_kpi_long"] = ctx.comparable_kpi_long
+        frames["comparable_comparison_yoy"] = ctx.comparable_comparison_yoy
+        frames["comparable_comparison_qoq"] = ctx.comparable_comparison_qoq
+        frames["comparable_comparison_mom"] = ctx.comparable_comparison_mom
+        frames["comparable_comparison_wow"] = ctx.comparable_comparison_wow
+    return frames
 
 
 def _table_path(output_root: str, name: str, run_date: str, fund_paste) -> str:
     """Resolve Delta path: {output_root}/{table_name}/run_date={run_date}/"""
     return fund_paste(output_root, name, f"run_date={run_date}")
+
+
+def _list_run_date_dirs(spark, base_path: str) -> List[str]:
+    """Best-effort list of run_date partition values under {output_root}/{table_name}/.
+
+    Tries Databricks ``dbutils.fs.ls`` first, then a local/DBFS filesystem listing. Returns
+    an empty list when the base path does not exist yet (first-ever save).
+    """
+    names: List[str] = []
+    try:
+        from pyspark.dbutils import DBUtils
+
+        dbutils = DBUtils(spark)
+        names = [fi.name for fi in dbutils.fs.ls(base_path)]
+    except Exception:
+        from pathlib import Path
+
+        candidates = []
+        if base_path.startswith("/mnt/"):
+            candidates.append("/dbfs" + base_path)
+        candidates.append(base_path)
+        for candidate in candidates:
+            try:
+                p = Path(candidate)
+                if p.is_dir():
+                    names = [child.name for child in p.iterdir()]
+                    break
+            except Exception:
+                continue
+
+    run_dates = []
+    for raw in names:
+        leaf = raw.rstrip("/").split("/")[-1]
+        if leaf.startswith("run_date="):
+            run_dates.append(leaf[len("run_date="):])
+    return sorted(run_dates)
+
+
+def _latest_run_date_on_or_before(spark, output_root: str, name: str, fund_paste, run_date: str) -> Optional[str]:
+    """Latest existing run_date partition ``<= run_date`` for a table, or None if none exist.
+
+    ISO dates sort lexicographically, so a plain string comparison gives chronological order.
+    """
+    base = fund_paste(output_root, name)
+    candidates = [d for d in _list_run_date_dirs(spark, base) if d <= run_date]
+    return candidates[-1] if candidates else None
 
 
 def _delta_exists(spark, path: str) -> bool:
@@ -98,7 +193,7 @@ def _filter_by_keys(pdf: pd.DataFrame, key_cols: Sequence[str], keys: Iterable[T
     if pdf.empty or not keys:
         return pdf.iloc[0:0].copy()
     key_set = set(keys)
-    mask = pdf[key_cols].astype(str).apply(tuple, axis=1).isin(key_set)
+    mask = pdf[list(key_cols)].astype(str).apply(tuple, axis=1).isin(key_set)
     return pdf[mask].copy()
 
 
@@ -106,7 +201,7 @@ def _drop_keys(pdf: pd.DataFrame, key_cols: Sequence[str], keys: Iterable[Tuple]
     if pdf.empty or not keys:
         return pdf.copy()
     key_set = set(keys)
-    mask = pdf[key_cols].astype(str).apply(tuple, axis=1).isin(key_set)
+    mask = pdf[list(key_cols)].astype(str).apply(tuple, axis=1).isin(key_set)
     return pdf[~mask].copy()
 
 
@@ -176,15 +271,16 @@ def build_save_plan(ctx: KPIContext, fund_paste) -> SavePlan:
     run_date = settings["OUTPUT_RUN_DATE"]
     save_mode = settings["OUTPUT_SAVE_MODE"]
     allow_overwrite = settings["ALLOW_OVERWRITE_EXISTING"]
+    # Comparisons are recomputed from merged history only when incremental AND kpi_long already
+    # has a prior partition to accumulate onto (a first-ever save has nothing to merge).
+    kpi_long_source = _latest_run_date_on_or_before(ctx.spark, output_root, "kpi_long", fund_paste, run_date)
+    recompute = (
+        save_mode == "incremental"
+        and settings.get("RECOMPUTE_COMPARISONS_FROM_HISTORY", True)
+        and kpi_long_source is not None
+    )
 
-    outputs = {
-        "kpi_long": ctx.kpi_long,
-        "comparison_yoy": ctx.comparison_yoy,
-        "comparison_qoq": ctx.comparison_qoq,
-        "comparison_mom": ctx.comparison_mom,
-        "comparison_wow": ctx.comparison_wow,
-        "scope_diff": ctx.scope_diff,
-    }
+    outputs = _output_frames(ctx)
 
     plan = SavePlan(
         output_root=output_root,
@@ -195,18 +291,22 @@ def build_save_plan(ctx: KPIContext, fund_paste) -> SavePlan:
 
     for name, pdf in outputs.items():
         path = _table_path(output_root, name, run_date, fund_paste)
-        exists = _delta_exists(ctx.spark, path)
+        source_run_date = _latest_run_date_on_or_before(ctx.spark, output_root, name, fund_paste, run_date)
+        exists = source_run_date is not None or _delta_exists(ctx.spark, path)
         key_cols = TABLE_ROW_KEYS[name]
+        # Comparable tables are always written as a current-window snapshot (full overwrite).
+        effective_mode = "full_refresh" if name in COMPARABLE_TABLES else save_mode
 
-        if save_mode == "full_refresh":
-            table_plan = TableSavePlan(
-                name=name,
-                path=path,
-                exists=exists,
-                new_rows=0 if pdf is None else len(pdf),
-                append_rows=0 if pdf is None else len(pdf),
+        if effective_mode == "full_refresh":
+            plan.tables.append(
+                TableSavePlan(
+                    name=name,
+                    path=path,
+                    exists=exists,
+                    new_rows=0 if pdf is None else len(pdf),
+                    append_rows=0 if pdf is None else len(pdf),
+                )
             )
-            plan.tables.append(table_plan)
             continue
 
         if save_mode == "initial" and exists:
@@ -214,14 +314,35 @@ def build_save_plan(ctx: KPIContext, fund_paste) -> SavePlan:
                 f"{name} already exists at {path}. Use save_mode='incremental' to append missing periods "
                 "or 'full_refresh' to replace everything."
             )
-            table_plan = TableSavePlan(name=name, path=path, exists=True, new_rows=0 if pdf is None else len(pdf))
-            plan.tables.append(table_plan)
+            plan.tables.append(
+                TableSavePlan(name=name, path=path, exists=True, new_rows=0 if pdf is None else len(pdf))
+            )
             continue
 
-        existing = _load_existing_table(ctx.spark, path) if exists else pd.DataFrame()
+        # Incremental preview. Comparison tables are recomputed from the merged kpi_long at save
+        # time and overwritten wholesale, so a key-merge preview would be misleading.
+        if recompute and name in COMPARISON_TABLES:
+            plan.tables.append(
+                TableSavePlan(
+                    name=name,
+                    path=path,
+                    exists=exists,
+                    new_rows=0 if pdf is None else len(pdf),
+                    overwrite_rows=0 if pdf is None else len(pdf),
+                    merge_source_run_date=source_run_date,
+                )
+            )
+            continue
+
+        existing = (
+            _load_existing_table(ctx.spark, _table_path(output_root, name, source_run_date, fund_paste))
+            if source_run_date
+            else pd.DataFrame()
+        )
         _, table_plan = merge_table_incremental(existing, pdf, key_cols, allow_overwrite)
         table_plan.name = name
         table_plan.path = path
+        table_plan.merge_source_run_date = source_run_date
         plan.tables.append(table_plan)
 
         if table_plan.skipped_rows > 0 and not allow_overwrite:
@@ -229,6 +350,12 @@ def build_save_plan(ctx: KPIContext, fund_paste) -> SavePlan:
                 f"{name}: {table_plan.skipped_rows} row(s) already exist and were skipped. "
                 "Set output.allow_overwrite_existing=True to replace them."
             )
+
+    if recompute:
+        plan.warnings.append(
+            "Comparison tables (YoY/QoQ/MoM/WoW) will be recomputed from the merged kpi_long history "
+            "and overwritten in this run_date partition (full saved history, not just this run window)."
+        )
 
     return plan
 
@@ -251,7 +378,8 @@ def save_pandas_table(
         print(f"skip save {name}: empty")
         return TableSavePlan(name=name, path=path, exists=_delta_exists(ctx.spark, path), new_rows=0)
 
-    exists = _delta_exists(ctx.spark, path)
+    source_run_date = _latest_run_date_on_or_before(ctx.spark, output_root, name, fund_paste, run_date)
+    exists = source_run_date is not None or _delta_exists(ctx.spark, path)
 
     if save_mode == "full_refresh":
         merged = pdf.copy()
@@ -277,16 +405,24 @@ def save_pandas_table(
             append_rows=len(pdf),
         )
     else:
-        existing = _load_existing_table(ctx.spark, path) if exists else pd.DataFrame()
+        # Incremental: accumulate onto the latest existing partition (<= run_date), then write
+        # the full merged result into this run's run_date partition.
+        existing = (
+            _load_existing_table(ctx.spark, _table_path(output_root, name, source_run_date, fund_paste))
+            if source_run_date
+            else pd.DataFrame()
+        )
         merged, table_plan = merge_table_incremental(existing, pdf, key_cols, allow_overwrite_existing)
         table_plan.name = name
         table_plan.path = path
+        table_plan.merge_source_run_date = source_run_date
 
     merged = _annotate_run_metadata(merged, run_as_of)
     ctx.spark.createDataFrame(merged).write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path)
+    src = f" | merge_from=run_date={source_run_date}" if table_plan.merge_source_run_date else ""
     print(
-        f"saved {name} -> {path} | append={table_plan.append_rows} | "
-        f"overwrite={table_plan.overwrite_rows} | skip={table_plan.skipped_rows}"
+        f"saved {name} -> {path} | rows={len(merged)} | append={table_plan.append_rows} | "
+        f"overwrite={table_plan.overwrite_rows} | skip={table_plan.skipped_rows}{src}"
     )
     return table_plan
 
@@ -297,13 +433,34 @@ _SAVED_OUTPUT_TABLES = {
     "comparison_qoq": "comparison_qoq",
     "comparison_mom": "comparison_mom",
     "comparison_wow": "comparison_wow",
+    # Comparable (like-for-like) tables — optional; absent unless comparable_pairs was enabled.
+    "comparable_kpi_long": "comparable_kpi_long",
+    "comparable_comparison_yoy": "comparable_comparison_yoy",
+    "comparable_comparison_qoq": "comparable_comparison_qoq",
+    "comparable_comparison_mom": "comparable_comparison_mom",
+    "comparable_comparison_wow": "comparable_comparison_wow",
 }
+
+
+def _resolve_read_run_date(ctx: KPIContext, fund_paste) -> str:
+    """Run_date partition to load saved outputs from: the requested one if present, else the
+    latest existing partition on or before it (so html_only finds the most recent snapshot)."""
+    output_root = ctx.settings["PATH_OUTPUT_ROOT"]
+    requested = ctx.settings["OUTPUT_RUN_DATE"]
+    path = _table_path(output_root, "kpi_long", requested, fund_paste)
+    if _delta_exists(ctx.spark, path):
+        return requested
+    latest = _latest_run_date_on_or_before(ctx.spark, output_root, "kpi_long", fund_paste, requested)
+    if latest and latest != requested:
+        print(f"run_date={requested} not found for kpi_long — loading latest available partition run_date={latest}")
+        return latest
+    return requested
 
 
 def load_saved_outputs(ctx: KPIContext, fund_paste) -> None:
     """Load previously saved Delta output tables into ctx (for run.mode=html_only)."""
     output_root = ctx.settings["PATH_OUTPUT_ROOT"]
-    run_date = ctx.settings["OUTPUT_RUN_DATE"]
+    run_date = _resolve_read_run_date(ctx, fund_paste)
     spark = ctx.spark
 
     for attr, name in _SAVED_OUTPUT_TABLES.items():
@@ -327,6 +484,30 @@ def load_saved_outputs(ctx: KPIContext, fund_paste) -> None:
 
     print(f"Loaded saved outputs from {output_root} (run_date={run_date})")
     print("kpi_long shape:", ctx.kpi_long.shape)
+
+
+def _recompute_comparisons_from_saved_history(ctx: KPIContext, fund_paste) -> None:
+    """Re-read the merged kpi_long just written and recompute comparison tables from it.
+
+    After an incremental save, the current run_date partition holds the full merged history
+    (this run's window unioned onto the latest prior partition). Reloading it and rebuilding
+    comparisons makes YoY/QoQ/MoM/WoW reflect the full saved history rather than only the
+    current run window. ``ctx.comparison_*`` and the overall display tables are updated in place
+    so the notebook comparison cells and the HTML report also reflect the merged history.
+    """
+    from kpi_pipeline.comparisons import build_comparisons
+    from kpi_pipeline.kpi_long import trim_periods_to_recent
+
+    output_root = ctx.settings["PATH_OUTPUT_ROOT"]
+    run_date = ctx.settings["OUTPUT_RUN_DATE"]
+    merged = _load_existing_table(ctx.spark, _table_path(output_root, "kpi_long", run_date, fund_paste))
+    if merged is None or merged.empty:
+        return
+
+    ctx.kpi_long = merged
+    build_comparisons(ctx)
+    ctx.kpi_long = trim_periods_to_recent(merged, ctx)
+    print("recomputed comparisons from merged kpi_long history (run_date=%s)" % run_date)
 
 
 def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
@@ -362,33 +543,51 @@ def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
     save_mode = ctx.settings["OUTPUT_SAVE_MODE"]
     allow_overwrite = ctx.settings["ALLOW_OVERWRITE_EXISTING"]
     run_as_of = str(ctx.settings["AS_OF_DATE"])
+    recompute_enabled = save_mode == "incremental" and ctx.settings.get("RECOMPUTE_COMPARISONS_FROM_HISTORY", True)
 
-    outputs = {
-        "kpi_long": ctx.kpi_long,
-        "comparison_yoy": ctx.comparison_yoy,
-        "comparison_qoq": ctx.comparison_qoq,
-        "comparison_mom": ctx.comparison_mom,
-        "comparison_wow": ctx.comparison_wow,
-        "scope_diff": ctx.scope_diff,
-    }
+    # Whether kpi_long has prior history to merge onto (decided before the kpi_long write,
+    # after which the current run_date partition would itself count as a source).
+    kpi_long_history_source = _latest_run_date_on_or_before(ctx.spark, output_root, "kpi_long", fund_paste, run_date)
+    recompute = recompute_enabled and kpi_long_history_source is not None
 
-    for name, pdf in outputs.items():
+    def _save(name: str, pdf: pd.DataFrame, mode: str) -> None:
         table_plan = save_pandas_table(
-            ctx,
-            name,
-            pdf,
-            output_root,
-            run_date,
-            fund_paste,
-            save_mode,
-            allow_overwrite,
-            run_as_of,
+            ctx, name, pdf, output_root, run_date, fund_paste, mode, allow_overwrite, run_as_of
         )
         for existing in plan.tables:
             if existing.name == name:
                 existing.append_rows = table_plan.append_rows
                 existing.overwrite_rows = table_plan.overwrite_rows
                 existing.skipped_rows = table_plan.skipped_rows
+                existing.merge_source_run_date = table_plan.merge_source_run_date
+
+    # 1. Save kpi_long first (accumulates onto the latest prior partition under incremental).
+    _save("kpi_long", ctx.kpi_long, save_mode)
+
+    # 2. When merging onto prior history, recompute comparisons from the full merged kpi_long so
+    #    they reflect saved history (e.g. a single-week run can still produce a YoY vs last year).
+    comparison_mode = save_mode
+    if recompute:
+        _recompute_comparisons_from_saved_history(ctx, fund_paste)
+        # Recomputed comparisons are the authoritative full-history snapshot for this partition;
+        # overwrite wholesale rather than key-merge against a stale partition.
+        comparison_mode = "full_refresh"
+
+    # 3. Save comparison + scope_diff tables.
+    _save("comparison_yoy", ctx.comparison_yoy, comparison_mode)
+    _save("comparison_qoq", ctx.comparison_qoq, comparison_mode)
+    _save("comparison_mom", ctx.comparison_mom, comparison_mode)
+    _save("comparison_wow", ctx.comparison_wow, comparison_mode)
+    _save("scope_diff", ctx.scope_diff, save_mode)
+
+    # 4. Comparable (like-for-like) tables: current-window pair-level snapshots — always written as
+    #    a full overwrite of this run_date partition (cannot be reconstructed from saved aggregates).
+    if ctx.settings.get("COMPARABLE_PAIRS_ENABLED", False):
+        _save("comparable_kpi_long", ctx.comparable_kpi_long, "full_refresh")
+        _save("comparable_comparison_yoy", ctx.comparable_comparison_yoy, "full_refresh")
+        _save("comparable_comparison_qoq", ctx.comparable_comparison_qoq, "full_refresh")
+        _save("comparable_comparison_mom", ctx.comparable_comparison_mom, "full_refresh")
+        _save("comparable_comparison_wow", ctx.comparable_comparison_wow, "full_refresh")
 
     ctx.save_plan = plan
     return plan

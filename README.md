@@ -212,6 +212,34 @@ This produces an `is_nvrout` slice (`yes` / `no`) alongside `brand` — the `yes
 
 `scope_adjustments` decide *which rows*; `slices` / `dimension_sources` decide *how rows are grouped*. A typical tbretail setup uses both: a JAB scope addition **and** an `is_nvrout` dimension source.
 
+## Comparable pairs (like-for-like)
+
+**Gated, opt-in** (default off). When enabled, for each comparison (YoY / QoQ / MoM / WoW) the metrics are recomputed over **only the `(product_id, store_id)` pairs present in both compared periods**, then compared. This isolates like-for-like movement (same pairs in both periods) from mix shifts caused by newly listed or closed pairs — the same idea as v4's `_pairs_same_calendar_years` same-pair YoY.
+
+```python
+"comparable_pairs": {
+    "enabled": True,   # default False
+},
+```
+
+Or set `KPI_COMPARABLE_PAIRS=true`.
+
+**How it works**
+1. For each comparison kind, the two most recent periods present in the run window are the compared pair (prior, current).
+2. The comparable universe = pairs that appear in **both** periods (`scoped_daily` presence in each), intersected.
+3. All metric frames (sales/inventory, service metrics, lost sales) are restricted to that pair set, and metrics are recomputed for both periods — for **Overall and every slice**. Because each slice dimension is a product attribute, the single overall intersection grouped by slice equals a per-slice intersection.
+4. The standard comparison logic diffs the two periods on that fixed universe.
+
+**Outputs**
+- `comparable_kpi_long` — per-period comparable metrics, tagged with `comparison_type` and `comparable_pair_count` (universe size).
+- `comparable_comparison_{yoy,qoq,mom,wow}` — comparison rows (same schema as the regular `comparison_*` tables).
+- HTML report — a second **"Comparable YoY/QoQ/MoM/WoW"** comparison table beneath the standard one in every value panel.
+- Notebook — a "Comparable pairs (like-for-like)" cell.
+
+**Important**
+- Pair-level data only exists for the **current run window**, so a comparable comparison appears only when the run window **spans both compared periods** (e.g. run a multi-year window for comparable YoY). It cannot be reconstructed from saved aggregates.
+- `comparable_*` Delta tables are current-window snapshots: they are always written as a **full overwrite** of the run's `run_date` partition (never key-merged across runs), so each partition's comparable numbers describe a single, internally consistent universe.
+
 ## Input previews and filters
 
 The notebook reads **defined scope**, **lost sales**, and **daily data** separately before the pipeline run so you can inspect them. Optional config filters are applied automatically to both previews and the pipeline.
@@ -268,15 +296,17 @@ Set `output.save_outputs: True` in `config.py` (default is `False`). The noteboo
 | `comparison_qoq` | QoQ comparison rows | same as YoY |
 | `comparison_wow` | WoW comparison rows | same as YoY |
 | `scope_diff` | Defined vs score annual diff (when `run_scope_diff=True`) | `Year`, `metric` |
+| `comparable_kpi_long` | Comparable (like-for-like) per-period metrics + `comparable_pair_count` (when `comparable_pairs.enabled=True`) | snapshot — overwrites the partition |
+| `comparable_comparison_{yoy,qoq,mom,wow}` | Comparable comparison rows (when `comparable_pairs.enabled=True`) | snapshot — overwrites the partition |
 
-Merge keys are defined in `kpi_pipeline/io.py` (`TABLE_ROW_KEYS`). Incremental mode uses these keys to decide append vs skip vs overwrite.
+Merge keys are defined in `kpi_pipeline/io.py` (`TABLE_ROW_KEYS`). Incremental mode uses these keys to decide append vs skip vs overwrite. `comparison_*` tables are recomputed from the merged `kpi_long` and overwritten wholesale; `comparable_*` tables are current-window pair-level snapshots and are always overwritten in the partition (see [Comparable pairs](#comparable-pairs-like-for-like)).
 
 ### Save modes
 
 | `save_mode` | What it does | When to use |
 | ----------- | ------------ | ----------- |
 | `initial` | Writes all rows from the current run. **Fails** if any output table already exists at the path. | First-ever backfill only (safety guard against accidental overwrite). |
-| `incremental` | Loads existing Delta tables, **appends** rows whose merge keys are not yet saved, **skips** overlapping keys (unless overwrite allowed). | Weekly refresh — add new weeks/periods without touching history. |
+| `incremental` | Loads the **latest existing `run_date` partition on or before** this run, **appends** rows whose merge keys are not yet saved, **skips** overlapping keys (unless overwrite allowed), and writes the merged result to this run's `run_date` partition. | Weekly refresh — add new weeks/periods; history accumulates even as `run_date` advances. |
 | `full_refresh` | **Overwrites** each output table entirely with whatever the current run produced. No merge with prior saved data. | Rebuild outputs from scratch for the current run window. |
 
 **Incremental — append missing keys only**
@@ -285,7 +315,7 @@ Merge keys are defined in `kpi_pipeline/io.py` (`TABLE_ROW_KEYS`). Incremental m
 - **No (by default):** Rows for periods/slices already on disk are **not** updated — they are skipped.
 - Set `allow_overwrite_existing: True` to replace overlapping keys with the new run's values.
 
-Example: first run saves 2024–2026. A later weekly run with `run_min_date` = last Sunday appends only the new week (e.g. `2026-W25`). Existing weeks stay unchanged unless overwrite is enabled.
+Example: first run (`as_of_date=2026-06-15`) saves 2024–2026 into `run_date=2026-06-15`. A later weekly run (`as_of_date=2026-06-22`, `run_min_date`=last Sunday) loads that prior partition, appends only the new week (e.g. `2026-W25`), and writes the full merged result into `run_date=2026-06-22`. Existing weeks stay unchanged unless overwrite is enabled. Because the merge reads the **latest** prior partition, history accumulates across runs even though each `run_date` advances.
 
 **Full refresh — replace entire table, not “update one year in history”**
 
@@ -358,8 +388,9 @@ Review Cell 4 output before Cell 5. If `skipped_rows > 0` and you intended to re
 
 ### Important caveats
 
-- **Notebook vs saved Delta can differ on incremental runs:** `ctx.kpi_long` and comparisons always reflect the **current run**. Saved Delta tables keep old rows for overlapping keys when `allow_overwrite_existing=False`. Downstream consumers reading Delta may see stale values until you append new keys or enable overwrite.
-- **Comparisons saved per run window:** YoY/QoQ/WoW tables contain comparisons computed from the **current run's** `kpi_long`, not recomputed from the full merged saved history. Rebuild comparisons from merged `kpi_long` offline if you need full-history comparisons.
+- **Incremental accumulates onto the latest partition:** under `incremental`, `kpi_long` is merged onto the **latest existing `run_date` partition on or before** the current run (not the partition being written), so weekly runs whose `run_date` advances with `as_of_date` build up history instead of writing isolated single-week snapshots. Each `run_date` partition is a self-contained snapshot of the full merged history as of that run.
+- **Comparisons recomputed from merged history (incremental):** after merging `kpi_long`, the toolkit re-reads the merged partition and recomputes YoY/QoQ/MoM/WoW from the **full saved history**, then overwrites the comparison tables in that partition. A single-week refresh can therefore still produce a YoY vs last year. `ctx.comparison_*` and the notebook/HTML displays reflect the merged history after save. Disable with `output.recompute_comparisons_from_history=False` (or `KPI_RECOMPUTE_COMPARISONS=false`) to keep comparisons scoped to the current run.
+- **Notebook vs saved Delta on overlapping period values:** under `allow_overwrite_existing=False`, overlapping `kpi_long` keys keep the prior saved values (e.g. a stale partial-year annual total is not replaced by a narrower re-run). Enable overwrite or use `full_refresh` to replace them.
 - **Empty outputs skipped:** If a table is empty for this run (e.g. comparisons on a very narrow window), the write for that table is skipped and prior Delta data is left unchanged — even under `full_refresh`.
 
 ### Config keys
@@ -371,10 +402,11 @@ Review Cell 4 output before Cell 5. If `skipped_rows > 0` and you intended to re
     "run_date": None,               # null = use reporting_window.as_of_date for run_date= partition
     "save_mode": "incremental",     # initial | incremental | full_refresh
     "allow_overwrite_existing": False,
+    "recompute_comparisons_from_history": True,  # incremental: recompute YoY/QoQ/MoM/WoW from merged kpi_long
 }
 ```
 
-Environment overrides: `KPI_SAVE_OUTPUTS`, `KPI_OUTPUT_SAVE_MODE`, `KPI_ALLOW_OVERWRITE_EXISTING`, `KPI_OUTPUT_PATH` (comma-separated path segments), `KPI_OUTPUT_RUN_DATE`.
+Environment overrides: `KPI_SAVE_OUTPUTS`, `KPI_OUTPUT_SAVE_MODE`, `KPI_ALLOW_OVERWRITE_EXISTING`, `KPI_OUTPUT_PATH` (comma-separated path segments), `KPI_OUTPUT_RUN_DATE`, `KPI_RECOMPUTE_COMPARISONS`.
 
 ## Config reference
 
@@ -457,6 +489,8 @@ See [HTML report](#html-report) section.
 | `KPI_RUN_MIN_DATE`               | Overrides `run_min_date`                                     |
 | `KPI_USE_HYBRID_SCOPE`           | `true`/`false`                                               |
 | `KPI_RUN_SCOPE_DIFF`             | `true`/`false` — enable defined-vs-score scope diff          |
+| `KPI_COMPARABLE_PAIRS`           | `true`/`false` — enable comparable (like-for-like) pairs     |
+| `KPI_RECOMPUTE_COMPARISONS`      | `true`/`false` — recompute comparisons from merged history   |
 | `KPI_USE_FISCAL_CALENDAR`        | `true`/`false`                                               |
 | `KPI_SCOPE_MIN_PERCENTILE`       | e.g. `20` or `0.2`                                           |
 | `KPI_SCOPE_MIN_WEEKS_FOR_FILTER` | Integer                                                      |
@@ -521,7 +555,7 @@ If you see slow runs, check: (1) scope table path is correct so defined scope is
 ## Known limitations
 
 - **Defined scope without store**: Falls back to product-week grain. Sales/inventory KPIs cover all stores selling the in-scope product-weeks; instock/lost-sales pairs are inferred from lost-sales weekly data.
-- **Comparisons on incremental runs**: YoY/QoQ/WoW reflect the current run window only, not the full merged saved history (see [Output saves](#output-saves)).
+- **Comparable pairs need both periods in the run window**: the gated like-for-like comparable view (see [Comparable pairs](#comparable-pairs-like-for-like)) is computed from pair-level data, which only exists for the current run window. A comparable comparison appears only when the run window spans both compared periods (e.g. a multi-year window for comparable YoY); it is not reconstructable from saved aggregates.
 - **Incremental skip vs notebook output**: Saved Delta can retain old values for overlapping period keys while the notebook shows fresh `kpi_long` — set `allow_overwrite_existing=True` to replace.
 - **WoW with sparse weeks**: Week-over-week compares the last two weeks **present in `kpi_long`**, not necessarily consecutive fiscal weeks when weekly coverage is sparse (e.g. after a narrow `run_min_date` or partial backfill).
 

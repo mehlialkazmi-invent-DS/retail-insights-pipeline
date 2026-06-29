@@ -837,6 +837,8 @@ def _value_panel_content(
     comp_df: Optional[pd.DataFrame],
     comp_label: str,
     week_start_by_period: Optional[Dict[str, Any]] = None,
+    comparable_comp_df: Optional[pd.DataFrame] = None,
+    comparable_label: str = "",
 ) -> str:
     sub, periods = _pivot_single_value(
         kpi_long, period_type, dimension, dimension_value, metric_cols,
@@ -844,7 +846,10 @@ def _value_panel_content(
     )
     table = _kpi_table_html(sub, periods, metric_cols, labels, period_type)
     cmp = _comparison_html(comp_df, dimension, dimension_value, comp_label, labels, period_type)
-    return table + cmp
+    comparable_cmp = _comparison_html(
+        comparable_comp_df, dimension, dimension_value, comparable_label, labels, period_type
+    )
+    return table + cmp + comparable_cmp
 
 
 def _value_tabs_html(
@@ -856,6 +861,8 @@ def _value_tabs_html(
     comp_df: Optional[pd.DataFrame],
     comp_label: str,
     week_start_by_period: Optional[Dict[str, Any]] = None,
+    comparable_comp_df: Optional[pd.DataFrame] = None,
+    comparable_label: str = "",
 ) -> str:
     values = _dimension_values(kpi_long, period_type, dimension)
     if not values:
@@ -864,6 +871,7 @@ def _value_tabs_html(
         return _value_panel_content(
             kpi_long, period_type, dimension, values[0],
             metric_cols, labels, comp_df, comp_label, week_start_by_period,
+            comparable_comp_df, comparable_label,
         )
 
     radios = "".join(
@@ -880,7 +888,7 @@ def _value_tabs_html(
 
     panels = "".join(
         f"<div class='value-panel value-panel-{_safe_id(period_type, dimension, str(i))}'>"
-        f"{_value_panel_content(kpi_long, period_type, dimension, v, metric_cols, labels, comp_df, comp_label, week_start_by_period)}"
+        f"{_value_panel_content(kpi_long, period_type, dimension, v, metric_cols, labels, comp_df, comp_label, week_start_by_period, comparable_comp_df, comparable_label)}"
         f"</div>"
         for i, v in enumerate(values)
     )
@@ -905,6 +913,8 @@ def _period_tab_html(
     comp_df: Optional[pd.DataFrame],
     comp_label: str,
     week_start_by_period: Optional[Dict[str, Any]] = None,
+    comparable_comp_df: Optional[pd.DataFrame] = None,
+    comparable_label: str = "",
 ) -> str:
     pt_id = _safe_id(period_type)
 
@@ -930,11 +940,13 @@ def _period_tab_html(
             content = _value_panel_content(
                 kpi_long, period_type, "overall", dval,
                 metric_cols, labels, comp_df, comp_label, week_start_by_period,
+                comparable_comp_df, comparable_label,
             )
         else:
             content = _value_tabs_html(
                 kpi_long, period_type, dim, metric_cols, labels,
                 comp_df, comp_label, week_start_by_period,
+                comparable_comp_df, comparable_label,
             )
         panels.append(f"<div class='kpi-dim-panel dim-panel-{dim_id}'>{content}</div>")
 
@@ -1106,6 +1118,18 @@ def render_kpi_html(
         "weekly": ctx.comparison_wow,
     }
 
+    # Gated comparable (like-for-like) comparison tables — rendered as a second comparison table
+    # per panel when comparable_pairs was enabled and data is present (else _comparison_html is a
+    # no-op on the empty/None frame).
+    comparable_comp_map: Dict[str, Optional[pd.DataFrame]] = {
+        "annual": getattr(ctx, "comparable_comparison_yoy", None),
+        "quarter": getattr(ctx, "comparable_comparison_qoq", None),
+        "monthly": getattr(ctx, "comparable_comparison_mom", None),
+        "weekly": getattr(ctx, "comparable_comparison_wow", None),
+    }
+    _COMPARABLE_LABELS = {"annual": "Comparable YoY", "quarter": "Comparable QoQ",
+                          "monthly": "Comparable MoM", "weekly": "Comparable WoW"}
+
     week_start_by_period: Dict[str, Any] = {}
     if getattr(ctx, "fiscal_week", None) is not None:
         fw = ctx.fiscal_week.select("Year_Week", "week_start_date").distinct().toPandas()
@@ -1136,7 +1160,7 @@ def render_kpi_html(
 
     period_panels = "".join(
         f"<div class='top-panel top-panel-{_safe_id(pt)}'>"
-        f"{_period_tab_html(kpi_long, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period)}"
+        f"{_period_tab_html(kpi_long, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period, comparable_comp_map.get(pt), _COMPARABLE_LABELS.get(pt, ''))}"
         f"</div>"
         for pt in period_types
     )
