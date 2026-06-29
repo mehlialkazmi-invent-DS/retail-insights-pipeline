@@ -128,6 +128,7 @@ CONFIG: Dict[str, Any] = {
             "wos_cost",
             "inventory_turnover_rate",
             "in_stock_rate",
+            "weighted_instock_rate",
             "lost_sales_pct",
         ],
         "key_metrics": [
@@ -144,7 +145,6 @@ CONFIG: Dict[str, Any] = {
             "total_sales_revenue": "Sales Revenue",
             "total_sales_quantity": "Sales Units",
             "AUR": "AUR",
-            "in_stock_rate": "In-Stock Rate",
             "total_inventory": "Total Inventory",
             "mean_stock": "Daily stock avg (M units)",
             "mean_stock_retail": "Daily stock avg retail (M $)",
@@ -153,12 +153,14 @@ CONFIG: Dict[str, Any] = {
             "wos_revenue": "WOS revenue",
             "wos_cost": "WOS cost",
             "inventory_turnover_rate": "Inventory Turnover Rate",
+            "in_stock_rate": "In-Stock Rate",
+            "weighted_instock_rate": "Weighted In-Stock Rate",
             "lost_sales_pct": "Lost Sales %",
             "distinct_product_count": "Distinct products",
             "distinct_store_count": "Distinct stores",
             "distinct_pair_count": "Distinct pairs",
         },
-        "pp_change_metrics": ["in_stock_rate", "lost_sales_pct"],
+        "pp_change_metrics": ["in_stock_rate", "weighted_instock_rate", "lost_sales_pct"],
     },
     "output": {
         "save_outputs": False,
@@ -191,9 +193,12 @@ CONFIG: Dict[str, Any] = {
         #       "total_sales_revenue": {"definition": "Net sales excluding returns."},
         #   }
         "metric_definitions": {},
-        # Weekly tab: show only the N most recent fiscal weeks (by week_start_date).
-        # Set to null to show all weeks present in kpi_long.
+        # Period display limits: trim kpi_long and Delta saves to the N most recent periods.
+        # Set to null to keep all periods present in the data.
         "weekly_display_weeks": 5,
+        "monthly_display_months": 5,
+        "quarterly_display_quarters": 5,
+        "yearly_display_years": 5,
     },
 }
 
@@ -270,6 +275,15 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if "KPI_HTML_WEEKLY_WEEKS" in os.environ:
         raw = os.environ["KPI_HTML_WEEKLY_WEEKS"].strip()
         hr["weekly_display_weeks"] = int(raw) if raw else None
+    if "KPI_HTML_MONTHLY_MONTHS" in os.environ:
+        raw = os.environ["KPI_HTML_MONTHLY_MONTHS"].strip()
+        hr["monthly_display_months"] = int(raw) if raw else None
+    if "KPI_HTML_QUARTERLY_QUARTERS" in os.environ:
+        raw = os.environ["KPI_HTML_QUARTERLY_QUARTERS"].strip()
+        hr["quarterly_display_quarters"] = int(raw) if raw else None
+    if "KPI_HTML_YEARLY_YEARS" in os.environ:
+        raw = os.environ["KPI_HTML_YEARLY_YEARS"].strip()
+        hr["yearly_display_years"] = int(raw) if raw else None
 
     return out
 
@@ -417,4 +431,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "HTML_REPORT_METRIC_DEFS": html_cfg.get("metric_definitions") or {},
         "HTML_REPORT_OUTPUT_PATH": html_output_path,
         "HTML_REPORT_WEEKLY_DISPLAY_WEEKS": html_cfg.get("weekly_display_weeks"),
+        "HTML_REPORT_MONTHLY_DISPLAY_MONTHS": html_cfg.get("monthly_display_months"),
+        "HTML_REPORT_QUARTERLY_DISPLAY_QUARTERS": html_cfg.get("quarterly_display_quarters"),
+        "HTML_REPORT_YEARLY_DISPLAY_YEARS": html_cfg.get("yearly_display_years"),
     }

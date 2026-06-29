@@ -1,4 +1,4 @@
-"""YoY / QoQ / WoW comparison tables (overall + slice dimensions) and defined-vs-score diff."""
+"""YoY / QoQ / MoM / WoW comparison tables (overall + slice dimensions) and defined-vs-score diff."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import pandas as pd
 from kpi_pipeline.context import KPIContext
 
 _DISTINCT_METRICS = frozenset({"distinct_product_count", "distinct_store_count", "distinct_pair_count"})
+_FRACTIONAL_RATE_METRICS = frozenset({"in_stock_rate", "weighted_instock_rate"})
 
 
 def _format_metric_value(metric: str, value) -> str:
@@ -26,7 +27,7 @@ def _format_metric_value(metric: str, value) -> str:
         return f"${value / 1e6:.1f}M"
     if metric == "AUR":
         return f"${value:.2f}"
-    if metric == "in_stock_rate":
+    if metric in _FRACTIONAL_RATE_METRICS:
         return f"{value * 100:.1f}%"
     if metric == "lost_sales_pct":
         return f"{value:.1f}%"
@@ -41,7 +42,7 @@ def _format_change(metric: str, current, prior, pp_change_metrics) -> str:
     if current is None or prior is None or pd.isna(current) or pd.isna(prior):
         return "—"
     if metric in pp_change_metrics:
-        delta_pp = (current - prior) * 100 if metric == "in_stock_rate" else current - prior
+        delta_pp = (current - prior) * 100 if metric in _FRACTIONAL_RATE_METRICS else current - prior
         return f"{delta_pp:+.1f}pp"
     if prior == 0:
         return "—"
@@ -53,7 +54,7 @@ def _metric_change_values(metric: str, current, prior, pp_change_metrics):
     if current is None or prior is None or pd.isna(current) or pd.isna(prior):
         return change_pct, change_pp
     if metric in pp_change_metrics:
-        change_pp = (current - prior) * 100 if metric == "in_stock_rate" else current - prior
+        change_pp = (current - prior) * 100 if metric in _FRACTIONAL_RATE_METRICS else current - prior
     elif prior != 0:
         change_pct = (current - prior) / abs(prior) * 100
     return change_pct, change_pp
@@ -113,7 +114,7 @@ def _comparison_dimensions(ctx: KPIContext) -> List[str]:
 
 def _prepare_period_tables_for_slice(
     ctx: KPIContext, dimension: str
-) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> Dict[str, pd.DataFrame]:
     metric_cols = ctx.settings["METRIC_COLS"]
     sub = ctx.kpi_long[ctx.kpi_long["dimension"] == dimension].copy()
 
@@ -126,11 +127,20 @@ def _prepare_period_tables_for_slice(
     quarter["Fiscal_Quarter"] = quarter["period"].str.extract(r"Q(\d+)", expand=False).astype(int)
     quarter = quarter[["Year", "Fiscal_Quarter", "dimension_value"] + metric_cols]
 
+    monthly = sub[sub["period_type"] == "monthly"].copy()
+    if not monthly.empty:
+        monthly["Year"] = monthly["period"].str[:4].astype(int)
+        monthly["Fiscal_Month"] = monthly["period"].str[5:].astype(int)
+    else:
+        monthly["Year"] = pd.Series(dtype=int)
+        monthly["Fiscal_Month"] = pd.Series(dtype=int)
+    monthly = monthly[["Year", "Fiscal_Month", "dimension_value"] + metric_cols]
+
     weekly = sub[sub["period_type"] == "weekly"].rename(columns={"period": "Year_Week"})
     week_order = (
         ctx.fiscal_week.select("Year_Week", "week_start_date", "Year", "Week", "Fiscal_Quarter")
-        .orderBy("week_start_date")
         .toPandas()
+        .sort_values("week_start_date")
     )
     weekly = (
         weekly[["Year_Week", "dimension_value"] + metric_cols]
@@ -138,7 +148,8 @@ def _prepare_period_tables_for_slice(
         .sort_values(["dimension_value", "week_start_date"])
         .reset_index(drop=True)
     )
-    return annual, quarter, weekly
+
+    return {"annual": annual, "quarter": quarter, "monthly": monthly, "weekly": weekly}
 
 
 def _series_groups(df: pd.DataFrame, dimension: str) -> List[Tuple[str, pd.DataFrame]]:
@@ -205,6 +216,33 @@ def qoq_comparison_long(
     )
 
 
+def mom_comparison_long(
+    ctx: KPIContext,
+    monthly: pd.DataFrame,
+    metrics: Sequence[str],
+    dimension: str,
+    dimension_value: str,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    monthly = monthly.sort_values(["Year", "Fiscal_Month"])
+    if len(monthly) < 2:
+        return pd.DataFrame(), pd.DataFrame()
+    prior, current = monthly.iloc[-2], monthly.iloc[-1]
+    prior_label = f"{int(prior['Year'])}-{int(prior['Fiscal_Month']):02d}"
+    current_label = f"{int(current['Year'])}-{int(current['Fiscal_Month']):02d}"
+    return build_comparison_long(
+        ctx,
+        prior_label,
+        current_label,
+        f"MoM {current_label}",
+        prior.to_dict(),
+        current.to_dict(),
+        metrics,
+        "mom",
+        dimension,
+        dimension_value,
+    )
+
+
 def _week_metric_values_from_row(week_row: pd.Series, metrics: Sequence[str]) -> Dict[str, object]:
     return {metric: week_row.get(metric) for metric in metrics}
 
@@ -242,19 +280,22 @@ def _build_comparison_for_dimension(
     comparison_kind: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     metric_cols = ctx.settings["METRIC_COLS"]
-    annual, quarter, weekly = _prepare_period_tables_for_slice(ctx, dimension)
+    tables = _prepare_period_tables_for_slice(ctx, dimension)
     save_parts: List[pd.DataFrame] = []
     display_overall: pd.DataFrame = pd.DataFrame()
 
     if comparison_kind == "yoy":
         compare_fn = yoy_comparison_long
-        period_df, key_cols = annual, ["Year"]
+        period_df, key_cols = tables["annual"], ["Year"]
     elif comparison_kind == "qoq":
         compare_fn = qoq_comparison_long
-        period_df, key_cols = quarter, ["Year", "Fiscal_Quarter"]
+        period_df, key_cols = tables["quarter"], ["Year", "Fiscal_Quarter"]
+    elif comparison_kind == "mom":
+        compare_fn = mom_comparison_long
+        period_df, key_cols = tables["monthly"], ["Year", "Fiscal_Month"]
     else:
         compare_fn = wow_comparison_long
-        period_df, key_cols = weekly, ["Year_Week"]
+        period_df, key_cols = tables["weekly"], ["Year_Week"]
 
     for dval, grp in _series_groups(period_df, dimension):
         cols = key_cols + metric_cols
@@ -269,26 +310,31 @@ def _build_comparison_for_dimension(
 
 
 def build_comparisons(ctx: KPIContext) -> None:
-    yoy_saves, qoq_saves, wow_saves = [], [], []
+    yoy_saves, qoq_saves, mom_saves, wow_saves = [], [], [], []
     ctx.yoy_display = pd.DataFrame()
     ctx.qoq_display = pd.DataFrame()
+    ctx.mom_display = pd.DataFrame()
     ctx.wow_display = pd.DataFrame()
 
     for dimension in _comparison_dimensions(ctx):
         yoy_disp, yoy_save = _build_comparison_for_dimension(ctx, dimension, "yoy")
         qoq_disp, qoq_save = _build_comparison_for_dimension(ctx, dimension, "qoq")
+        mom_disp, mom_save = _build_comparison_for_dimension(ctx, dimension, "mom")
         wow_disp, wow_save = _build_comparison_for_dimension(ctx, dimension, "wow")
         if dimension == "overall":
-            ctx.yoy_display, ctx.qoq_display, ctx.wow_display = yoy_disp, qoq_disp, wow_disp
+            ctx.yoy_display, ctx.qoq_display, ctx.mom_display, ctx.wow_display = yoy_disp, qoq_disp, mom_disp, wow_disp
         if not yoy_save.empty:
             yoy_saves.append(yoy_save)
         if not qoq_save.empty:
             qoq_saves.append(qoq_save)
+        if not mom_save.empty:
+            mom_saves.append(mom_save)
         if not wow_save.empty:
             wow_saves.append(wow_save)
 
     ctx.comparison_yoy = pd.concat(yoy_saves, ignore_index=True) if yoy_saves else pd.DataFrame()
     ctx.comparison_qoq = pd.concat(qoq_saves, ignore_index=True) if qoq_saves else pd.DataFrame()
+    ctx.comparison_mom = pd.concat(mom_saves, ignore_index=True) if mom_saves else pd.DataFrame()
     ctx.comparison_wow = pd.concat(wow_saves, ignore_index=True) if wow_saves else pd.DataFrame()
 
     slice_dims = ctx.active_slice_dimensions
@@ -296,6 +342,7 @@ def build_comparisons(ctx: KPIContext) -> None:
         "comparisons:",
         f"YoY rows={len(ctx.comparison_yoy)}",
         f"QoQ rows={len(ctx.comparison_qoq)}",
+        f"MoM rows={len(ctx.comparison_mom)}",
         f"WoW rows={len(ctx.comparison_wow)}",
         "| slice dimensions:",
         slice_dims or "(none)",

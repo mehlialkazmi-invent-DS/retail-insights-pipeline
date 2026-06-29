@@ -36,6 +36,7 @@ _CAT: Dict[str, str] = {
     "total_sales_quantity": "revenue",
     "AUR": "revenue",
     "in_stock_rate": "service",
+    "weighted_instock_rate": "service",
     "lost_sales_pct": "service",
     "mean_stock": "inventory",
     "mean_stock_retail": "inventory",
@@ -168,6 +169,16 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
         ),
         "store_scope": "Service stores only (e-com excluded)",
         "formula": "Σ(in_stock_days) ÷ Σ(available_days)",
+    },
+    "weighted_instock_rate": {
+        "label": "Weighted In-Stock Rate",
+        "definition": (
+            "Sales-weighted in-stock rate. At product×store×week grain, weekly instock = "
+            "in_stock_days ÷ available_days. Period rollup weights each week by its sales units — "
+            "high-volume products and weeks have proportionally more impact than unweighted in-stock rate."
+        ),
+        "store_scope": "Service stores only (e-com excluded)",
+        "formula": "Σ(weekly_instock_rate × weekly_sales_units) ÷ Σ(weekly_sales_units)",
     },
     "lost_sales_pct": {
         "label": "Lost Sales %",
@@ -648,7 +659,7 @@ def _fmt(metric: str, value: Any) -> str:
         return f"${v / 1e6:.1f}M"
     if metric == "AUR":
         return f"${v:.2f}"
-    if metric == "in_stock_rate":
+    if metric in ("in_stock_rate", "weighted_instock_rate"):
         return f"{v * 100:.1f}%"
     if metric == "lost_sales_pct":
         return f"{v:.1f}%"
@@ -690,18 +701,9 @@ def _display_period_labels(
     periods: List[str],
     period_type: str,
     week_start_by_period: Optional[Dict[str, Any]] = None,
-    weekly_display_weeks: Optional[int] = None,
 ) -> List[str]:
-    """Return period labels for HTML display; weekly is capped to the most recent N weeks."""
-    sorted_periods = _sort_period_labels(periods, period_type, week_start_by_period)
-    if (
-        period_type == "weekly"
-        and weekly_display_weeks is not None
-        and weekly_display_weeks > 0
-        and len(sorted_periods) > weekly_display_weeks
-    ):
-        return sorted_periods[-weekly_display_weeks:]
-    return sorted_periods
+    """Return sorted period labels for HTML display (trim already applied to kpi_long at data level)."""
+    return _sort_period_labels(periods, period_type, week_start_by_period)
 
 
 def _pivot_single_value(
@@ -711,7 +713,6 @@ def _pivot_single_value(
     dimension_value: str,
     metric_cols: List[str],
     week_start_by_period: Optional[Dict[str, Any]] = None,
-    weekly_display_weeks: Optional[int] = None,
 ) -> Tuple[pd.DataFrame, List[str]]:
     sub = kpi_long[
         (kpi_long["period_type"] == period_type)
@@ -724,7 +725,6 @@ def _pivot_single_value(
         sub["period"].unique().tolist(),
         period_type,
         week_start_by_period,
-        weekly_display_weeks,
     )
     sub = sub[sub["period"].isin(periods)]
     keep = ["period"] + [m for m in metric_cols if m in sub.columns]
@@ -837,11 +837,10 @@ def _value_panel_content(
     comp_df: Optional[pd.DataFrame],
     comp_label: str,
     week_start_by_period: Optional[Dict[str, Any]] = None,
-    weekly_display_weeks: Optional[int] = None,
 ) -> str:
     sub, periods = _pivot_single_value(
         kpi_long, period_type, dimension, dimension_value, metric_cols,
-        week_start_by_period, weekly_display_weeks,
+        week_start_by_period,
     )
     table = _kpi_table_html(sub, periods, metric_cols, labels, period_type)
     cmp = _comparison_html(comp_df, dimension, dimension_value, comp_label, labels, period_type)
@@ -857,7 +856,6 @@ def _value_tabs_html(
     comp_df: Optional[pd.DataFrame],
     comp_label: str,
     week_start_by_period: Optional[Dict[str, Any]] = None,
-    weekly_display_weeks: Optional[int] = None,
 ) -> str:
     values = _dimension_values(kpi_long, period_type, dimension)
     if not values:
@@ -865,7 +863,7 @@ def _value_tabs_html(
     if len(values) == 1:
         return _value_panel_content(
             kpi_long, period_type, dimension, values[0],
-            metric_cols, labels, comp_df, comp_label, week_start_by_period, weekly_display_weeks,
+            metric_cols, labels, comp_df, comp_label, week_start_by_period,
         )
 
     radios = "".join(
@@ -882,7 +880,7 @@ def _value_tabs_html(
 
     panels = "".join(
         f"<div class='value-panel value-panel-{_safe_id(period_type, dimension, str(i))}'>"
-        f"{_value_panel_content(kpi_long, period_type, dimension, v, metric_cols, labels, comp_df, comp_label, week_start_by_period, weekly_display_weeks)}"
+        f"{_value_panel_content(kpi_long, period_type, dimension, v, metric_cols, labels, comp_df, comp_label, week_start_by_period)}"
         f"</div>"
         for i, v in enumerate(values)
     )
@@ -907,7 +905,6 @@ def _period_tab_html(
     comp_df: Optional[pd.DataFrame],
     comp_label: str,
     week_start_by_period: Optional[Dict[str, Any]] = None,
-    weekly_display_weeks: Optional[int] = None,
 ) -> str:
     pt_id = _safe_id(period_type)
 
@@ -932,12 +929,12 @@ def _period_tab_html(
             dval = values[0] if values else "overall"
             content = _value_panel_content(
                 kpi_long, period_type, "overall", dval,
-                metric_cols, labels, comp_df, comp_label, week_start_by_period, weekly_display_weeks,
+                metric_cols, labels, comp_df, comp_label, week_start_by_period,
             )
         else:
             content = _value_tabs_html(
                 kpi_long, period_type, dim, metric_cols, labels,
-                comp_df, comp_label, week_start_by_period, weekly_display_weeks,
+                comp_df, comp_label, week_start_by_period,
             )
         panels.append(f"<div class='kpi-dim-panel dim-panel-{dim_id}'>{content}</div>")
 
@@ -1031,13 +1028,14 @@ def _report_info_html(
     </div>"""
 
 
-_PERIOD_ORDER = ["annual", "quarter", "weekly"]
-_PERIOD_LABELS = {"annual": "Annual", "quarter": "Quarter", "weekly": "Weekly"}
-_PERIOD_COMP_LABEL = {"annual": "YoY", "quarter": "QoQ", "weekly": "WoW"}
+_PERIOD_ORDER = ["annual", "quarter", "monthly", "weekly"]
+_PERIOD_LABELS = {"annual": "Annual", "quarter": "Quarter", "monthly": "Monthly", "weekly": "Weekly"}
+_PERIOD_COMP_LABEL = {"annual": "YoY", "quarter": "QoQ", "monthly": "MoM", "weekly": "WoW"}
 
 _TURNOVER_PERIOD_LABELS = {
     "annual": "Annual Inventory Turnover Rate",
     "quarter": "Quarterly Inventory Turnover Rate",
+    "monthly": "Monthly Inventory Turnover Rate",
     "weekly": "Weekly Inventory Turnover Rate",
 }
 
@@ -1099,11 +1097,12 @@ def render_kpi_html(
     period_types = [pt for pt in _PERIOD_ORDER if pt in present_period_types]
 
     if not period_types:
-        raise ValueError("kpi_long contains no recognised period_types (annual/quarter/weekly).")
+        raise ValueError("kpi_long contains no recognised period_types (annual/quarter/monthly/weekly).")
 
     comp_map: Dict[str, Optional[pd.DataFrame]] = {
         "annual": ctx.comparison_yoy,
         "quarter": ctx.comparison_qoq,
+        "monthly": getattr(ctx, "comparison_mom", None),
         "weekly": ctx.comparison_wow,
     }
 
@@ -1111,8 +1110,6 @@ def render_kpi_html(
     if getattr(ctx, "fiscal_week", None) is not None:
         fw = ctx.fiscal_week.select("Year_Week", "week_start_date").distinct().toPandas()
         week_start_by_period = dict(zip(fw["Year_Week"], fw["week_start_date"]))
-
-    weekly_display_weeks = settings.get("HTML_REPORT_WEEKLY_DISPLAY_WEEKS")
 
     dims_by_period = {pt: dims for pt in period_types}
     values_by_dim: Dict[str, List[str]] = {}
@@ -1139,7 +1136,7 @@ def render_kpi_html(
 
     period_panels = "".join(
         f"<div class='top-panel top-panel-{_safe_id(pt)}'>"
-        f"{_period_tab_html(kpi_long, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period, weekly_display_weeks)}"
+        f"{_period_tab_html(kpi_long, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period)}"
         f"</div>"
         for pt in period_types
     )

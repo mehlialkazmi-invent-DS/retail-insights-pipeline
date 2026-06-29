@@ -124,13 +124,36 @@ def compute_kpis(
         )
         .select(*keys, "inventory_turnover_rate")
     )
-    instock = inst.groupBy(*keys).agg((F.sum("stocked_pairs") / F.sum("available_days")).alias("in_stock_rate"))
+    instock = inst.groupBy(*keys).agg(
+        F.greatest(F.lit(0.0), F.sum("stocked_pairs") / F.sum("available_days")).alias("in_stock_rate")
+    )
+
+    # Sales-weighted in-stock rate: aggregate instock to Year×Week (+ slice group_keys), then
+    # weight each week by its sales when rolling up to the reporting period.
+    weekly_wi_keys = ["Year", "Week"] + group_keys
+    period_extra_wi = [period_col] if period_col not in weekly_wi_keys else []
+
+    weekly_wi = inst.groupBy(*weekly_wi_keys, *period_extra_wi).agg(
+        F.greatest(F.lit(0.0), F.sum("stocked_pairs") / F.sum("available_days")).alias("_wi_rate"),
+    )
+    weekly_wi_sales = daily_service.groupBy(*weekly_wi_keys, *period_extra_wi).agg(
+        F.sum("sales_quantity").alias("_wi_sales")
+    )
+    weighted_instock = (
+        weekly_wi
+        .join(weekly_wi_sales, on=weekly_wi_keys + period_extra_wi, how="left")
+        .groupBy(*keys)
+        .agg(
+            (F.sum(F.col("_wi_rate") * F.col("_wi_sales")) / F.sum("_wi_sales")).alias("weighted_instock_rate")
+        )
+    )
 
     return (
         sales.join(wos, on=keys, how="left")
         .join(mean_stock, on=keys, how="left")
         .join(turnover, on=keys, how="left")
         .join(instock, on=keys, how="left")
+        .join(weighted_instock, on=keys, how="left")
     )
 
 

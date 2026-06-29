@@ -37,11 +37,13 @@ class KPIContext:
     kpi_long: Optional[pd.DataFrame] = None
     comparison_yoy: Optional[pd.DataFrame] = None
     comparison_qoq: Optional[pd.DataFrame] = None
+    comparison_mom: Optional[pd.DataFrame] = None
     comparison_wow: Optional[pd.DataFrame] = None
     scope_diff: Optional[pd.DataFrame] = None
 
     yoy_display: Optional[pd.DataFrame] = None
     qoq_display: Optional[pd.DataFrame] = None
+    mom_display: Optional[pd.DataFrame] = None
     wow_display: Optional[pd.DataFrame] = None
     save_plan: Optional[Any] = None
 

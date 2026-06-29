@@ -18,7 +18,7 @@ def is_service_store(ctx: KPIContext) -> F.Column:
 
 
 def _enrich_lost_sales_with_time_grain(ctx: KPIContext, lost_sales_pair: DataFrame) -> DataFrame:
-    fw_cols = ["week_start_date", "week_end_date", "Year", "Week", "Year_Week", "Fiscal_Quarter"]
+    fw_cols = ["week_start_date", "week_end_date", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Month"]
     if ctx.settings["USE_FISCAL_CALENDAR"]:
         return lost_sales_pair.join(broadcast(ctx.fiscal_week.select(*fw_cols)), on="week_start_date", how="inner")
     if "_ls_year" in lost_sales_pair.columns and "_ls_week" in lost_sales_pair.columns:
@@ -55,8 +55,8 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
     ]
     if not ctx.settings["USE_FISCAL_CALENDAR"]:
         if "year" in raw.columns and "week" in raw.columns:
-            agg_exprs.append(F.max(F.col("year").cast("int")).alias("_ls_year"))
-            agg_exprs.append(F.max(F.col("week").cast("int")).alias("_ls_week"))
+            agg_exprs.append(F.first(F.col("year").cast("int"), ignorenulls=True).alias("_ls_year"))
+            agg_exprs.append(F.first(F.col("week").cast("int"), ignorenulls=True).alias("_ls_week"))
     deduped = filtered.groupBy("product_id", "store_id", "week_start_date").agg(*agg_exprs)
     ctx.lost_sales_weekly_base = _enrich_lost_sales_with_time_grain(ctx, deduped).withColumn(
         "fiscal_week_days",
@@ -102,7 +102,7 @@ def build_scoped_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs_in: D
         .withColumn("inventory_cost", F.round(F.col("inventory") * F.col("cogs"), 2))
         .withColumn("sales_cost", F.round(F.col("sales_quantity") * F.col("cogs"), 2))
         .join(
-            broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter")),
+            broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Month")),
             on=["Year", "Week"],
             how="inner",
         )
@@ -133,6 +133,7 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
             "Week",
             "Year_Week",
             "Fiscal_Quarter",
+            "Fiscal_Month",
             F.col("in_stock_days").alias("stocked_pairs"),
             F.coalesce(F.col("total_days"), F.col("fiscal_week_days")).alias("available_days"),
         )
@@ -151,7 +152,7 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
     )
     lost_base = (
         lost_sales_weekly.filter(is_service_store(ctx))
-        .select("product_id", "store_id", "Year", "Week", "Year_Week", "Fiscal_Quarter", "lost_sales")
+        .select("product_id", "store_id", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Month", "lost_sales")
         .join(weekly_sales_for_lost, on=["product_id", "store_id", "Year", "Week"], how="left")
         .withColumn("sales_quantity_weekly", F.coalesce(F.col("sales_quantity_weekly"), F.lit(0.0)))
         .withColumn(

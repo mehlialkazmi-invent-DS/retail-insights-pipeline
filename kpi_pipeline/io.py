@@ -59,6 +59,7 @@ TABLE_ROW_KEYS: Dict[str, Sequence[str]] = {
     "kpi_long": ("period_type", "period", "dimension", "dimension_value"),
     "comparison_yoy": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
     "comparison_qoq": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
+    "comparison_mom": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
     "comparison_wow": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
     "scope_diff": ("Year", "metric"),
 }
@@ -180,6 +181,7 @@ def build_save_plan(ctx: KPIContext, fund_paste) -> SavePlan:
         "kpi_long": ctx.kpi_long,
         "comparison_yoy": ctx.comparison_yoy,
         "comparison_qoq": ctx.comparison_qoq,
+        "comparison_mom": ctx.comparison_mom,
         "comparison_wow": ctx.comparison_wow,
         "scope_diff": ctx.scope_diff,
     }
@@ -293,6 +295,7 @@ _SAVED_OUTPUT_TABLES = {
     "kpi_long": "kpi_long",
     "comparison_yoy": "comparison_yoy",
     "comparison_qoq": "comparison_qoq",
+    "comparison_mom": "comparison_mom",
     "comparison_wow": "comparison_wow",
 }
 
@@ -306,11 +309,16 @@ def load_saved_outputs(ctx: KPIContext, fund_paste) -> None:
     for attr, name in _SAVED_OUTPUT_TABLES.items():
         path = _table_path(output_root, name, run_date, fund_paste)
         if not _delta_exists(spark, path):
-            raise ValueError(
-                f"Saved output table {name!r} not found at {path}. "
-                "Run the full pipeline with output.save_outputs=True first, "
-                f"or set output.run_date to match an existing partition."
-            )
+            # Comparison tables are skipped at save time when empty (e.g. fewer than
+            # two periods for YoY). Only kpi_long is mandatory; the rest default empty.
+            if name == "kpi_long":
+                raise ValueError(
+                    f"Saved output table {name!r} not found at {path}. "
+                    "Run the full pipeline with output.save_outputs=True first, "
+                    f"or set output.run_date to match an existing partition."
+                )
+            setattr(ctx, attr, pd.DataFrame())
+            continue
         pdf = _load_existing_table(spark, path)
         setattr(ctx, attr, pdf)
 
@@ -359,6 +367,7 @@ def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
         "kpi_long": ctx.kpi_long,
         "comparison_yoy": ctx.comparison_yoy,
         "comparison_qoq": ctx.comparison_qoq,
+        "comparison_mom": ctx.comparison_mom,
         "comparison_wow": ctx.comparison_wow,
         "scope_diff": ctx.scope_diff,
     }

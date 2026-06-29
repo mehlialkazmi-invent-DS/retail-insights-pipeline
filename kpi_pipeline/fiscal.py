@@ -17,19 +17,36 @@ from kpi_pipeline.context import KPIContext
 
 
 def _build_fiscal_week_frame(daily_grain: DataFrame) -> DataFrame:
-    return (
+    has_month = "Month" in daily_grain.columns
+    agg_exprs = [
+        F.min("date").alias("week_start_date"),
+        F.max("date").alias("week_end_date"),
+        F.first("Quarter", ignorenulls=True).alias("Quarter"),
+    ]
+    if has_month:
+        agg_exprs.append(F.first("Month", ignorenulls=True).alias("_raw_month"))
+
+    frame = (
         daily_grain.groupBy("Year", "Week")
-        .agg(
-            F.min("date").alias("week_start_date"),
-            F.max("date").alias("week_end_date"),
-            F.first("Quarter", ignorenulls=True).alias("Quarter"),
-        )
+        .agg(*agg_exprs)
         .withColumn(
             "Year_Week",
             F.concat_ws("-W", F.col("Year").cast("string"), F.format_string("%02d", F.col("Week"))),
         )
         .withColumn("Fiscal_Quarter", F.regexp_extract(F.col("Quarter"), r"Q(\d+)", 1).cast("int"))
     )
+
+    if has_month:
+        # Extract numeric month from the fiscal calendar Month column (e.g. "M01" → 1, "1" → 1).
+        frame = (
+            frame
+            .withColumn("Fiscal_Month", F.regexp_extract(F.col("_raw_month"), r"(\d+)", 1).cast("int"))
+            .drop("_raw_month")
+        )
+    else:
+        frame = frame.withColumn("Fiscal_Month", F.month("week_start_date"))
+
+    return frame
 
 
 def build_fiscal_cal_and_week_from_upload(
@@ -38,10 +55,12 @@ def build_fiscal_cal_and_week_from_upload(
     report_start_date: datetime.date,
     report_end_date: datetime.date,
 ) -> Tuple[DataFrame, DataFrame]:
+    raw = ctx.spark.read.format("delta").load(path)
+    select_cols = ["date", "Year", "Week", "Quarter"]
+    if "Month" in raw.columns:
+        select_cols.append("Month")
     fiscal_cal_out = (
-        ctx.spark.read.format("delta")
-        .load(path)
-        .select("date", "Year", "Week", "Quarter")
+        raw.select(*select_cols)
         .withColumn("date", F.to_date("date"))
         .filter(F.col("date").between(F.lit(report_start_date), F.lit(report_end_date)))
     )
