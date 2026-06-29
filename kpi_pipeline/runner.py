@@ -14,7 +14,7 @@ from kpi_pipeline.fiscal import build_fiscal_and_products
 from kpi_pipeline.html_report import render_kpi_html
 from kpi_pipeline.fiscal import build_fiscal_week_only
 from kpi_pipeline.io import build_save_plan, load_saved_outputs, save_outputs
-from kpi_pipeline.kpi_long import build_kpi_long
+from kpi_pipeline.kpi_long import build_kpi_long, trim_weekly_to_recent
 from kpi_pipeline.pipeline import build_pipeline_frames
 from kpi_pipeline.scope import apply_scope_adjustments, build_defined_scope, build_hybrid_scope, scope_summary_by_origin
 
@@ -140,6 +140,7 @@ class KPIRunner:
         load_saved_outputs(self.ctx, fund_paste)
         self._infer_active_slices_from_kpi_long()
         build_fiscal_week_only(self.ctx)
+        self.ctx.kpi_long = trim_weekly_to_recent(self.ctx.kpi_long, self.ctx)
         print("html_only: skipped pipeline — loaded saved outputs for HTML report.")
         return self.ctx
 
@@ -183,6 +184,7 @@ class KPIRunner:
 
     def build_comparisons(self) -> None:
         build_comparisons(self.ctx)
+        self.ctx.kpi_long = trim_weekly_to_recent(self.ctx.kpi_long, self.ctx)
 
     def build_scope_comparison(self) -> None:
         if not self.settings.get("RUN_SCOPE_DIFF", False):

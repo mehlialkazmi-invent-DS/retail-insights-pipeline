@@ -40,6 +40,22 @@ def _period_label(period_name: str, row: pd.Series) -> str:
     return str(row["Year_Week"])
 
 
+def trim_weekly_to_recent(kpi_long: pd.DataFrame, ctx: KPIContext) -> pd.DataFrame:
+    """Drop weekly rows outside the N most recent fiscal weeks (sorted by week_start_date)."""
+    n = ctx.settings.get("HTML_REPORT_WEEKLY_DISPLAY_WEEKS")
+    if not n:
+        return kpi_long
+    fw_pd = ctx.fiscal_week.select("Year_Week", "week_start_date").toPandas()
+    recent_weeks = set(
+        fw_pd.sort_values("week_start_date", ascending=False).head(n)["Year_Week"].tolist()
+    )
+    is_weekly = kpi_long["period_type"] == "weekly"
+    return pd.concat(
+        [kpi_long[~is_weekly], kpi_long[is_weekly & kpi_long["period"].isin(recent_weeks)]],
+        ignore_index=True,
+    )
+
+
 def build_kpi_long(ctx: KPIContext, frames: Dict[str, DataFrame]) -> pd.DataFrame:
     """Build kpi_long for overall + each active slice dimension across annual/quarter/weekly periods."""
     metric_cols = ctx.settings["METRIC_COLS"]
