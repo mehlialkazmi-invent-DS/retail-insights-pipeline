@@ -62,6 +62,7 @@ generate-kpis-toolkit/
   - `path_segments.defined_scope` — Delta path segments under the datastore bucket
   - `input_filters` — optional Spark SQL filters on defined scope, lost sales, daily data
   - `slices.dimensions` — product-master columns to slice by (e.g. `brand`)
+  - `dimension_sources` — optional, gated: pull extra slice dimensions from tables other than products (e.g. NVROUT from `extended_product`) — see [Dimension sources](#dimension-sources-extra-slices-from-other-tables)
   - `output.save_mode` — `initial`, `incremental`, or `full_refresh`
 3. **Open** `main.ipynb` and **Run All** — Cell 2 previews inputs before the pipeline run in Cell 3.
 4. **Review** the save plan cell before the write cell runs. Set `allow_overwrite_existing=True` if you intentionally want to replace overlapping periods.
@@ -82,7 +83,7 @@ Set `scope.use_hybrid_scope = False`. KPIs use only rows from your configured de
 
 1. **Defined scope** — Read from your configured Delta table at `product_id × store_id × Year × Week` grain (store optional; product-week fallback if no `store_col`). Weeks are matched by **calendar overlap** with the report window (fixes mid-week `run_min_date` false gaps).
 2. **Gap detection** — Fiscal weeks in the report window with **no** defined-scope rows are treated as missing.
-3. **Score backfill** — The score scope is computed once over the **full** report window: each `(product_id, store_id)` keeps the weeks whose weekly sales and **last available in-week inventory** clear a per-pair percentile threshold (thresholds use all the pair's weeks; ecom stores excluded). The backfill then adds only the weeks that fall in the **missing** weeks above. Because thresholds use the full window, the defined-vs-score diff mirrors exactly what the backfill contributes.
+3. **Score backfill** — The score scope is computed once over the **full** report window: each `(product_id, store_id)` keeps the weeks whose weekly sales and **last available in-week inventory** clear a per-pair percentile threshold (thresholds use all the pair's weeks; **all stores included** — scope membership is store-agnostic, e-com is excluded later only for service metrics). The backfill then adds only the weeks that fall in the **missing** weeks above. Because thresholds use the full window, the defined-vs-score diff mirrors exactly what the backfill contributes.
 4. **Hybrid union** — Defined rows (`scope_origin=defined`) ∪ score backfill rows (`scope_origin=score`).
 
 ### Manual scope adjustments
@@ -103,6 +104,13 @@ After hybrid/defined scope is built, optional additions and removals are applied
 
 
 CSV options (optional): `"csv_options": {"header": True, "inferSchema": True}`
+
+**CSV location** — `"location"` controls where a CSV physically lives (applies to scope adjustments *and* [dimension sources](#dimension-sources-extra-slices-from-other-tables)):
+
+| `location` | Reads from | Notes |
+| ---------- | ---------- | ----- |
+| `datastore` (default) | A cloud / DBFS path under the datastore mount (`/mnt/invent-{customer}-datastore/...`) | Path used as-is by Spark |
+| `workspace` | A Databricks **workspace** file (`/Workspace/Users/...`) | Read through the `file:` scheme — mirrors how the v4 script loaded CSVs next to the notebook |
 
 When adjustments run, the pipeline prints the scope **before**, after **each** addition/removal, and the **final** scope. The notebook scope summary cell displays before/after tables and a steps table.
 
@@ -155,6 +163,54 @@ Example (Delta + CSV):
     }],
 }
 ```
+
+## Dimension sources (extra slices from other tables)
+
+**What it is.** By default, every slice dimension (the breakdown columns in the report) comes from the **products master** (`master-data/products`) — either a real column listed in `slices.dimensions` or a `slices.derived_dimensions` SQL expression over products columns. `dimension_sources` lets you pull a breakdown column from a **different table** when it does not live on products.
+
+**Why it exists.** Some segmentations are not products attributes. The classic example is tbretail's **NVROUT** flag, which is derived from `program` on `operation/extended_product`, not `master-data/products`. Without this feature you could only slice by products columns; the segment would be invisible to the report. `dimension_sources` joins that external column onto the product attribute table *after* scope is built, so it becomes a normal slice dimension everywhere downstream (`kpi_long`, comparisons, HTML).
+
+**It is gated and opt-in.** The default config ships one **disabled** example. With nothing enabled, behaviour is exactly as before — slices come from products only. A data scientist who does *not* need external dimensions never has to think about this block; one who does flips `enabled: True` on a source. **If your breakdown column already exists on (or is derivable from) the products table, use `slices` — not this.** Dimension sources are only for columns that genuinely live elsewhere.
+
+### How it works
+
+Each **enabled** source is **left-joined** onto the product attribute projection by `join_key` (normally `product_id`, and it must already be a products column). The source's raw `columns` and `derived` SQL expressions (evaluated against the **source** table) become slice dimensions automatically — you do **not** also need to list them in `slices.dimensions`. They appear under `ACTIVE_SLICE_DIMENSIONS` in the Cell 1 / fiscal log.
+
+```python
+"dimension_sources": [
+    {
+        "enabled": True,
+        "label": "extended_product",
+        "source": "delta",                              # "delta" | "csv"
+        "path_segments": ["operation", "extended_product"],
+        "join_key": "product_id",
+        "columns": [],                                  # raw source columns to carry over
+        "derived": {                                    # Spark SQL over the SOURCE table
+            "is_nvrout": "CASE WHEN program LIKE '%NVROUT%' THEN 'yes' ELSE 'no' END",
+        },
+    },
+],
+"slices": {"dimensions": ["brand"], "derived_dimensions": {}},
+```
+
+This produces an `is_nvrout` slice (`yes` / `no`) alongside `brand` — the `yes` panel is your NVROUT KPIs.
+
+### Source-specific behaviour to know
+
+- **One row per `join_key`.** The source is reduced with `dropDuplicates([join_key])` **before** the join so it can never fan out (duplicate) the product rows. If the raw table has several rows per product (e.g. `extended_product` with multiple `program` values), the surviving row is **arbitrary** — pre-aggregate the source to one row per product (or to a clean membership flag) before pointing the toolkit at it, exactly as the v4 script did with `.select(product_id).distinct()`. The toolkit does **not** clean the source (same data-quality contract as scope adjustments).
+- **Mutually exclusive within one column.** A single dimension column gives each product one value. To represent **overlapping** segments (e.g. v4's "COMP includes NVROUT"), model them as **independent boolean dimensions** — `is_nvrout`, `is_comp` — each its own slice; a product can be `yes` under both. A single `segment` column cannot express the overlap.
+- **Products missing from the source get NULL.** The join is a **left** join (it must keep every product). A product with no row in the source table gets `NULL` for the new dimension — *not* a default like `"no"`. A `CASE WHEN program LIKE '%NVROUT%' ... ELSE 'no'` expression only yields `"no"` for products that **have** a row in the source; products absent from `extended_product` are `NULL` (their own panel). Make the source cover the full product universe, or accept the `NULL` bucket, if you want a clean `yes`/`no` split.
+- **Enabled sources fail loudly.** Unlike `derived_dimensions` (best-effort, skipped on error), an **enabled** dimension source raises on a bad path, missing column, or unresolved expression — a silently dropped segment would misreport the very breakdown you added it to produce. Disable the source if you want it ignored.
+- **CSV location.** Delta or CSV; CSV honours the same `location` (`datastore` / `workspace`) and `csv_options` as [scope adjustments](#manual-scope-adjustments).
+
+### Scope vs slices — two different machines
+
+| Need | Use | Effect |
+| ---- | --- | ------ |
+| Include/exclude which (product, store, week) rows enter the KPIs (e.g. a JAB include list) | `scope_adjustments` | Changes scope **membership**; the addition's `scope_origin` label is for reporting only — it is **not** a report breakdown |
+| Break the report out by a segment (NVROUT vs COMP, etc.) | `slices` + `dimension_sources` | Adds a **dimension** the report groups by |
+
+`scope_adjustments` decide *which rows*; `slices` / `dimension_sources` decide *how rows are grouped*. A typical tbretail setup uses both: a JAB scope addition **and** an `is_nvrout` dimension source.
 
 ## Input previews and filters
 
@@ -478,7 +534,9 @@ If you see slow runs, check: (1) scope table path is correct so defined scope is
 | Overlapping periods skipped | Expected with `incremental` + `allow_overwrite_existing=False` — set `True` to replace |
 | Saved Delta stale vs notebook | Incremental skip kept old rows on disk while notebook shows fresh `kpi_long` — enable overwrite or use `full_refresh` |
 | Comparisons skipped         | Need ≥2 years (YoY), ≥2 quarters (QoQ), or ≥2 fiscal weeks (WoW) in window  |
-| Empty slice dimension       | Column missing from `master-data/products` or derived SQL failed validation |
+| Empty slice dimension       | Column missing from `master-data/products` or derived SQL failed validation — if it lives on another table, add a [dimension source](#dimension-sources-extra-slices-from-other-tables) |
+| Dimension source errors on read | An **enabled** dimension source fails loudly on bad path / missing column / bad expression (by design) — fix the source or set `enabled: False` |
+| Slice value count looks doubled | A `dimension_source` table has multiple rows per `join_key` — pre-aggregate to one row per product (toolkit keeps an arbitrary row, see [Dimension sources](#dimension-sources-extra-slices-from-other-tables)) |
 
 
 ## HTML report

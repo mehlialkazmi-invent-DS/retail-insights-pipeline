@@ -8,6 +8,50 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 
+def resolve_csv_path(path: str, location: str = "datastore") -> str:
+    """Resolve a CSV path for Spark based on where the file physically lives.
+
+    location:
+      - "datastore" (default): a cloud / DBFS path under the datastore mount
+        (e.g. /mnt/invent-{customer}-datastore/...). Used as-is.
+      - "workspace": a Databricks **workspace** file (e.g. /Workspace/Users/...).
+        Spark reads workspace files through the ``file:`` scheme, so the prefix is
+        added when missing. This mirrors how the v4 script read CSVs that lived next
+        to the notebook in the workspace rather than in the datastore.
+    """
+    loc = (location or "datastore").strip().lower()
+    if loc not in {"datastore", "workspace"}:
+        raise ValueError(f"csv location must be 'datastore' or 'workspace'; got {location!r}")
+    if loc == "workspace" and not path.startswith("file:"):
+        return "file:" + path if path.startswith("/") else "file:/" + path
+    return path
+
+
+def read_csv_source(
+    spark: SparkSession,
+    path: str,
+    csv_options: Optional[Dict[str, Any]] = None,
+    location: str = "datastore",
+) -> DataFrame:
+    """Read a CSV from either the datastore or a Databricks workspace path.
+
+    ``csv_options`` mirrors Spark CSV reader options. ``header`` (default True) and
+    ``inferSchema`` (default True) are applied as booleans; any other keys are passed
+    through verbatim. Use ``location`` to read workspace-resident CSVs (see
+    :func:`resolve_csv_path`).
+    """
+    opts = dict(csv_options or {})
+    resolved = resolve_csv_path(path, location)
+    reader = spark.read.option("header", str(opts.get("header", True)).lower())
+    if opts.get("inferSchema", True):
+        reader = reader.option("inferSchema", "true")
+    for key, value in opts.items():
+        if key not in {"header", "inferSchema"}:
+            reader = reader.option(key, value)
+    print(f"  csv source ({location}): {resolved}")
+    return reader.csv(resolved)
+
+
 def _input_filters(settings: Dict[str, Any], source: str) -> List[str]:
     return list(settings.get("INPUT_FILTERS", {}).get(source, []) or [])
 

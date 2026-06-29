@@ -60,6 +60,7 @@ CONFIG: Dict[str, Any] = {
                 # "source": "csv",
                 # "path": "/mnt/invent-{customer}-datastore/analysis/kpi_reports/manual_additions.csv",
                 # "csv_options": {"header": True, "inferSchema": True},
+                # "location": "datastore",  # "datastore" (default) or "workspace" (/Workspace/... CSV via file: scheme)
                 # Expected logical keys: product_id, store_id, and a date (via date_col).
                 "join_keys": ["product_id", "store_id"],
                 "product_col": "product_id",
@@ -74,6 +75,7 @@ CONFIG: Dict[str, Any] = {
                 "enabled": False,
                 "source": "delta",
                 "path_segments": ["analysis", "kpi_reports", "manual_scope_removals"],
+                # "location": "datastore",  # "datastore" (default) or "workspace" for /Workspace/... CSVs
                 "join_keys": ["product_id"],
                 "product_col": "product_id",
                 "store_col": "store_id",
@@ -83,6 +85,39 @@ CONFIG: Dict[str, Any] = {
             }
         ],
     },
+    "dimension_sources": [
+        # GATED, OPT-IN. Pull extra slice dimensions from tables OTHER than master-data/products.
+        # Default = nothing enabled => slices come from the products master only (see "slices").
+        # Enable a source ONLY when a breakdown column does not live on the products table
+        # (e.g. NVROUT membership lives on operation/extended_product, not products).
+        #
+        # Each enabled source is left-joined onto the product attribute table by `join_key`
+        # (normally product_id, and it must already be a products column). Its raw `columns`
+        # and `derived` SQL expressions (evaluated against the SOURCE table) become slice
+        # dimensions automatically — no need to also list them under slices.dimensions.
+        # The source is reduced to ONE row per join_key before the join (dropDuplicates), so
+        # pre-aggregate to one row per product if the raw table has many (see README).
+        #
+        # An ENABLED source fails loudly on a bad path / missing column / bad expression —
+        # it will not silently drop the segment you added it to produce.
+        {
+            "enabled": False,
+            "label": "extended_product",
+            "source": "delta",  # "delta" | "csv"
+            "path_segments": ["operation", "extended_product"],
+            # CSV alternatives (source auto-detected from .csv extension):
+            # "source": "csv",
+            # "path": "/Workspace/Users/you@invent.ai/lists/nvrout.csv",  # or a datastore path
+            # "location": "workspace",  # "datastore" (default) or "workspace" (/Workspace/... via file: scheme)
+            # "csv_options": {"header": True, "inferSchema": True},
+            "join_key": "product_id",
+            "columns": [],  # raw columns from the source to carry over as dimensions
+            "derived": {
+                # Spark SQL over the SOURCE table's columns -> new dimension column(s).
+                "is_nvrout": "CASE WHEN program LIKE '%NVROUT%' THEN 'yes' ELSE 'no' END",
+            },
+        }
+    ],
     "path_segments": {
         "fiscal": ["one_time_uploads", "fiscal_cal"],
         "daily_data": ["noob", "daily-data"],
@@ -361,6 +396,16 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
 
     defined_scope = {**cfg["defined_scope"], "path": paths["PATH_DEFINED_SCOPE"]}
 
+    # Resolve optional dimension-source paths up front (same pattern as PATH_* above) so
+    # fiscal.py reads absolute paths without needing fund_paste. path_segments are joined
+    # under the bucket; an explicit "path" (e.g. a /Workspace CSV) is passed through as-is.
+    dimension_sources = []
+    for src in cfg.get("dimension_sources", []) or []:
+        resolved = dict(src)
+        if not resolved.get("path") and resolved.get("path_segments"):
+            resolved["path"] = fund_paste(bucket, *resolved["path_segments"])
+        dimension_sources.append(resolved)
+
     output_cfg = cfg["output"]
     output_root = fund_paste(bucket, *output_cfg["path_segments"])
     run_date_raw = output_cfg.get("run_date")
@@ -415,6 +460,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "INPUT_FILTERS": cfg.get("input_filters", {}),
         "SLICE_DIMENSIONS": cfg["slices"]["dimensions"],
         "DERIVED_SLICE_DIMENSIONS": cfg["slices"]["derived_dimensions"],
+        "DIMENSION_SOURCES": dimension_sources,
         "METRIC_COLS": metrics["metric_cols"],
         "KEY_METRICS": metrics["key_metrics"],
         "METRIC_LABELS": metrics["labels"],

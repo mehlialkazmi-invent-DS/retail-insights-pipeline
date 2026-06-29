@@ -11,7 +11,7 @@ from pyspark.sql.functions import broadcast
 from pyspark.sql.window import Window
 
 from kpi_pipeline.context import KPIContext
-from kpi_pipeline.inputs import get_daily_data_raw, read_defined_scope_source
+from kpi_pipeline.inputs import get_daily_data_raw, read_csv_source, read_defined_scope_source
 
 
 def _window_weeks(ctx: KPIContext) -> DataFrame:
@@ -94,8 +94,13 @@ def build_defined_scope(ctx: KPIContext) -> None:
 
 
 def read_daily_for_scope(ctx: KPIContext, start_date: datetime.date, end_date: datetime.date) -> DataFrame:
-    """Daily sales/inventory for score scope; excludes e-com stores."""
-    excluded = ctx.settings["EXCLUDED_STORE_IDS_FOR_SERVICE_METRICS"]
+    """Daily sales/inventory for scope building (score scope and adjustment pair expansion).
+
+    Includes ALL stores. E-com / non-service stores are NOT excluded here — scope
+    membership is store-agnostic so that total sales/revenue/inventory cover every store.
+    The e-com exclusion is applied later, only when computing service metrics
+    (WOS, mean stock, in-stock rate, lost sales %) via is_service_store() in metrics.py.
+    """
     time_cols = ctx.settings["DAILY_TIME_COLUMNS"]
     date_col = time_cols["date"]
     return (
@@ -104,7 +109,6 @@ def read_daily_for_scope(ctx: KPIContext, start_date: datetime.date, end_date: d
         .withColumn(date_col, F.to_date(F.col(date_col)))
         .withColumnRenamed(date_col, "date")
         .filter(F.col("date").between(F.lit(start_date), F.lit(end_date)))
-        .filter(~F.col("store_id").isin(excluded))
         .groupBy("product_id", "store_id", "date")
         .agg(
             F.sum("sales_quantity").alias("sales_quantity"),
@@ -247,18 +251,20 @@ def _adjustment_source(adj_cfg: Dict[str, Any], path: str) -> str:
 
 
 def _read_adjustment_raw(ctx: KPIContext, adj_cfg: Dict[str, Any], path: str) -> DataFrame:
-    """Load an adjustment table from Delta or CSV."""
+    """Load an adjustment table from Delta or CSV.
+
+    CSV files may live in the datastore (default) or a Databricks workspace path —
+    set ``"location": "workspace"`` on the adjustment to read a /Workspace/... CSV.
+    """
     source = _adjustment_source(adj_cfg, path)
     if source == "csv":
-        csv_opts = adj_cfg.get("csv_options") or {}
-        reader = ctx.spark.read.option("header", str(csv_opts.get("header", True)).lower())
-        if csv_opts.get("inferSchema", True):
-            reader = reader.option("inferSchema", "true")
-        for key, value in csv_opts.items():
-            if key not in {"header", "inferSchema"}:
-                reader = reader.option(key, value)
         print(f"scope adjustment source: csv ({path})")
-        return reader.csv(path)
+        return read_csv_source(
+            ctx.spark,
+            path,
+            csv_options=adj_cfg.get("csv_options") or {},
+            location=adj_cfg.get("location", "datastore"),
+        )
     print(f"scope adjustment source: delta ({path})")
     return ctx.spark.read.format("delta").load(path)
 
@@ -404,9 +410,9 @@ def apply_scope_adjustments(ctx: KPIContext, fund_paste: Optional[Callable[..., 
     ctx.scope_adjustments_applied = True
 
     # Compute the distinct active pairs once; reused by any single-key adjustment expansions.
-    # NOTE: read_daily_for_scope excludes e-com stores (excluded_store_ids). Adjustments using
-    # join_keys=["product_id"] will therefore not expand to e-com stores even if those stores
-    # sell the product. This is intentional — e-com stores are excluded from service metrics scope.
+    # read_daily_for_scope includes ALL stores, so join_keys=["product_id"] additions expand to
+    # every store selling the product (e-com included). Those e-com pairs contribute to total
+    # sales/revenue; the e-com exclusion is applied later, only for service metrics.
     needs_pairs = any(
         ("store_id" in ctx.scope_keys and "store_id" not in adj["join_keys"] and "product_id" in adj["join_keys"])
         or ("product_id" in ctx.scope_keys and "product_id" not in adj["join_keys"] and "store_id" in adj["join_keys"])

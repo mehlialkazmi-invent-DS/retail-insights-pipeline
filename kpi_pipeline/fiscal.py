@@ -7,13 +7,14 @@ Otherwise derives Year/Week from noob/daily-data native columns.
 from __future__ import annotations
 
 import datetime
-from typing import Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.functions import broadcast
 
 from kpi_pipeline.context import KPIContext
+from kpi_pipeline.inputs import read_csv_source
 
 
 def _build_fiscal_week_frame(daily_grain: DataFrame) -> DataFrame:
@@ -114,6 +115,78 @@ def build_fiscal_week_only(ctx: KPIContext) -> None:
     print("html_only time grain:", grain_label, "| fiscal weeks:", ctx.fiscal_week.count())
 
 
+def _join_dimension_sources(
+    ctx: KPIContext,
+    products_proj: DataFrame,
+    dimension_sources: List[Dict[str, Any]],
+    taken_dims: List[str],
+) -> Tuple[DataFrame, List[str]]:
+    """Left-join optional external dimension sources onto the product attribute table.
+
+    Gated feature: only sources with ``enabled=True`` are read — by default this does
+    nothing and slices come from the products master alone. Each enabled source
+    contributes its raw ``columns`` and ``derived`` SQL expressions (evaluated against
+    the *source* table) as new slice dimensions, joined by ``join_key`` (must already be
+    a column on ``products_proj`` — normally ``product_id``). The source is reduced to one
+    row per ``join_key`` before the join so it cannot fan out the product rows.
+
+    Unlike products ``derived_dimensions`` (best-effort, skipped on error), an *enabled*
+    dimension source fails loudly on a bad path, missing column, or unresolved
+    expression — a silently dropped segment would misreport the breakdown it was added
+    to produce.
+    """
+    source_dims: List[str] = []
+    for src in dimension_sources:
+        if not src.get("enabled"):
+            continue
+        label = src.get("label", "dimension_source")
+        join_key = src.get("join_key", "product_id")
+        if join_key not in products_proj.columns:
+            raise ValueError(
+                f"dimension_source {label!r} join_key {join_key!r} is not a column on the "
+                f"product attribute table {products_proj.columns}; use 'product_id' or a "
+                "column carried from the products master."
+            )
+        path = src.get("path")
+        if not path:
+            raise ValueError(
+                f"dimension_source {label!r} requires a resolved 'path' "
+                "(set 'path' or 'path_segments' in config)."
+            )
+
+        src_type = (src.get("source") or "").strip().lower()
+        if src_type not in {"delta", "csv"}:
+            src_type = "csv" if path.lower().endswith(".csv") else "delta"
+        if src_type == "csv":
+            print(f"  dimension_source {label!r}: csv ({path})")
+            raw = read_csv_source(
+                ctx.spark, path, src.get("csv_options") or {}, src.get("location", "datastore")
+            )
+        else:
+            print(f"  dimension_source {label!r}: delta ({path})")
+            raw = ctx.spark.read.format("delta").load(path)
+
+        derived = dict(src.get("derived", {}) or {})
+        raw_cols = list(src.get("columns", []) or [])
+        wanted = [c for c in (raw_cols + list(derived)) if c not in taken_dims and c not in source_dims]
+        if not wanted:
+            print(
+                f"NOTE: dimension_source {label!r} enabled but adds no new dimensions "
+                "(all its columns are already provided elsewhere)."
+            )
+            continue
+
+        sel = [F.col(join_key)]
+        for name in wanted:
+            sel.append(F.expr(derived[name]).alias(name) if name in derived else F.col(name))
+        src_proj = raw.select(*sel).dropDuplicates([join_key])
+        products_proj = products_proj.join(broadcast(src_proj), on=join_key, how="left")
+        source_dims.extend(wanted)
+        print(f"  dimension_source {label!r}: joined on '{join_key}' -> dims {wanted}")
+
+    return products_proj, source_dims
+
+
 def build_fiscal_and_products(ctx: KPIContext) -> None:
     """Populate ctx.fiscal_cal, ctx.fiscal_week, ctx.products_attr, ctx.active_slice_dimensions."""
     s = ctx.settings
@@ -141,11 +214,27 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
     products_raw = ctx.spark.read.format("delta").load(s["PATH_PRODUCTS"])
     slice_dims = s["SLICE_DIMENSIONS"]
     derived_dims_cfg = s["DERIVED_SLICE_DIMENSIONS"]
+    dimension_sources = s.get("DIMENSION_SOURCES", []) or []
+
+    # Dimensions an enabled external source will supply — excluded from the products
+    # "not found" warning below, since they intentionally live outside the products master.
+    source_provided = [
+        c
+        for src in dimension_sources
+        if src.get("enabled")
+        for c in (list(src.get("columns", []) or []) + list((src.get("derived", {}) or {}).keys()))
+    ]
 
     existing_dims = [c for c in slice_dims if c in products_raw.columns]
-    missing_existing = [c for c in slice_dims if c not in products_raw.columns]
+    missing_existing = [
+        c for c in slice_dims if c not in products_raw.columns and c not in source_provided
+    ]
     if missing_existing:
-        print("NOTE: skipping SLICE_DIMENSIONS not found in products table:", missing_existing)
+        print(
+            "NOTE: skipping SLICE_DIMENSIONS not found in products table or any enabled "
+            "dimension_source:",
+            missing_existing,
+        )
 
     derived_dims = []
     derived_exprs = {}
@@ -157,19 +246,22 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
         except Exception as exc:
             print(f"NOTE: skipping derived dimension {name!r} (expression failed to resolve): {exc}")
 
-    ctx.active_slice_dimensions = existing_dims + derived_dims
-    # Cache the deduplicated projection so repeated downstream joins reuse it without re-scanning Delta.
-    products_proj = (
-        products_raw.select(
-            "product_id",
-            "cogs",
-            "price_without_tax",
-            *existing_dims,
-            *[F.expr(derived_exprs[n]).alias(n) for n in derived_dims],
-        )
-        .dropDuplicates(["product_id"])
-        .cache()
+    products_proj = products_raw.select(
+        "product_id",
+        "cogs",
+        "price_without_tax",
+        *existing_dims,
+        *[F.expr(derived_exprs[n]).alias(n) for n in derived_dims],
+    ).dropDuplicates(["product_id"])
+
+    # Gated: joins nothing unless a dimension_source has enabled=True.
+    products_proj, source_dims = _join_dimension_sources(
+        ctx, products_proj, dimension_sources, existing_dims + derived_dims
     )
+
+    ctx.active_slice_dimensions = existing_dims + derived_dims + source_dims
+    # Cache the deduplicated projection so repeated downstream joins reuse it without re-scanning Delta.
+    products_proj = products_proj.cache()
     ctx.products_attr = broadcast(products_proj)
     ctx.product_dims = broadcast(products_proj.select("product_id", *ctx.active_slice_dimensions))
 
@@ -182,5 +274,7 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
         existing_dims,
         "| derived:",
         derived_dims,
+        "| dimension_sources:",
+        source_dims,
         ")",
     )
