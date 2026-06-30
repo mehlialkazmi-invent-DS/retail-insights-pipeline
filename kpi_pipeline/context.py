@@ -21,15 +21,15 @@ class KPIContext:
     active_slice_dimensions: List[str] = field(default_factory=list)
 
     defined_scope: Optional[DataFrame] = None
-    defined_scope_psw: Optional[DataFrame] = None
+    defined_scope_keys: Optional[DataFrame] = None
     scope_keys: List[str] = field(default_factory=list)
 
     scope_adjustments_applied: bool = False
     scope_before_adjustments: Optional[DataFrame] = None
     scope_adjustment_steps: List[Dict[str, Any]] = field(default_factory=list)
 
-    hybrid_scope_psw: Optional[DataFrame] = None
-    score_only_psw: Optional[DataFrame] = None
+    hybrid_scope_keys: Optional[DataFrame] = None
+    score_only_scope_keys: Optional[DataFrame] = None
     hybrid_frames: Optional[Dict[str, DataFrame]] = None
     defined_frames: Optional[Dict[str, DataFrame]] = None
     score_frames: Optional[Dict[str, DataFrame]] = None

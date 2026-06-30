@@ -71,7 +71,7 @@ class KPIRunner:
     def print_config_summary(self) -> None:
         s = self.settings
         print("CUSTOMER:", s["CUSTOMER"])
-        print("AS_OF_DATE:", s["AS_OF_DATE"], "| run_week:", s["run_week_start_date"], "->", s["run_week_end_date"])
+        print("AS_OF_DATE:", s["AS_OF_DATE"], "| run_week:", s["RUN_WEEK_START_DATE"], "->", s["RUN_WEEK_END_DATE"])
         print("REPORT_END_DATE (last full week, Saturday):", s["REPORT_END_DATE"])
         print("REPORT_START_DATE (Sun):", s["REPORT_START_DATE"], "| RUN_MIN_DATE (Sun):", s["RUN_MIN_DATE"])
         print(
@@ -174,7 +174,7 @@ class KPIRunner:
         apply_scope_adjustments(self.ctx, fund_paste=fund_paste)
 
     def build_kpis(self) -> None:
-        self.ctx.hybrid_frames = build_pipeline_frames(self.ctx, self.ctx.hybrid_scope_psw)
+        self.ctx.hybrid_frames = build_pipeline_frames(self.ctx, self.ctx.hybrid_scope_keys)
         self.ctx.kpi_long = build_kpi_long(self.ctx, self.ctx.hybrid_frames)
         print("kpi_long shape:", self.ctx.kpi_long.shape)
         print(
@@ -196,13 +196,13 @@ class KPIRunner:
             self.ctx.scope_diff = None
             print("scope diff: skipped (scope.run_scope_diff=False)")
             return
-        if self.ctx.score_only_psw is None:
+        if self.ctx.score_only_scope_keys is None:
             raise RuntimeError(
                 "scope.run_scope_diff=True but score scope was not computed — "
                 "check build_hybrid_scope and RUN_SCOPE_DIFF settings."
             )
-        self.ctx.defined_frames = build_pipeline_frames(self.ctx, self.ctx.defined_scope_psw)
-        self.ctx.score_frames = build_pipeline_frames(self.ctx, self.ctx.score_only_psw)
+        self.ctx.defined_frames = build_pipeline_frames(self.ctx, self.ctx.defined_scope_keys)
+        self.ctx.score_frames = build_pipeline_frames(self.ctx, self.ctx.score_only_scope_keys)
         build_scope_diff(self.ctx)
 
     def build_html_report(self, local_dir: "str | Path | None" = ".") -> Optional[str]:
@@ -252,7 +252,7 @@ class KPIRunner:
         return written
 
     def hybrid_scope_summary(self):
-        return scope_summary_by_origin(self.ctx.hybrid_scope_psw)
+        return scope_summary_by_origin(self.ctx.hybrid_scope_keys)
 
     def scope_before_adjustments_summary(self):
         if self.ctx.scope_before_adjustments is None:

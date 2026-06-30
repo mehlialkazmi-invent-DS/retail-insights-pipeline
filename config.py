@@ -223,7 +223,7 @@ CONFIG: Dict[str, Any] = {
             "weighted_instock_rate",
             "lost_sales_pct",
         ],
-        "key_metrics": [
+        "scope_diff_metrics": [
             "total_sales_quantity",
             "total_sales_revenue",
             "total_inventory",
@@ -429,8 +429,8 @@ def _resolve_report_window(
 
     return {
         "AS_OF_DATE": as_of,
-        "run_week_start_date": run_week_start,
-        "run_week_end_date": run_week_end,
+        "RUN_WEEK_START_DATE": run_week_start,
+        "RUN_WEEK_END_DATE": run_week_end,
         "REPORT_START_DATE": report_start,
         "REPORT_END_DATE": report_end,
         "RUN_MIN_DATE": run_min_resolved,
@@ -531,7 +531,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "DERIVED_SLICE_DIMENSIONS": cfg["slices"]["derived_dimensions"],
         "DIMENSION_SOURCES": dimension_sources,
         "METRIC_COLS": metrics["metric_cols"],
-        "KEY_METRICS": metrics["key_metrics"],
+        "SCOPE_DIFF_METRICS": metrics["scope_diff_metrics"],
         "METRIC_LABELS": metrics["labels"],
         "PP_CHANGE_METRICS": frozenset(metrics["pp_change_metrics"]),
         "SAVE_OUTPUTS": output_cfg["save_outputs"],

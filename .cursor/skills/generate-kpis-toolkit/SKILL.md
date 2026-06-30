@@ -417,7 +417,7 @@ Metric definitions can be customised per-client:
 
 1. Add Spark aggregation to `compute_kpis` in `kpi_pipeline/metrics.py` (join to existing `keys`).
 2. Add to `CONFIG["metrics"]["metric_cols"]` and `CONFIG["metrics"]["labels"]`.
-3. Optionally add to `key_metrics` (scope diff) and `pp_change_metrics` (pp change instead of %).
+3. Optionally add to `scope_diff_metrics` (scope diff) and `pp_change_metrics` (pp change instead of %).
 4. Optionally add a definition to `CONFIG["html_report"]["metric_definitions"]` for the Metric Details tab.
 
 ### Add a new output table
@@ -429,7 +429,7 @@ Metric definitions can be customised per-client:
 
 ### Add a new scope source
 
-Add a path to `path_segments` in config, read in `fiscal.py` or a new module, and merge into `hybrid_scope_psw` in `scope.py` with a distinct `scope_origin` label.
+Add a path to `path_segments` in config, read in `fiscal.py` or a new module, and merge into `hybrid_scope_keys` in `scope.py` with a distinct `scope_origin` label.
 
 ---
 
@@ -491,7 +491,7 @@ daily_data_raw (cached Delta)
   └─ build_scoped_daily → scoped_daily (fiscal + products joined)
 
 lost_sales_source (cached as lost_sales_weekly_base)
-  └─ scoped to hybrid_scope_psw → lost_sales_weekly → inst_data, lost_base
+  └─ scoped to hybrid_scope_keys → lost_sales_weekly → inst_data, lost_base
 
 build_pipeline_frames(scope) → {scoped_daily, inst_data, lost_base, ...}
   └─ build_kpi_table(period, group_keys) → pandas
@@ -542,8 +542,9 @@ render_kpi_html → standalone HTML file
 | `fiscal_week` | Year/Week → week_start/end/Fiscal_Quarter/Fiscal_Month |
 | `products_attr` | broadcast: product_id, cogs, price, slice dims |
 | `active_slice_dimensions` | validated slice column names (from slices + dimension_sources) |
-| `defined_scope_psw` | product×store×Year×Week keys from defined scope |
-| `hybrid_scope_psw` | final scope (defined + adjustments + score backfill) |
+| `defined_scope_keys` | product×[store×]Year×Week keys from defined scope |
+| `hybrid_scope_keys` | final scope (defined + adjustments + score backfill) |
+| `score_only_scope_keys` | score-filter scope (set when `use_hybrid_scope=True` or `run_scope_diff=True`) |
 | `daily_data_raw` | cached daily Delta read |
 | `lost_sales_weekly_base` | cached weekly lost-sales aggregates |
 | `kpi_long` | primary pandas output (trimmed to recent periods) |

@@ -89,8 +89,8 @@ def build_defined_scope(ctx: KPIContext) -> None:
     if not scope_has_store:
         print("NOTE: defined scope has no store grain -> falling back to product-week scoping downstream.")
 
-    ctx.defined_scope_psw = ctx.defined_scope.select(*ctx.scope_keys).distinct().cache()
-    print("defined_scope_psw grain:", ctx.scope_keys, "| count:", ctx.defined_scope_psw.count())
+    ctx.defined_scope_keys = ctx.defined_scope.select(*ctx.scope_keys).distinct().cache()
+    print("defined_scope_keys grain:", ctx.scope_keys, "| count:", ctx.defined_scope_keys.count())
 
 
 def read_daily_for_scope(ctx: KPIContext, start_date: datetime.date, end_date: datetime.date) -> DataFrame:
@@ -166,8 +166,8 @@ def build_weekly_scope(
     )
 
 
-def score_scope_psw(ctx: KPIContext, daily_in: DataFrame) -> DataFrame:
-    """Product-store-week keys that pass the score filter (in_scope='yes')."""
+def build_score_scope_keys(ctx: KPIContext, daily_in: DataFrame) -> DataFrame:
+    """Scope key columns (product×[store×]Year×Week) for pairs passing the score filter (in_scope='yes')."""
     ws = build_weekly_scope(
         daily_in,
         ctx.fiscal_cal,
@@ -198,33 +198,33 @@ def build_hybrid_scope(ctx: KPIContext) -> None:
     run_scope_diff = s.get("RUN_SCOPE_DIFF", False)
     need_score = use_hybrid or run_scope_diff
 
-    ctx.score_only_psw = None
+    ctx.score_only_scope_keys = None
     if need_score:
         daily_all = read_daily_for_scope(ctx, start, end).cache()
-        ctx.score_only_psw = score_scope_psw(ctx, daily_all).select(*ctx.scope_keys).distinct().cache()
+        ctx.score_only_scope_keys = build_score_scope_keys(ctx, daily_all).select(*ctx.scope_keys).distinct().cache()
 
-    defined_tagged = ctx.defined_scope_psw.withColumn("scope_origin", F.lit("defined"))
+    defined_tagged = ctx.defined_scope_keys.withColumn("scope_origin", F.lit("defined"))
 
     if not use_hybrid:
-        ctx.hybrid_scope_psw = defined_tagged.cache()
+        ctx.hybrid_scope_keys = defined_tagged.cache()
         print("scope mode: defined only (hybrid disabled)")
-        print("grain:", ctx.scope_keys, "| final_scope:", ctx.hybrid_scope_psw.count())
+        print("grain:", ctx.scope_keys, "| final_scope:", ctx.hybrid_scope_keys.count())
         return
 
-    defined_weeks = ctx.defined_scope_psw.select("Year", "Week").distinct()
+    defined_weeks = ctx.defined_scope_keys.select("Year", "Week").distinct()
     window_weeks = _window_weeks(ctx).select("Year", "Week").distinct()
     missing_weeks = window_weeks.join(broadcast(defined_weeks), on=["Year", "Week"], how="left_anti").cache()
 
     # Backfill = full-window score scope (thresholds over all weeks) restricted to the missing weeks.
-    score_backfill = ctx.score_only_psw.join(
+    score_backfill = ctx.score_only_scope_keys.join(
         broadcast(missing_weeks), on=["Year", "Week"], how="left_semi"
     ).withColumn("scope_origin", F.lit("score"))
-    ctx.hybrid_scope_psw = defined_tagged.unionByName(score_backfill).cache()
+    ctx.hybrid_scope_keys = defined_tagged.unionByName(score_backfill).cache()
 
     print("scope mode: hybrid (defined + score backfill)")
     print("grain:", ctx.scope_keys)
     print("defined_weeks:", defined_weeks.count(), "| missing_weeks:", missing_weeks.count())
-    print("final_scope:", ctx.hybrid_scope_psw.count())
+    print("final_scope:", ctx.hybrid_scope_keys.count())
 
 
 def _resolve_adjustment_path(
@@ -405,7 +405,7 @@ def apply_scope_adjustments(ctx: KPIContext, fund_paste: Optional[Callable[..., 
     if not enabled:
         return
 
-    scope = ctx.hybrid_scope_psw
+    scope = ctx.hybrid_scope_keys
     ctx.scope_before_adjustments = scope.cache()
     ctx.scope_adjustments_applied = True
 
@@ -471,8 +471,8 @@ def apply_scope_adjustments(ctx: KPIContext, fund_paste: Optional[Callable[..., 
         ctx.scope_adjustment_steps.append(step)
         print_scope_summary(f"Scope AFTER {action}", scope, ctx.scope_keys)
 
-    ctx.hybrid_scope_psw = scope.distinct().cache()
+    ctx.hybrid_scope_keys = scope.distinct().cache()
     print("=" * 72)
     print("SCOPE ADJUSTMENTS — FINAL scope used for KPIs")
-    print_scope_summary("Final scope", ctx.hybrid_scope_psw, ctx.scope_keys)
+    print_scope_summary("Final scope", ctx.hybrid_scope_keys, ctx.scope_keys)
     print("=" * 72)

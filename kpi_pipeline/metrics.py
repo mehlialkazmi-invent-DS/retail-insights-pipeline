@@ -61,7 +61,7 @@ def compute_kpis(
 
     week_keys = ["product_id", "Year", "Week"] + group_keys
     period_extra = [period_col] if period_col not in week_keys else []
-    dd_product_day = daily_service.groupBy(*week_keys, *period_extra, "date").agg(
+    daily_by_date = daily_service.groupBy(*week_keys, *period_extra, "date").agg(
         F.sum("inventory").alias("daily_total_inventory"),
         F.sum("sales_quantity").alias("daily_sales_units"),
         F.sum("inventory_retail").alias("daily_total_inventory_retail"),
@@ -70,7 +70,7 @@ def compute_kpis(
         F.sum("sales_cost").alias("daily_sales_cost"),
     )
     daily_data_week = (
-        dd_product_day.groupBy(*week_keys, *period_extra)
+        daily_by_date.groupBy(*week_keys, *period_extra)
         .agg(
             F.avg("daily_total_inventory").alias("avg_daily_total_inventory"),
             F.sum("daily_sales_units").alias("weekly_sales_units"),
@@ -130,21 +130,21 @@ def compute_kpis(
 
     # Sales-weighted in-stock rate: aggregate instock to Year×Week (+ slice group_keys), then
     # weight each week by its sales when rolling up to the reporting period.
-    weekly_wi_keys = ["Year", "Week"] + group_keys
-    period_extra_wi = [period_col] if period_col not in weekly_wi_keys else []
+    wi_week_keys = ["Year", "Week"] + group_keys
+    wi_period_extra = [period_col] if period_col not in wi_week_keys else []
 
-    weekly_wi = inst.groupBy(*weekly_wi_keys, *period_extra_wi).agg(
-        F.greatest(F.lit(0.0), F.sum("stocked_pairs") / F.sum("available_days")).alias("_wi_rate"),
+    weekly_pair_instock = inst.groupBy(*wi_week_keys, *wi_period_extra).agg(
+        F.greatest(F.lit(0.0), F.sum("stocked_pairs") / F.sum("available_days")).alias("_pair_instock_rate"),
     )
-    weekly_wi_sales = daily_service.groupBy(*weekly_wi_keys, *period_extra_wi).agg(
-        F.sum("sales_quantity").alias("_wi_sales")
+    weekly_pair_sales = daily_service.groupBy(*wi_week_keys, *wi_period_extra).agg(
+        F.sum("sales_quantity").alias("_pair_sales_qty")
     )
     weighted_instock = (
-        weekly_wi
-        .join(weekly_wi_sales, on=weekly_wi_keys + period_extra_wi, how="left")
+        weekly_pair_instock
+        .join(weekly_pair_sales, on=wi_week_keys + wi_period_extra, how="left")
         .groupBy(*keys)
         .agg(
-            (F.sum(F.col("_wi_rate") * F.col("_wi_sales")) / F.sum("_wi_sales")).alias("weighted_instock_rate")
+            (F.sum(F.col("_pair_instock_rate") * F.col("_pair_sales_qty")) / F.sum("_pair_sales_qty")).alias("weighted_instock_rate")
         )
     )
 

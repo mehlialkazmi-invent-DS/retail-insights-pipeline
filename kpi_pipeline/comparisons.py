@@ -373,13 +373,13 @@ def build_scope_diff(ctx: KPIContext) -> None:
     """Annual key-metric diff: defined-only scope vs score-only scope (hybrid sanity check)."""
     from kpi_pipeline.metrics import build_kpi_table
 
-    key_metrics = ctx.settings["KEY_METRICS"]
-    defined_annual = build_kpi_table(ctx, ctx.defined_frames, "Year", [])[["Year"] + key_metrics]
-    score_annual = build_kpi_table(ctx, ctx.score_frames, "Year", [])[["Year"] + key_metrics]
+    scope_diff_metrics = ctx.settings["SCOPE_DIFF_METRICS"]
+    defined_annual = build_kpi_table(ctx, ctx.defined_frames, "Year", [])[["Year"] + scope_diff_metrics]
+    score_annual = build_kpi_table(ctx, ctx.score_frames, "Year", [])[["Year"] + scope_diff_metrics]
     merged = defined_annual.merge(score_annual, on="Year", suffixes=("_defined", "_score"))
     records = []
     for _, r in merged.iterrows():
-        for m in key_metrics:
+        for m in scope_diff_metrics:
             dv, sv = r[f"{m}_defined"], r[f"{m}_score"]
             records.append(
                 {
