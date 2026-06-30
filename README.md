@@ -4,19 +4,20 @@
 
 # Generate KPIs Toolkit
 
-PySpark toolkit for weekly, quarterly, and annual retail KPIs with configurable scope (defined-only or hybrid with score backfill), optional manual scope adjustments, and incremental Delta output saves.
+PySpark toolkit for weekly, monthly, quarterly, and annual retail KPIs with configurable scope (defined-only or hybrid with score backfill), optional manual scope adjustments, comparable (like-for-like) pair analysis, and incremental Delta output saves.
 
 Designed to run on **Databricks** against the customer Delta datastore (`/mnt/invent-{customer}-datastore`).
 
 ## What it produces
 
 
-| Output                       | Description                                                                                                                                            |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `kpi_long`                   | One tidy table: `period_type`, `period`, `dimension`, `dimension_value`, plus all configured metrics. Filter this to reproduce any slice/period panel. |
-| YoY / QoQ / WoW comparisons | Prior vs current period with formatted display columns (overall + each active slice dimension).                                                        |
-| Scope diff                   | Side-by-side annual KPIs for **defined-only** vs **score-only** scope (optional sanity check). Only computed when `scope.run_scope_diff=True`. Compares scope **before** manual adjustments — intentional diagnostic of defined vs score coverage. |
-| **HTML report**              | Standalone offline HTML with tabbed layout, Metric Details, and client/period info panel (see [HTML report](#html-report) section below).              |
+| Output                                  | Description                                                                                                                                            |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `kpi_long`                              | One tidy table: `period_type`, `period`, `dimension`, `dimension_value`, plus all configured metrics. Filter this to reproduce any slice/period panel. |
+| `comparison_yoy / qoq / mom / wow`      | Prior vs current period with formatted display columns (overall + each active slice dimension). YoY/QoQ/MoM/WoW are recomputed from the full merged kpi_long history on incremental saves. |
+| `scope_diff`                            | Side-by-side annual KPIs for **defined-only** vs **score-only** scope (optional sanity check). Only computed when `scope.run_scope_diff=True`. Compares scope **before** manual adjustments — intentional diagnostic of defined vs score coverage. |
+| `comparable_kpi_long` / `comparable_comparison_*` | Like-for-like metrics over only the pairs present in both compared periods. Gated on `comparable_pairs.enabled=True`. |
+| **HTML report**                         | Standalone offline HTML with tabbed layout, Metric Details, and client/period info panel (see [HTML report](#html-report) section below).              |
 
 
 Saved Delta tables live under `PATH_OUTPUT_ROOT`, partitioned by `run_date` per table:
@@ -292,9 +293,10 @@ Set `output.save_outputs: True` in `config.py` (default is `False`). The noteboo
 
 | Table | Contents | Merge keys (incremental mode) |
 | ----- | -------- | ----------------------------- |
-| `kpi_long` | All metrics × periods × slices | `period_type`, `period`, `dimension`, `dimension_value` |
+| `kpi_long` | All metrics × periods × slices (annual / quarter / monthly / weekly) | `period_type`, `period`, `dimension`, `dimension_value` |
 | `comparison_yoy` | YoY comparison rows | `comparison_type`, `dimension`, `dimension_value`, `metric_key`, `current_period` |
 | `comparison_qoq` | QoQ comparison rows | same as YoY |
+| `comparison_mom` | MoM comparison rows | same as YoY |
 | `comparison_wow` | WoW comparison rows | same as YoY |
 | `scope_diff` | Defined vs score annual diff (when `run_scope_diff=True`) | `Year`, `metric` |
 | `comparable_kpi_long` | Comparable (like-for-like) per-period metrics + `comparable_pair_count` (when `comparable_pairs.enabled=True`) | `comparison_type`, `period_type`, `period`, `dimension`, `dimension_value` |
@@ -482,28 +484,34 @@ See [HTML report](#html-report) section.
 ## Environment variable overrides
 
 
-| Variable                         | Effect                                                       |
-| -------------------------------- | ------------------------------------------------------------ |
-| `KPI_BUCKET`                     | Datastore mount (default `/mnt/invent-{customer}-datastore`) |
-| `KPI_CUSTOMER`                   | Customer slug                                                |
-| `KPI_AS_OF_DATE`                 | Overrides `as_of_date`                                       |
-| `KPI_RUN_MIN_DATE`               | Overrides `run_min_date`                                     |
-| `KPI_USE_HYBRID_SCOPE`           | `true`/`false`                                               |
-| `KPI_RUN_SCOPE_DIFF`             | `true`/`false` — enable defined-vs-score scope diff          |
-| `KPI_COMPARABLE_PAIRS`           | `true`/`false` — enable comparable (like-for-like) pairs     |
-| `KPI_RECOMPUTE_COMPARISONS`      | `true`/`false` — recompute comparisons from merged history   |
-| `KPI_USE_FISCAL_CALENDAR`        | `true`/`false`                                               |
-| `KPI_SCOPE_MIN_PERCENTILE`       | e.g. `20` or `0.2`                                           |
-| `KPI_SCOPE_MIN_WEEKS_FOR_FILTER` | Integer                                                      |
-| `KPI_SLICE_DIMENSIONS`           | Comma-separated column names                                 |
-| `KPI_SAVE_OUTPUTS`               | `true`/`false`                                               |
-| `KPI_OUTPUT_SAVE_MODE`           | `initial`, `incremental`, or `full_refresh`                  |
-| `KPI_ALLOW_OVERWRITE_EXISTING`   | `true`/`false`                                               |
-| `KPI_OUTPUT_PATH`                | Comma-separated path segments                                |
-| `KPI_OUTPUT_RUN_DATE`            | `output.run_date` partition (default: `as_of_date`)          |
-| `KPI_HTML_OUTPUT_PATH`           | Comma-separated path segments for `html_report.output_path_segments` |
-| `KPI_HTML_WEEKLY_WEEKS`          | Recent fiscal weeks in Weekly tab (default 5; empty = all)       |
-| `KPI_RUN_MODE`                     | `full` or `html_only` — skip pipeline and render HTML from saved outputs |
+| Variable                          | Effect                                                       |
+| --------------------------------- | ------------------------------------------------------------ |
+| `KPI_BUCKET`                      | Datastore mount (default `/mnt/invent-{customer}-datastore`) |
+| `KPI_CUSTOMER`                    | Customer slug                                                |
+| `KPI_AS_OF_DATE`                  | Overrides `as_of_date`                                       |
+| `KPI_RUN_MIN_DATE`                | Overrides `run_min_date`                                     |
+| `KPI_USE_HYBRID_SCOPE`            | `true`/`false`                                               |
+| `KPI_RUN_SCOPE_DIFF`              | `true`/`false` — enable defined-vs-score scope diff          |
+| `KPI_COMPARABLE_PAIRS`            | `true`/`false` — enable comparable (like-for-like) pairs     |
+| `KPI_RECOMPUTE_COMPARISONS`       | `true`/`false` — recompute comparisons from merged history (default `true` under incremental) |
+| `KPI_USE_FISCAL_CALENDAR`         | `true`/`false`                                               |
+| `KPI_SCOPE_MIN_PERCENTILE`        | e.g. `20` or `0.2`                                           |
+| `KPI_SCOPE_MIN_WEEKS_FOR_FILTER`  | Integer                                                      |
+| `KPI_SLICE_DIMENSIONS`            | Comma-separated column names                                 |
+| `KPI_SAVE_OUTPUTS`                | `true`/`false`                                               |
+| `KPI_OUTPUT_SAVE_MODE`            | `initial`, `incremental`, or `full_refresh`                  |
+| `KPI_ALLOW_OVERWRITE_EXISTING`    | `true`/`false`                                               |
+| `KPI_OUTPUT_PATH`                 | Comma-separated path segments                                |
+| `KPI_OUTPUT_RUN_DATE`             | `output.run_date` partition (default: `as_of_date`)          |
+| `KPI_HTML_ENABLED`                | `true`/`false`                                               |
+| `KPI_HTML_FILENAME`               | Output filename                                              |
+| `KPI_HTML_TITLE`                  | Report title                                                 |
+| `KPI_HTML_OUTPUT_PATH`            | Comma-separated path segments for `html_report.output_path_segments` |
+| `KPI_HTML_WEEKLY_WEEKS`           | Recent fiscal weeks in Weekly tab (default 5; empty = all)   |
+| `KPI_HTML_MONTHLY_MONTHS`         | Recent months in Monthly tab (default 5; empty = all)        |
+| `KPI_HTML_QUARTERLY_QUARTERS`     | Recent quarters in Quarter tab (default 5; empty = all)      |
+| `KPI_HTML_YEARLY_YEARS`           | Recent years in Annual tab (default 5; empty = all)          |
+| `KPI_RUN_MODE`                    | `full` or `html_only` — skip pipeline and render HTML from saved outputs |
 
 
 ## Metrics
@@ -512,11 +520,13 @@ Default metrics (configurable in `CONFIG["metrics"]`):
 
 - Sales / inventory (all scoped stores): `total_sales_quantity`, `total_sales_revenue`, `AUR`, `total_inventory`
 - Coverage (all scoped stores): `distinct_product_count`, `distinct_store_count`, `distinct_pair_count`
-- Service stores only: `mean_stock`, `mean_stock_retail`, `mean_stock_cost`, `WOS`, `wos_revenue`, `wos_cost`, `inventory_turnover_rate`, `in_stock_rate`, `lost_sales_pct`
+- Service stores only: `mean_stock`, `mean_stock_retail`, `mean_stock_cost`, `WOS`, `wos_revenue`, `wos_cost`, `inventory_turnover_rate`, `in_stock_rate`, `weighted_instock_rate`, `lost_sales_pct`
 
 **Lost Sales %** = `100 × sum(lost_sales) / sum(floor(weekly_sales + lost_sales))` — denominator includes imputed lost demand.
 
 **In-Stock Rate** = `sum(in_stock_days) / sum(available_days)` from top-down lost-sales output (service stores only).
+
+**Weighted In-Stock Rate** = sales-weighted average of weekly in-stock rates: each fiscal week's in-stock rate is weighted by that week's sales volume when rolling up to the reporting period. Weeks with higher sales carry more weight. Reported as pp-change in comparisons (service stores only).
 
 **WOS** = per-product per-fiscal-week WOS after summing daily inventory/sales across service stores at product×date (`avg_daily_inventory / weekly_sales`), then rolled up to the reporting period using a sales-weighted average. Not computed at product×store×week grain.
 
@@ -596,11 +606,12 @@ Environment override: `KPI_RUN_MODE=html_only`
 | Section | Description |
 | ------- | ----------- |
 | **Executive header** | Client, reporting window, as-of date, scope mode, slice dimensions, generated timestamp |
-| **Period tabs** | Annual / Quarter / Weekly (horizontal) |
+| **Period tabs** | Annual / Quarter / **Monthly** / Weekly (horizontal) |
 | **Slice dimension tabs** | Overall + every slice column in `kpi_long` (inferred automatically from data and config) |
 | **Value tabs** | Vertical sidebar within each slice dimension — one panel per value (e.g. each brand) |
-| **KPI tables** | Metrics as rows (colour-coded), periods as columns; inventory turnover is labelled **Annual** / **Quarterly** / **Weekly** per tab |
-| **Comparison** | YoY / QoQ / WoW per value panel |
+| **KPI tables** | Metrics as rows (colour-coded), periods as columns; inventory turnover is labelled **Annual** / **Quarterly** / **Monthly** / **Weekly** per tab |
+| **Comparison** | YoY / QoQ / MoM / WoW per value panel |
+| **Comparable comparison** | Second comparison table per panel (when `comparable_pairs.enabled=True`) |
 | **Metric Details tab** | Definition, store scope, and formula for every active metric |
 
 Slice dimensions and values are **inferred from `kpi_long`** — if you configure `category` instead of `brand`, or add multiple slice columns, the report adapts without code changes.
@@ -611,10 +622,13 @@ Slice dimensions and values are **inferred from `kpi_long`** — if you configur
 "html_report": {
     "enabled": True,
     "filename": "kpi_report_{customer}_{report_end}.html",
-    "report_title": None,
-    "output_path_segments": None,
-    "metric_definitions": {},
-    "weekly_display_weeks": 5,   # Weekly tab shows only the 5 most recent weeks; null = all weeks
+    "report_title": None,                # None = "<CUSTOMER> KPI Report"
+    "output_path_segments": None,        # None = local only; or path segments to also save to datastore
+    "metric_definitions": {},            # override DEFAULT_METRIC_DEFINITIONS entries
+    "weekly_display_weeks": 5,           # Weekly tab: N most recent weeks; null = all
+    "monthly_display_months": 5,         # Monthly tab: N most recent months; null = all
+    "quarterly_display_quarters": 5,     # Quarter tab: N most recent quarters; null = all
+    "yearly_display_years": 5,           # Annual tab: N most recent years; null = all
 }
 ```
 
@@ -626,7 +640,10 @@ Slice dimensions and values are **inferred from `kpi_long`** — if you configur
 | `KPI_HTML_FILENAME` | Output filename |
 | `KPI_HTML_TITLE` | Report title |
 | `KPI_HTML_OUTPUT_PATH` | Comma-separated path segments for datastore HTML copy |
-| `KPI_HTML_WEEKLY_WEEKS` | Number of recent fiscal weeks in the Weekly tab (`null`/empty = all weeks) |
+| `KPI_HTML_WEEKLY_WEEKS` | Recent fiscal weeks in Weekly tab (default 5; empty = all) |
+| `KPI_HTML_MONTHLY_MONTHS` | Recent months in Monthly tab (default 5; empty = all) |
+| `KPI_HTML_QUARTERLY_QUARTERS` | Recent quarters in Quarter tab (default 5; empty = all) |
+| `KPI_HTML_YEARLY_YEARS` | Recent years in Annual tab (default 5; empty = all) |
 
 ### Overriding metric definitions
 

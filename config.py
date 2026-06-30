@@ -61,6 +61,8 @@ CONFIG: Dict[str, Any] = {
     },
     "scope_adjustments": {
         # Optional manual adds/removes applied after hybrid/defined scope is built.
+        # MULTIPLE entries: both "additions" and "removals" are lists — add as many
+        # objects as you need, one per source table/CSV.  Each runs in order.
         # source: "delta" (default) or "csv" — auto-detected when path ends with .csv
         "additions": [
             {
@@ -97,38 +99,64 @@ CONFIG: Dict[str, Any] = {
             }
         ],
     },
+    # ---------------------------------------------------------------------------
+    # DIMENSION SOURCES — extra slices from tables other than master-data/products
+    # ---------------------------------------------------------------------------
+    # Use dimension_sources ONLY when a breakdown column does NOT live on the products
+    # table. If the column already exists on (or is derivable from) products, use
+    # "slices" instead (see below) — it is simpler and has no join overhead.
+    #
+    # Classic use-case: NVROUT flag lives on operation/extended_product, not products.
+    #
+    # HOW IT WORKS
+    # Each enabled entry is left-joined onto the product attribute projection by
+    # `join_key` (must be a products column, typically product_id). Its raw `columns`
+    # and `derived` SQL expressions become slice dimensions automatically — do NOT also
+    # list them in slices.dimensions.  The source is deduplicated to ONE row per
+    # join_key before joining — pre-aggregate it yourself when the raw table has
+    # multiple rows per product.
+    #
+    # MULTIPLE SOURCES: add as many objects to this list as you need — one per
+    # external table.  Each enabled source fails loudly on a bad path / missing column
+    # / bad expression; set enabled=False to skip without removing it.
+    #
+    # OVERLAPPING SEGMENTS: use independent boolean dimensions (is_nvrout, is_comp)
+    # rather than a single mutually-exclusive column — a product can be "yes" for both.
+    #
+    # NULL behaviour: products absent from the source get NULL for the new dimension
+    # (left join). If you need a clean yes/no split, make the source cover the full
+    # product universe or CASE WHEN … ELSE 'no' only applies to rows that exist.
     "dimension_sources": [
-        # GATED, OPT-IN. Pull extra slice dimensions from tables OTHER than master-data/products.
-        # Default = nothing enabled => slices come from the products master only (see "slices").
-        # Enable a source ONLY when a breakdown column does not live on the products table
-        # (e.g. NVROUT membership lives on operation/extended_product, not products).
-        #
-        # Each enabled source is left-joined onto the product attribute table by `join_key`
-        # (normally product_id, and it must already be a products column). Its raw `columns`
-        # and `derived` SQL expressions (evaluated against the SOURCE table) become slice
-        # dimensions automatically — no need to also list them under slices.dimensions.
-        # The source is reduced to ONE row per join_key before the join (dropDuplicates), so
-        # pre-aggregate to one row per product if the raw table has many (see README).
-        #
-        # An ENABLED source fails loudly on a bad path / missing column / bad expression —
-        # it will not silently drop the segment you added it to produce.
         {
             "enabled": False,
             "label": "extended_product",
             "source": "delta",  # "delta" | "csv"
             "path_segments": ["operation", "extended_product"],
-            # CSV alternatives (source auto-detected from .csv extension):
+            # CSV options (source auto-detected from .csv extension):
             # "source": "csv",
-            # "path": "/Workspace/Users/you@invent.ai/lists/nvrout.csv",  # or a datastore path
-            # "location": "workspace",  # "datastore" (default) or "workspace" (/Workspace/... via file: scheme)
+            # "path": "/Workspace/Users/you@invent.ai/lists/nvrout.csv",
+            # "location": "workspace",  # "datastore" (default) or "workspace" (/Workspace/...)
             # "csv_options": {"header": True, "inferSchema": True},
             "join_key": "product_id",
-            "columns": [],  # raw columns from the source to carry over as dimensions
+            "columns": [],  # raw source columns to carry over as slice dimensions
             "derived": {
-                # Spark SQL over the SOURCE table's columns -> new dimension column(s).
+                # Spark SQL expressions evaluated against the SOURCE table's columns.
+                # Each key becomes a new slice dimension column.
                 "is_nvrout": "CASE WHEN program LIKE '%NVROUT%' THEN 'yes' ELSE 'no' END",
+                # Add more dimensions from this source here, e.g.:
+                # "is_comp": "CASE WHEN program LIKE '%COMP%' THEN 'yes' ELSE 'no' END",
             },
-        }
+        },
+        # Add more external sources here if needed, e.g.:
+        # {
+        #     "enabled": False,
+        #     "label": "another_table",
+        #     "source": "delta",
+        #     "path_segments": ["operation", "another_table"],
+        #     "join_key": "product_id",
+        #     "columns": ["some_flag"],
+        #     "derived": {},
+        # },
     ],
     "path_segments": {
         "fiscal": ["one_time_uploads", "fiscal_cal"],
@@ -154,9 +182,26 @@ CONFIG: Dict[str, Any] = {
         "lost_sales": [],
         "daily_data": [],
     },
+    # ---------------------------------------------------------------------------
+    # SLICES — breakdown dimensions sourced from master-data/products
+    # ---------------------------------------------------------------------------
+    # Use "slices" for columns that already live on (or are computable from) the
+    # products table.  For attributes on OTHER tables (e.g. NVROUT from
+    # operation/extended_product), use "dimension_sources" (see above) instead.
+    #
+    # dimensions:         list of existing column names in master-data/products.
+    # derived_dimensions: dict of {new_col_name: "Spark SQL expression"} evaluated
+    #                     against the products schema at runtime; failures are skipped
+    #                     with a warning (unlike dimension_sources which fail loudly).
+    #
+    # Multiple dimensions: add as many column names as you need, e.g.:
+    #   "dimensions": ["brand", "category", "price_tier"]
     "slices": {
         "dimensions": ["brand"],
-        "derived_dimensions": {},
+        "derived_dimensions": {
+            # Example:
+            # "price_tier": "CASE WHEN price_without_tax < 50 THEN 'budget' ELSE 'premium' END",
+        },
     },
     "metrics": {
         "metric_cols": [
