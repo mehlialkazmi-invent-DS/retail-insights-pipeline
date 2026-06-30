@@ -1133,7 +1133,7 @@ def render_kpi_html(
     week_start_by_period: Dict[str, Any] = {}
     if getattr(ctx, "fiscal_week", None) is not None:
         fw = ctx.fiscal_week.select("Year_Week", "week_start_date").distinct().toPandas()
-        week_start_by_period = dict(zip(fw["Year_Week"], fw["week_start_date"]))
+        week_start_by_period = dict(zip(fw["Year_Week"], fw["week_start_date"].astype(str)))
 
     dims_by_period = {pt: dims for pt in period_types}
     values_by_dim: Dict[str, List[str]] = {}

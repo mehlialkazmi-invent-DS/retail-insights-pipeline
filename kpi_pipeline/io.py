@@ -459,6 +459,7 @@ _SAVED_OUTPUT_TABLES = {
     "comparison_qoq": "comparison_qoq",
     "comparison_mom": "comparison_mom",
     "comparison_wow": "comparison_wow",
+    "scope_diff": "scope_diff",
     # Comparable (like-for-like) tables — optional; absent unless comparable_pairs was enabled.
     "comparable_kpi_long": "comparable_kpi_long",
     "comparable_comparison_yoy": "comparable_comparison_yoy",
