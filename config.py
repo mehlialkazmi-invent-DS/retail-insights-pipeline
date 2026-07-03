@@ -176,6 +176,11 @@ CONFIG: Dict[str, Any] = {
     },
     "defined_scope": {
         # DATE path: date_col -> fiscal_cal -> Year/Week. NATIVE path: set date_col=None, year_col/week_col.
+        # NATIVE path only: year_col is taken VERBATIM, never reconciled with fiscal_cal/daily's
+        # Year. If it's an ISO week-year column (late-Dec rows carry the next year), the scope
+        # join to daily/lost-sales on (product[, store], Year, Week) silently mismatches and
+        # drops those weeks. Only use year_col/week_col when there's no date column to join on,
+        # and confirm year_col is a true calendar year first. Prefer date_col otherwise.
         "product_col": "product_id",
         "store_col": "store_id",  # omit or set None for product-week scope (no store grain)
         "date_col": "week_start_date",
