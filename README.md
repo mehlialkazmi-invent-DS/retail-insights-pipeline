@@ -140,6 +140,8 @@ Time resolution on adjustment tables (same as defined scope):
 - `year_col` + `week_col` → native Year/Week
 - neither → expand keys across **all fiscal weeks** in the report window
 
+**⚠️ `year_col`/`week_col` risk — prefer `date_col`.** Unlike `date_col`, the native path takes `Year` **verbatim** from your source table — it is never derived from a date or reconciled against `fiscal_cal`/`fiscal_week`. Scope is joined to daily/lost-sales by an **exact match** on `(product_id[, store_id], Year, Week)` (see `scope_keys` in `kpi_pipeline/scope.py`), and when `use_fiscal_calendar=False` those daily-side `Year` values are the **calendar year of `date`** (see "Fiscal calendar vs native time grain" below). If your `year_col` source instead follows ISO week-year numbering (late-December rows carrying next year's value), the join silently mismatches and those rows drop out of scope entirely — no error, just missing weeks. Only use `year_col`/`week_col` when the source table has no date column at all, and confirm its `year` column is a genuine calendar year before relying on it.
+
 Example (Delta + CSV):
 
 ```python
@@ -479,6 +481,8 @@ DATE path (when your scope table has a date column):
     "week_col": None,
 }
 ```
+
+NATIVE path (set `date_col: None` and both `year_col`/`week_col`) — only use this when the scope table has **no date column at all**. It takes `Year` verbatim from your source, bypassing `fiscal_cal` entirely, so it must already be a genuine calendar year — see the ⚠️ warning under [Manual scope adjustments](#manual-scope-adjustments) for why an ISO week-year column here would silently drop late-December weeks from scope.
 
 ### `score_scope`
 
