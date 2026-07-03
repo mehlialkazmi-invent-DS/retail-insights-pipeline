@@ -24,7 +24,7 @@ from pyspark.sql import functions as F
 
 from kpi_pipeline.comparisons import _build_comparison_for_dimension, _comparison_dimensions
 from kpi_pipeline.context import KPIContext
-from kpi_pipeline.kpi_long import _period_frames, _period_label
+from kpi_pipeline.kpi_long import _filter_frames_for_dimension, _period_frames, _period_label
 from kpi_pipeline.metrics import build_kpi_table
 
 # (comparison_kind, period_type, period_col) — period_col matches kpi_long.PERIODS.
@@ -104,10 +104,12 @@ def _comparable_period_rows(
 ) -> pd.DataFrame:
     """kpi_long-shaped rows for the two comparable periods (overall + each active slice)."""
     period_filter = F.col(period_col).isin(list(period_vals))
+    value_filters = ctx.settings.get("SLICE_VALUE_FILTERS", {}) or {}
     slices: List[Tuple[str, List[str]]] = [("overall", [])] + [(d, [d]) for d in ctx.active_slice_dimensions]
     rows: List[dict] = []
     for slice_name, gk in slices:
-        tbl = build_kpi_table(ctx, frames, period_col, gk, period_filter)
+        sf = _filter_frames_for_dimension(frames, gk[0], value_filters) if gk else frames
+        tbl = build_kpi_table(ctx, sf, period_col, gk, period_filter)
         for _, r in tbl.iterrows():
             rec = {
                 "period_type": period_name,

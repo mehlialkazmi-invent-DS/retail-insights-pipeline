@@ -146,6 +146,14 @@ CONFIG: Dict[str, Any] = {
                 # Add more dimensions from this source here, e.g.:
                 # "is_comp": "CASE WHEN program LIKE '%COMP%' THEN 'yes' ELSE 'no' END",
             },
+            # value_filters: restrict which values of a dimension appear in the report
+            # breakdown (applied to that dimension's slice only — never to Overall).
+            #   omit a dim        -> keep ALL values, including NULL (default)
+            #   [] (empty list)   -> keep all NON-NULL values (drop the NULL bucket)
+            #   ["yes"]           -> keep ONLY 'yes' (drops 'no' and NULL)
+            # Products missing from this source get NULL; ["yes"] restricts the breakdown
+            # to the NVROUT universe (numbers for nvrout=yes products only).
+            "value_filters": {"is_nvrout": ["yes"]},
         },
         # Add more external sources here if needed, e.g.:
         # {
@@ -202,6 +210,11 @@ CONFIG: Dict[str, Any] = {
             # Example:
             # "price_tier": "CASE WHEN price_without_tax < 50 THEN 'budget' ELSE 'premium' END",
         },
+        # Restrict which values of a slice dimension appear in the breakdown (that
+        # dimension only; Overall is unaffected). Same semantics as dimension_sources:
+        #   omit a dim -> all values incl NULL | [] -> all non-null | ["A","B"] -> only those
+        # e.g. {"brand": ["NIKE", "ADIDAS"]} or {"brand": []} to drop a NULL brand bucket.
+        "value_filters": {},
     },
     "metrics": {
         "metric_cols": [
@@ -474,6 +487,13 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             resolved["path"] = fund_paste(bucket, *resolved["path_segments"])
         dimension_sources.append(resolved)
 
+    # Per-dimension value filters, merged from slices + each dimension_source. Applied to
+    # a slice's own breakdown only (see kpi_pipeline/kpi_long._filter_frames_for_dimension).
+    slice_value_filters = dict(cfg["slices"].get("value_filters", {}) or {})
+    for src in dimension_sources:
+        for dim, allowed in (src.get("value_filters", {}) or {}).items():
+            slice_value_filters[dim] = allowed
+
     output_cfg = cfg["output"]
     output_root = fund_paste(bucket, *output_cfg["path_segments"])
     run_date_raw = output_cfg.get("run_date")
@@ -530,6 +550,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "SLICE_DIMENSIONS": cfg["slices"]["dimensions"],
         "DERIVED_SLICE_DIMENSIONS": cfg["slices"]["derived_dimensions"],
         "DIMENSION_SOURCES": dimension_sources,
+        "SLICE_VALUE_FILTERS": slice_value_filters,
         "METRIC_COLS": metrics["metric_cols"],
         "SCOPE_DIFF_METRICS": metrics["scope_diff_metrics"],
         "METRIC_LABELS": metrics["labels"],

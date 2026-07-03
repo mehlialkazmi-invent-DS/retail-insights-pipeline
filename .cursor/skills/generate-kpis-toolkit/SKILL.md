@@ -90,6 +90,10 @@ When a user wants to configure the toolkit, ask them (or read from their message
 - Last week only: `run_min_date` = this week's Sunday
 - Multi-year backfill: `run_min_date` = Jan 1 of earliest year
 
+**Fiscal calendar vs native time grain** (`fiscal_calendar.use_fiscal_calendar`):
+- `True` (default): Year/Week/Quarter/Month come from `one_time_uploads/fiscal_cal`.
+- `False`: derived from `noob/daily-data` (`fiscal_calendar.daily_time_columns`). **Year is the calendar year of `date`** (`F.year(date)`); **Week is the native fiscal week column**. The source `daily_time_columns.year` column is **not** used for Year — it can carry the ISO week-year, mislabeling late-December weeks as the next year (e.g. Dec 2025 shown as `2026`), which previously mismatched the Quarter/Month derived from `date` (Dec 2025 → "Q4 2026"). Caveat: a fiscal week straddling Jan 1 now appears as two partial weeks (one per calendar year) in the Weekly view; quarter/month/annual rollups stay correct.
+
 ### 3.2 Scope mode
 
 ```python
@@ -139,10 +143,16 @@ Use this when the column already exists on (or is derivable from) the products t
     "derived_dimensions": {           # Spark SQL expressions against the products schema
         "price_tier": "CASE WHEN price_without_tax < 50 THEN 'budget' ELSE 'premium' END"
     },
+    "value_filters": {},              # restrict which values of a dimension appear in its own breakdown
 }
 ```
 
 - Derived expressions are validated at runtime; failures are **skipped with a warning** (unlike dimension sources, which fail loudly).
+- `value_filters` (also available on `dimension_sources`, see 3.4b): applied only to that dimension's own slice breakdown — Overall and other slices are unaffected.
+  - dim omitted → keep all values, including `NULL` (default)
+  - `[]` → keep all non-null values (drops only the `NULL` bucket)
+  - `["A", "B"]` → keep only those values (drops `NULL` and unlisted values)
+  - Example: `{"brand": ["NIKE", "ADIDAS"]}` or `{"brand": []}` to drop a `NULL` brand bucket.
 
 #### 3.4b — `dimension_sources` (columns from other tables)
 
@@ -161,6 +171,7 @@ Use this **only** when a breakdown column does **not** live on the products tabl
             # Spark SQL over the SOURCE table's columns → new slice dimension(s)
             "is_nvrout": "CASE WHEN program LIKE '%NVROUT%' THEN 'yes' ELSE 'no' END",
         },
+        "value_filters": {"is_nvrout": ["yes"]},  # numbers only for the NVROUT universe
     },
     # Add more sources as needed — one dict per external table
     {
@@ -181,6 +192,7 @@ Use this **only** when a breakdown column does **not** live on the products tabl
 - **Enabled sources fail loudly** on bad path / missing column / bad expression (by design — a silently dropped segment would misreport).
 - **NULL behaviour**: products absent from the source get `NULL` (left join). For a clean yes/no split, ensure the source covers the full product universe, or use `ELSE 'no'` only works for rows that exist.
 - **Overlapping segments** (e.g. COMP includes NVROUT): use independent boolean dimensions (`is_nvrout`, `is_comp`) — one product can be `yes` for both.
+- **`value_filters`** (same semantics as `slices.value_filters`, see 3.4a): restricts that dimension's own breakdown only — omit the dim for all values incl `NULL`, `[]` for all non-null, `["yes"]` for only that value. `{"is_nvrout": ["yes"]}` gives numbers only for the NVROUT universe.
 - CSV sources honour the same `location` (`datastore` / `workspace`) and `csv_options` as scope adjustments.
 
 **Scope vs slices — two different machines:**
@@ -392,6 +404,7 @@ Metric definitions can be customised per-client:
 | Add a derived slice (products SQL expression) | `slices.derived_dimensions` |
 | Add a slice from another table (e.g. NVROUT) | `dimension_sources` |
 | Add multiple external dimension sources | add another dict to `dimension_sources` list |
+| Restrict a slice's values / drop NULL bucket | `slices.value_filters` or `dimension_sources[].value_filters` |
 | Filter inputs | `input_filters.{defined_scope,lost_sales,daily_data}` |
 | Add a scope addition from Delta | `scope_adjustments.additions` (multiple entries supported) |
 | Add a scope removal from CSV/Delta | `scope_adjustments.removals` (multiple entries supported) |
@@ -523,6 +536,7 @@ render_kpi_html → standalone HTML file
 | Slice from another table (NVROUT, etc.) missing | Use `dimension_sources` — not `slices.dimensions` — when the column lives on another table |
 | Dimension source errors on read | An **enabled** dimension source fails loudly on bad path / missing column / bad expression — fix the source or set `enabled: False` |
 | Slice value count looks doubled | A `dimension_source` table has multiple rows per `join_key` — pre-aggregate to one row per product (toolkit keeps arbitrary row) |
+| `is_nvrout` (or another slice) shows a NULL bucket, or you want only one value (e.g. only NVROUT products) | Set `value_filters` for that dimension in `slices` or the `dimension_source`: `["yes"]` keeps only `yes`; `[]` drops the NULL bucket — see §3.4a/§3.4b |
 | Score backfills all weeks | Defined scope path wrong or defined scope table empty for the window |
 | WOS unexpectedly high/low | Check `excluded_store_ids` — missing e-com IDs inflate network inventory |
 | `kpi_long is empty — run pipeline first` | Called `build_html_report` before `runner.run()`, or saved outputs missing in `html_only` mode |

@@ -204,6 +204,33 @@ This produces an `is_nvrout` slice (`yes` / `no`) alongside `brand` — the `yes
 - **Enabled sources fail loudly.** Unlike `derived_dimensions` (best-effort, skipped on error), an **enabled** dimension source raises on a bad path, missing column, or unresolved expression — a silently dropped segment would misreport the very breakdown you added it to produce. Disable the source if you want it ignored.
 - **CSV location.** Delta or CSV; CSV honours the same `location` (`datastore` / `workspace`) and `csv_options` as [scope adjustments](#manual-scope-adjustments).
 
+### Value filters (restrict slice values / drop the NULL bucket)
+
+`value_filters` restricts which values of a slice dimension appear **in that dimension's own report breakdown** — it never affects Overall or any other slice. It is config-only (no environment variable). Available on both `slices.value_filters` and each `dimension_sources[].value_filters`:
+
+- **Dim omitted** — keep **all** values, including `NULL` (default, current behaviour).
+- **`[]` (empty list)** — keep all **non-null** values; drops only the `NULL` bucket.
+- **`["v1", "v2", ...]`** — keep **only** those values; `NULL` and any unlisted value are dropped.
+
+```python
+"dimension_sources": [
+    {
+        "enabled": True,
+        "label": "extended_product",
+        ...
+        "derived": {"is_nvrout": "CASE WHEN program LIKE '%NVROUT%' THEN 'yes' ELSE 'no' END"},
+        "value_filters": {"is_nvrout": ["yes"]},   # numbers only for the NVROUT universe
+    },
+],
+"slices": {
+    "dimensions": ["brand"],
+    "derived_dimensions": {},
+    "value_filters": {},   # e.g. {"brand": ["NIKE", "ADIDAS"]} or {"brand": []} to drop a NULL brand bucket
+},
+```
+
+`is_nvrout: ["yes"]` above means the `is_nvrout` breakdown in `kpi_long` reports **numbers only for the NVROUT universe** (the `no` and `NULL` panels are dropped); `brand`, Overall, and every other slice are untouched.
+
 ### Scope vs slices — two different machines
 
 | Need | Use | Effect |
@@ -274,6 +301,17 @@ Resolved automatically:
 - **Start**: Sunday of Jan 1 (YTD) or Sunday of `run_min_date`
 - **End**: **Last completed Saturday** on or before `as_of_date` (excludes the in-progress fiscal week)
 - **Defined scope weeks**: any fiscal week whose Sun–Sat range **overlaps** the effective window
+
+### Fiscal calendar vs native time grain
+
+Controlled by `fiscal_calendar.use_fiscal_calendar`:
+
+- **`True` (default)** — Year/Week/Quarter/Month come from the uploaded `one_time_uploads/fiscal_cal` table.
+- **`False`** — the time grain is derived from `noob/daily-data` (`fiscal_calendar.daily_time_columns`). **Year is the CALENDAR year of `date`** (`F.year(date)`), and **Week is the native fiscal week column** (`daily_time_columns.week`). Quarter/Month are also derived from `date`.
+
+  The source `year` column (`daily_time_columns.year`) is **not** used for the reporting year — it can carry the **ISO week-year**, which labels late-December weeks as the *following* year (e.g. a week starting Dec 29, 2025 shown as `year=2026`). Using it directly mislabelled December as `Q4 2026` instead of `Q4 2025`. Deriving Year from `date` fixes this.
+
+  **Caveat**: a native fiscal week that straddles Jan 1 is split into two partial weeks in the Weekly view — one dated in the old calendar year, one in the new — instead of being a single week. Quarter, Month, and annual rollups are unaffected and remain correct.
 
 ## Output saves
 
@@ -581,6 +619,7 @@ If you see slow runs, check: (1) scope table path is correct so defined scope is
 | Empty slice dimension       | Column missing from `master-data/products` or derived SQL failed validation — if it lives on another table, add a [dimension source](#dimension-sources-extra-slices-from-other-tables) |
 | Dimension source errors on read | An **enabled** dimension source fails loudly on bad path / missing column / bad expression (by design) — fix the source or set `enabled: False` |
 | Slice value count looks doubled | A `dimension_source` table has multiple rows per `join_key` — pre-aggregate to one row per product (toolkit keeps an arbitrary row, see [Dimension sources](#dimension-sources-extra-slices-from-other-tables)) |
+| `is_nvrout` (or another slice) shows a NULL bucket, or you want only one value (e.g. only NVROUT products) | set `value_filters` for that dimension in `slices` or the `dimension_source`: `["yes"]` keeps only `yes`; `[]` drops the NULL bucket; see [Value filters](#value-filters-restrict-slice-values--drop-the-null-bucket) |
 
 
 ## HTML report

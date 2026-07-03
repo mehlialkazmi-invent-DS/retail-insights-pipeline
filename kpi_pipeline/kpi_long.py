@@ -95,17 +95,44 @@ def trim_periods_to_recent(kpi_long: pd.DataFrame, ctx: KPIContext) -> pd.DataFr
     return pd.concat(parts, ignore_index=True) if parts else kpi_long.iloc[0:0].copy()
 
 
+def _filter_frames_for_dimension(
+    frames: Dict[str, DataFrame], dim: str, value_filters: Dict[str, List]
+) -> Dict[str, DataFrame]:
+    """Restrict a slice's frames to the dimension values configured in value_filters.
+
+    Semantics for value_filters[dim]:
+      * dim absent    -> no filtering (keep every value, including NULL)
+      * [] empty      -> keep all NON-NULL values (drop only the NULL bucket)
+      * [v1, v2, ...] -> keep ONLY those values (NULL and unlisted values dropped)
+
+    Only a per-slice breakdown is filtered; the 'overall' totals never pass through here.
+    """
+    if dim not in value_filters:
+        return frames
+    allowed = value_filters[dim]
+    out = dict(frames)
+    for key in ("scoped_daily", "inst_data", "lost_base"):
+        df = out.get(key)
+        if df is None:
+            continue
+        col = F.col(dim)
+        out[key] = df.filter(col.isNotNull()) if not allowed else df.filter(col.isin(list(allowed)))
+    return out
+
+
 def build_kpi_long(ctx: KPIContext, frames: Dict[str, DataFrame]) -> pd.DataFrame:
     """Build kpi_long for overall + each active slice dimension across annual/quarter/monthly/weekly periods."""
     metric_cols = ctx.settings["METRIC_COLS"]
     slices: List[Tuple[str, List[str]]] = [("overall", [])] + [
         (dim, [dim]) for dim in ctx.active_slice_dimensions
     ]
+    value_filters = ctx.settings.get("SLICE_VALUE_FILTERS", {}) or {}
     rows: List[dict] = []
     for period_name, period_col in PERIODS:
         pf = _period_frames(frames, period_name)
         for slice_name, gk in slices:
-            tbl = build_kpi_table(ctx, pf, period_col, gk)
+            sf = _filter_frames_for_dimension(pf, gk[0], value_filters) if gk else pf
+            tbl = build_kpi_table(ctx, sf, period_col, gk)
             for _, r in tbl.iterrows():
                 rec = {
                     "period_type": period_name,
