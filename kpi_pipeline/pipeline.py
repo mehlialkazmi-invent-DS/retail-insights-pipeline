@@ -53,11 +53,15 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
         F.sum(F.col("in_stock").cast("double")).alias("in_stock_days"),
         F.sum(F.col("details.total_days").cast("double")).alias("total_days"),
     ]
-    if not ctx.settings["USE_FISCAL_CALENDAR"]:
-        if "year" in raw.columns and "week" in raw.columns:
-            agg_exprs.append(F.first(F.col("year").cast("int"), ignorenulls=True).alias("_ls_year"))
-            agg_exprs.append(F.first(F.col("week").cast("int"), ignorenulls=True).alias("_ls_week"))
+    ls_native_week = not ctx.settings["USE_FISCAL_CALENDAR"] and "week" in raw.columns
+    if ls_native_week:
+        # Keep the native fiscal week number, but derive Year from week_start_date
+        # (calendar year) rather than the source 'year' column, which can carry the ISO
+        # week-year (late-December weeks labelled as the next year). See fiscal.py.
+        agg_exprs.append(F.first(F.col("week").cast("int"), ignorenulls=True).alias("_ls_week"))
     deduped = filtered.groupBy("product_id", "store_id", "week_start_date").agg(*agg_exprs)
+    if ls_native_week:
+        deduped = deduped.withColumn("_ls_year", F.year("week_start_date"))
     ctx.lost_sales_weekly_base = _enrich_lost_sales_with_time_grain(ctx, deduped).withColumn(
         "fiscal_week_days",
         F.datediff(F.col("week_end_date"), F.col("week_start_date")) + 1,
@@ -69,11 +73,11 @@ def build_scoped_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs_in: D
     """Daily sales/inventory for scoped pairs, with product cost/price and fiscal week attributes."""
     s = ctx.settings
     time_cols = s["DAILY_TIME_COLUMNS"]
-    date_col, year_col, week_col = time_cols["date"], time_cols["year"], time_cols["week"]
+    date_col, week_col = time_cols["date"], time_cols["week"]
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
     select_cols = ["product_id", "store_id", date_col, "sales_revenue", "sales_quantity", "inventory"]
     if not s["USE_FISCAL_CALENDAR"]:
-        select_cols.extend([year_col, week_col])
+        select_cols.append(week_col)
 
     daily = (
         get_daily_data_raw(ctx)
@@ -85,10 +89,11 @@ def build_scoped_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs_in: D
     if has_store:
         daily = daily.join(scope_pairs_in, on=["product_id", "store_id"], how="left_semi")
     if not s["USE_FISCAL_CALENDAR"]:
+        # Year = calendar year of `date`; Week = native fiscal week column. Avoids the
+        # source 'year' column's ISO week-year mislabel (Dec -> next year). See fiscal.py.
         daily = (
-            daily.withColumnRenamed(year_col, "Year")
+            daily.withColumn("Year", F.year(F.col("date")))
             .withColumnRenamed(week_col, "Week")
-            .withColumn("Year", F.col("Year").cast("int"))
             .withColumn("Week", F.col("Week").cast("int"))
         )
     else:

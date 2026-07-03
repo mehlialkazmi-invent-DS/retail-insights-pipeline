@@ -1,7 +1,12 @@
 """Fiscal calendar and product dimension setup.
 
 When USE_FISCAL_CALENDAR is True, reads one_time_uploads/fiscal_cal.
-Otherwise derives Year/Week from noob/daily-data native columns.
+Otherwise derives the time grain from noob/daily-data: Year is the CALENDAR year of
+`date`, and Week is the native fiscal week column. The source 'year' column is NOT
+used, because it can carry the ISO week-year (late-December weeks labelled as the next
+year), which would mislabel e.g. December 2025 as Q4 2026. A fiscal week straddling
+Jan 1 is therefore reported as two partial weeks (one per calendar year); quarter,
+month and annual rollups remain correct.
 """
 
 from __future__ import annotations
@@ -75,16 +80,19 @@ def build_time_grain_from_daily_data(
     report_start_date: datetime.date,
     report_end_date: datetime.date,
 ) -> Tuple[DataFrame, DataFrame]:
-    date_col, year_col, week_col = time_cols["date"], time_cols["year"], time_cols["week"]
+    date_col, week_col = time_cols["date"], time_cols["week"]
+    # Year is the CALENDAR year of `date`, not the source 'year' column: that column can
+    # carry the ISO week-year, which labels late-December weeks as the following year
+    # (e.g. Dec 2025 -> 2026) and mismatches the Quarter/Month derived from `date`.
     daily_time = (
         ctx.spark.read.format("delta")
         .load(path)
-        .select(date_col, year_col, week_col)
+        .select(date_col, week_col)
         .withColumn(date_col, F.to_date(F.col(date_col)))
         .filter(F.col(date_col).between(F.lit(report_start_date), F.lit(report_end_date)))
         .select(
             F.col(date_col).alias("date"),
-            F.col(year_col).cast("int").alias("Year"),
+            F.year(F.col(date_col)).alias("Year"),
             F.col(week_col).cast("int").alias("Week"),
         )
         .distinct()
