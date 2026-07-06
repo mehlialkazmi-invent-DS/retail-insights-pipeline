@@ -94,6 +94,7 @@ class KPIRunner:
             )
         print("DEFINED_SCOPE path:", s["DEFINED_SCOPE"]["path"])
         print("SLICE_DIMENSIONS:", s["SLICE_DIMENSIONS"])
+        print("COMPARISONS:", s.get("COMPARISON_KINDS", ["yoy", "qoq", "mom", "wow"]))
         if s["SAVE_OUTPUTS"]:
             print(
                 "SAVE_OUTPUTS: True | mode:",

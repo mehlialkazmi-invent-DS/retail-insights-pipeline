@@ -100,22 +100,28 @@ COMPARABLE_COMPARISON_TABLES: Tuple[str, ...] = (
 COMPARABLE_TABLES: Tuple[str, ...] = ("comparable_kpi_long",) + COMPARABLE_COMPARISON_TABLES
 
 
+def _selected_comparison_kinds(ctx: KPIContext) -> List[str]:
+    """Comparison kinds selected via config (defaults to all four), in canonical order."""
+    all_kinds = ("yoy", "qoq", "mom", "wow")
+    selected = set(ctx.settings.get("COMPARISON_KINDS") or all_kinds)
+    return [k for k in all_kinds if k in selected]
+
+
 def _output_frames(ctx: KPIContext) -> Dict[str, pd.DataFrame]:
-    """Tables to persist, in save order. Comparable tables are included only when gated on."""
-    frames: Dict[str, pd.DataFrame] = {
-        "kpi_long": ctx.kpi_long,
-        "comparison_yoy": ctx.comparison_yoy,
-        "comparison_qoq": ctx.comparison_qoq,
-        "comparison_mom": ctx.comparison_mom,
-        "comparison_wow": ctx.comparison_wow,
-        "scope_diff": ctx.scope_diff,
-    }
+    """Tables to persist, in save order.
+
+    Only the comparison kinds selected via ``comparisons.enabled`` are persisted; the others
+    are skipped entirely. Comparable tables are included only when comparable_pairs is gated on.
+    """
+    kinds = _selected_comparison_kinds(ctx)
+    frames: Dict[str, pd.DataFrame] = {"kpi_long": ctx.kpi_long}
+    for kind in kinds:
+        frames[f"comparison_{kind}"] = getattr(ctx, f"comparison_{kind}")
+    frames["scope_diff"] = ctx.scope_diff
     if ctx.settings.get("COMPARABLE_PAIRS_ENABLED", False):
         frames["comparable_kpi_long"] = ctx.comparable_kpi_long
-        frames["comparable_comparison_yoy"] = ctx.comparable_comparison_yoy
-        frames["comparable_comparison_qoq"] = ctx.comparable_comparison_qoq
-        frames["comparable_comparison_mom"] = ctx.comparable_comparison_mom
-        frames["comparable_comparison_wow"] = ctx.comparable_comparison_wow
+        for kind in kinds:
+            frames[f"comparable_comparison_{kind}"] = getattr(ctx, f"comparable_comparison_{kind}")
     return frames
 
 
@@ -562,7 +568,10 @@ def _recompute_comparable_comparisons_from_saved_history(ctx: KPIContext, fund_p
 
     ctx.comparable_kpi_long = merged
 
+    selected_kinds = set(_selected_comparison_kinds(ctx))
     for kind, _period_name, _ in _COMPARABLE_KINDS:
+        if kind not in selected_kinds:
+            continue
         kind_rows = merged[merged["comparison_type"] == kind].drop(columns=["comparison_type"], errors="ignore")
         if kind_rows.empty:
             continue
@@ -643,11 +652,10 @@ def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
         # overwrite wholesale rather than key-merge against a stale partition.
         comparison_mode = "full_refresh"
 
-    # 3. Save comparison + scope_diff tables.
-    _save("comparison_yoy", ctx.comparison_yoy, comparison_mode)
-    _save("comparison_qoq", ctx.comparison_qoq, comparison_mode)
-    _save("comparison_mom", ctx.comparison_mom, comparison_mode)
-    _save("comparison_wow", ctx.comparison_wow, comparison_mode)
+    # 3. Save the selected comparison tables + scope_diff.
+    selected_kinds = _selected_comparison_kinds(ctx)
+    for kind in selected_kinds:
+        _save(f"comparison_{kind}", getattr(ctx, f"comparison_{kind}"), comparison_mode)
     _save("scope_diff", ctx.scope_diff, save_mode)
 
     # 4. Comparable (like-for-like) tables: comparable_kpi_long merges incrementally like kpi_long;
@@ -660,10 +668,12 @@ def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
             _recompute_comparable_comparisons_from_saved_history(ctx, fund_paste)
             comparable_comp_mode = "full_refresh"
 
-        _save("comparable_comparison_yoy", ctx.comparable_comparison_yoy, comparable_comp_mode)
-        _save("comparable_comparison_qoq", ctx.comparable_comparison_qoq, comparable_comp_mode)
-        _save("comparable_comparison_mom", ctx.comparable_comparison_mom, comparable_comp_mode)
-        _save("comparable_comparison_wow", ctx.comparable_comparison_wow, comparable_comp_mode)
+        for kind in selected_kinds:
+            _save(
+                f"comparable_comparison_{kind}",
+                getattr(ctx, f"comparable_comparison_{kind}"),
+                comparable_comp_mode,
+            )
 
     ctx.save_plan = plan
     return plan

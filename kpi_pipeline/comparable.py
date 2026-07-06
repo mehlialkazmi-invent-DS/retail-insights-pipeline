@@ -155,10 +155,13 @@ def build_comparable_pairs(ctx: KPIContext) -> None:
         raise RuntimeError("comparable_pairs.enabled=True but pipeline frames are missing — run build_kpis first.")
 
     metric_cols = ctx.settings["METRIC_COLS"]
+    selected_kinds = set(ctx.settings.get("COMPARISON_KINDS") or _KIND_SAVE_ATTR.keys())
     kpi_parts: List[pd.DataFrame] = []
     counts: List[str] = []
 
     for kind, period_name, period_col in _COMPARABLE_KINDS:
+        if kind not in selected_kinds:
+            continue
         pf = _period_frames(ctx.hybrid_frames, period_name)
         period_vals = _last_two_periods(pf["scoped_daily"], period_name, period_col)
         if len(period_vals) < 2:

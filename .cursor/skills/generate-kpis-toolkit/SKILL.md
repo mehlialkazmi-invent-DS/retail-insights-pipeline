@@ -150,7 +150,7 @@ Use this when the column already exists on (or is derivable from) the products t
 ```
 
 - Derived expressions are validated at runtime; failures are **skipped with a warning** (unlike dimension sources, which fail loudly).
-- `value_filters` (also available on `dimension_sources`, see 3.4b): applied only to that dimension's own slice breakdown — Overall and other slices are unaffected.
+- `value_filters` (also available on `dimension_sources`, see 3.4b): applied only to that dimension's own slice breakdown — Overall and other slices are unaffected. Accepts a LIST (include-only: `[]` = non-null, `["A"]` = only A) or a DICT (`{"include": [...]}`, `{"exclude": [...]}` keeps the rest incl NULL, optional `keep_null`).
   - dim omitted → keep all values, including `NULL` (default)
   - `[]` → keep all non-null values (drops only the `NULL` bucket)
   - `["A", "B"]` → keep only those values (drops `NULL` and unlisted values)
@@ -194,7 +194,7 @@ Use this **only** when a breakdown column does **not** live on the products tabl
 - **Enabled sources fail loudly** on bad path / missing column / bad expression (by design — a silently dropped segment would misreport).
 - **NULL behaviour**: products absent from the source get `NULL` (left join). For a clean yes/no split, ensure the source covers the full product universe, or use `ELSE 'no'` only works for rows that exist.
 - **Overlapping segments** (e.g. COMP includes NVROUT): use independent boolean dimensions (`is_nvrout`, `is_comp`) — one product can be `yes` for both.
-- **`value_filters`** (same semantics as `slices.value_filters`, see 3.4a): restricts that dimension's own breakdown only — omit the dim for all values incl `NULL`, `[]` for all non-null, `["yes"]` for only that value. `{"is_nvrout": ["yes"]}` gives numbers only for the NVROUT universe.
+- **`value_filters`** (same semantics as `slices.value_filters`, see 3.4a): restricts that dimension's own breakdown only. LIST form (include-only): omit the dim for all values incl `NULL`, `[]` for all non-null, `["yes"]` for only that value. DICT form (NULL-aware): `{"include": ["yes"]}` keep only yes; `{"exclude": ["nfg"]}` keep everything except nfg **including NULL** (the way to drop an exclusion list and keep the remainder); optional `"keep_null": True/False`. `{"is_nvrout": ["yes"]}` gives numbers only for the NVROUT universe.
 - CSV sources honour the same `location` (`datastore` / `workspace`) and `csv_options` as scope adjustments.
 
 **Scope vs slices — two different machines:**
@@ -289,6 +289,20 @@ All-store sales totals include these stores; only service-specific metrics exclu
 # Rebuild all saved tables from a full-history run
 "output": {"save_outputs": True, "save_mode": "full_refresh", "allow_overwrite_existing": False}
 ```
+
+### 3.6.1 Selecting which comparisons to run
+
+`comparisons.enabled` chooses which period-over-period comparisons are computed, printed, saved, and rendered — any subset of `yoy`/`qoq`/`mom`/`wow` (default: all four).
+
+```python
+"comparisons": {
+    "enabled": ["yoy"],   # only YoY; qoq/mom/wow skipped entirely
+}
+```
+
+- Gates the `comparison_{kind}` (and `comparable_comparison_{kind}`) Delta tables + HTML comparison columns only. `kpi_long` is always built in full.
+- A latest-week run can still produce e.g. YoY: with `save_mode="incremental"` + `recompute_comparisons_from_history=True`, selected comparisons are rebuilt from the full merged `kpi_long` (this run unioned onto prior saved runs). Needs a prior saved partition.
+- Invalid/empty selection fails loudly in `materialize()`. Env override: `KPI_COMPARISONS="yoy,mom"`.
 
 ### 3.7 Comparable pairs (like-for-like)
 
@@ -538,7 +552,7 @@ render_kpi_html → standalone HTML file
 | Slice from another table (NVROUT, etc.) missing | Use `dimension_sources` — not `slices.dimensions` — when the column lives on another table |
 | Dimension source errors on read | An **enabled** dimension source fails loudly on bad path / missing column / bad expression — fix the source or set `enabled: False` |
 | Slice value count looks doubled | A `dimension_source` table has multiple rows per `join_key` — pre-aggregate to one row per product (toolkit keeps arbitrary row) |
-| `is_nvrout` (or another slice) shows a NULL bucket, or you want only one value (e.g. only NVROUT products) | Set `value_filters` for that dimension in `slices` or the `dimension_source`: `["yes"]` keeps only `yes`; `[]` drops the NULL bucket — see §3.4a/§3.4b |
+| `is_nvrout` (or another slice) shows a NULL bucket, or you want only one value (e.g. only NVROUT products) | Set `value_filters` for that dimension in `slices` or the `dimension_source`: `["yes"]` keeps only `yes`; `[]` drops the NULL bucket; `{"exclude": ["nfg"]}` drops a set but keeps the rest incl NULL — see §3.4a/§3.4b |
 | Score backfills all weeks | Defined scope path wrong or defined scope table empty for the window |
 | WOS unexpectedly high/low | Check `excluded_store_ids` — missing e-com IDs inflate network inventory |
 | `kpi_long is empty — run pipeline first` | Called `build_html_report` before `runner.run()`, or saved outputs missing in `html_only` mode |

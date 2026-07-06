@@ -309,37 +309,50 @@ def _build_comparison_for_dimension(
     return display_overall, save_all
 
 
+# kind -> (save attribute on ctx, overall-display attribute on ctx)
+_KIND_CTX_ATTRS = {
+    "yoy": ("comparison_yoy", "yoy_display"),
+    "qoq": ("comparison_qoq", "qoq_display"),
+    "mom": ("comparison_mom", "mom_display"),
+    "wow": ("comparison_wow", "wow_display"),
+}
+
+
+def _selected_comparison_kinds(ctx: KPIContext) -> List[str]:
+    """Comparison kinds to build, in canonical order (defaults to all four)."""
+    selected = set(ctx.settings.get("COMPARISON_KINDS") or _KIND_CTX_ATTRS.keys())
+    return [k for k in _KIND_CTX_ATTRS if k in selected]
+
+
 def build_comparisons(ctx: KPIContext) -> None:
-    yoy_saves, qoq_saves, mom_saves, wow_saves = [], [], [], []
-    ctx.yoy_display = pd.DataFrame()
-    ctx.qoq_display = pd.DataFrame()
-    ctx.mom_display = pd.DataFrame()
-    ctx.wow_display = pd.DataFrame()
+    kinds = _selected_comparison_kinds(ctx)
 
+    # Reset every comparison table + overall display; unselected kinds stay empty so save,
+    # HTML render, and notebook cells all treat them as "not requested".
+    for save_attr, display_attr in _KIND_CTX_ATTRS.values():
+        setattr(ctx, save_attr, pd.DataFrame())
+        setattr(ctx, display_attr, pd.DataFrame())
+
+    saves: Dict[str, List[pd.DataFrame]] = {k: [] for k in kinds}
     for dimension in _comparison_dimensions(ctx):
-        yoy_disp, yoy_save = _build_comparison_for_dimension(ctx, dimension, "yoy")
-        qoq_disp, qoq_save = _build_comparison_for_dimension(ctx, dimension, "qoq")
-        mom_disp, mom_save = _build_comparison_for_dimension(ctx, dimension, "mom")
-        wow_disp, wow_save = _build_comparison_for_dimension(ctx, dimension, "wow")
-        if dimension == "overall":
-            ctx.yoy_display, ctx.qoq_display, ctx.mom_display, ctx.wow_display = yoy_disp, qoq_disp, mom_disp, wow_disp
-        if not yoy_save.empty:
-            yoy_saves.append(yoy_save)
-        if not qoq_save.empty:
-            qoq_saves.append(qoq_save)
-        if not mom_save.empty:
-            mom_saves.append(mom_save)
-        if not wow_save.empty:
-            wow_saves.append(wow_save)
+        for kind in kinds:
+            disp, save = _build_comparison_for_dimension(ctx, dimension, kind)
+            if dimension == "overall":
+                setattr(ctx, _KIND_CTX_ATTRS[kind][1], disp)
+            if not save.empty:
+                saves[kind].append(save)
 
-    ctx.comparison_yoy = pd.concat(yoy_saves, ignore_index=True) if yoy_saves else pd.DataFrame()
-    ctx.comparison_qoq = pd.concat(qoq_saves, ignore_index=True) if qoq_saves else pd.DataFrame()
-    ctx.comparison_mom = pd.concat(mom_saves, ignore_index=True) if mom_saves else pd.DataFrame()
-    ctx.comparison_wow = pd.concat(wow_saves, ignore_index=True) if wow_saves else pd.DataFrame()
+    for kind in kinds:
+        setattr(
+            ctx,
+            _KIND_CTX_ATTRS[kind][0],
+            pd.concat(saves[kind], ignore_index=True) if saves[kind] else pd.DataFrame(),
+        )
 
     slice_dims = ctx.active_slice_dimensions
     print(
         "comparisons:",
+        f"kinds={kinds}",
         f"YoY rows={len(ctx.comparison_yoy)}",
         f"QoQ rows={len(ctx.comparison_qoq)}",
         f"MoM rows={len(ctx.comparison_mom)}",

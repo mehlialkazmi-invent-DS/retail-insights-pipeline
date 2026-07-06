@@ -5,6 +5,9 @@ import datetime
 import os
 from typing import Any, Callable, Dict, Optional
 
+# Period-over-period comparison kinds the pipeline can produce, in canonical order.
+COMPARISON_KINDS_ALL = ("yoy", "qoq", "mom", "wow")
+
 CONFIG: Dict[str, Any] = {
     "customer": "your_client",
     "run": {
@@ -58,6 +61,25 @@ CONFIG: Dict[str, Any] = {
         #   * comparable_comparison_{yoy,qoq,mom,wow} Delta tables
         #   * a second "Comparable pairs" comparison table per panel in the HTML report
         "enabled": False,
+    },
+    "comparisons": {
+        # Which period-over-period comparisons to compute, print, save, and render.
+        # Choose any subset of:
+        #   "yoy" (year-over-year, from annual periods)
+        #   "qoq" (quarter-over-quarter)
+        #   "mom" (month-over-month)
+        #   "wow" (week-over-week)
+        # Only the selected kinds are computed, saved as comparison_{kind} Delta tables,
+        # and shown in the HTML report; the others are skipped entirely. kpi_long (the raw
+        # per-period metrics) is always produced in full regardless of this setting.
+        #
+        # Reading a comparison from saved history: a single latest-week run can still
+        # produce e.g. YoY. With output.save_mode="incremental" and
+        # output.recompute_comparisons_from_history=True, the selected comparisons are
+        # rebuilt from the FULL merged kpi_long (this run's window unioned onto prior saved
+        # runs), so prior years/quarters come from the saved data — no need to recompute
+        # them this run. (Same applies to comparable_pairs comparisons.)
+        "enabled": ["yoy", "qoq", "mom", "wow"],
     },
     "scope_adjustments": {
         # Optional manual adds/removes applied after hybrid/defined scope is built.
@@ -147,12 +169,24 @@ CONFIG: Dict[str, Any] = {
                 # "is_comp": "CASE WHEN program LIKE '%COMP%' THEN 'yes' ELSE 'no' END",
             },
             # value_filters: restrict which values of a dimension appear in the report
-            # breakdown (applied to that dimension's slice only — never to Overall).
-            #   omit a dim        -> keep ALL values, including NULL (default)
-            #   [] (empty list)   -> keep all NON-NULL values (drop the NULL bucket)
-            #   ["yes"]           -> keep ONLY 'yes' (drops 'no' and NULL)
-            # Products missing from this source get NULL; ["yes"] restricts the breakdown
-            # to the NVROUT universe (numbers for nvrout=yes products only).
+            # breakdown (applied to that dimension's OWN slice only — never to Overall or
+            # any other slice). Two shapes are accepted:
+            #
+            #   LIST form (include-only):
+            #     omit a dim        -> keep ALL values, including NULL (default)
+            #     [] (empty list)   -> keep all NON-NULL values (drop the NULL bucket)
+            #     ["yes"]           -> keep ONLY 'yes' (drops 'no' and NULL)
+            #
+            #   DICT form (include and/or exclude, NULL-aware):
+            #     {"include": ["yes"]}           -> keep ONLY 'yes'             (NULL dropped)
+            #     {"exclude": ["no"]}            -> keep EVERYTHING except 'no'  (NULL KEPT)
+            #     {"include": [...], "exclude": [...]} -> include set, then drop the excludes
+            #     add "keep_null": True/False    -> force-keep or force-drop the NULL bucket
+            #   Default NULL rule: include present -> NULL dropped; include absent -> NULL kept.
+            #
+            # Products missing from this source get NULL. ["yes"] restricts the breakdown to
+            # the NVROUT universe (nvrout=yes only). To EXCLUDE a set but keep the whole rest
+            # (including the NULL bucket), use exclude, e.g. {"exclude": ["nfg"]}.
             "value_filters": {"is_nvrout": ["yes"]},
         },
         # Add more external sources here if needed, e.g.:
@@ -216,9 +250,12 @@ CONFIG: Dict[str, Any] = {
             # "price_tier": "CASE WHEN price_without_tax < 50 THEN 'budget' ELSE 'premium' END",
         },
         # Restrict which values of a slice dimension appear in the breakdown (that
-        # dimension only; Overall is unaffected). Same semantics as dimension_sources:
-        #   omit a dim -> all values incl NULL | [] -> all non-null | ["A","B"] -> only those
-        # e.g. {"brand": ["NIKE", "ADIDAS"]} or {"brand": []} to drop a NULL brand bucket.
+        # dimension only; Overall and other slices are unaffected). Two shapes:
+        #   LIST (include-only): omit -> all incl NULL | [] -> all non-null | ["A","B"] -> only those
+        #   DICT (include/exclude): {"include": ["A"]} keep only A | {"exclude": ["A"]} keep the
+        #       rest incl NULL | add "keep_null": True/False to force the NULL bucket.
+        # e.g. {"brand": ["NIKE","ADIDAS"]}, {"brand": []} to drop NULL, or
+        #      {"brand": {"exclude": ["OUTLET"]}} to drop one brand but keep everything else.
         "value_filters": {},
     },
     "metrics": {
@@ -322,6 +359,35 @@ def _parse_bool(raw: str) -> bool:
     return raw.strip().lower() in ("1", "true", "yes")
 
 
+def _validate_value_filters(value_filters: Dict[str, Any]) -> None:
+    """Fail loudly on a malformed value_filters entry.
+
+    Each entry is either a LIST (include-only) or a DICT with any of the keys
+    ``include`` / ``exclude`` / ``keep_null``. Anything else is a config error.
+    """
+    allowed_keys = {"include", "exclude", "keep_null"}
+    for dim, spec in value_filters.items():
+        if isinstance(spec, (list, tuple)):
+            continue
+        if isinstance(spec, dict):
+            unknown = set(spec) - allowed_keys
+            if unknown:
+                raise ValueError(
+                    f"value_filters[{dim!r}] has unknown key(s) {sorted(unknown)}; "
+                    f"allowed keys: {sorted(allowed_keys)}"
+                )
+            if "keep_null" in spec and not isinstance(spec["keep_null"], bool):
+                raise ValueError(f"value_filters[{dim!r}]['keep_null'] must be a boolean.")
+            for k in ("include", "exclude"):
+                if k in spec and spec[k] is not None and not isinstance(spec[k], (list, tuple)):
+                    raise ValueError(f"value_filters[{dim!r}][{k!r}] must be a list.")
+            continue
+        raise ValueError(
+            f"value_filters[{dim!r}] must be a list or a dict with include/exclude/keep_null; "
+            f"got {type(spec).__name__}."
+        )
+
+
 def _parse_percentile(raw: str) -> float:
     value = float(raw)
     return value / 100.0 if value > 1 else value
@@ -363,6 +429,12 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
     cp = out.setdefault("comparable_pairs", {})
     if "KPI_COMPARABLE_PAIRS" in os.environ:
         cp["enabled"] = _parse_bool(os.environ["KPI_COMPARABLE_PAIRS"])
+
+    cmp_cfg = out.setdefault("comparisons", {})
+    if "KPI_COMPARISONS" in os.environ:
+        cmp_cfg["enabled"] = [
+            c.strip().lower() for c in os.environ["KPI_COMPARISONS"].split(",") if c.strip()
+        ]
 
     op = out.setdefault("output", {})
     if "KPI_SAVE_OUTPUTS" in os.environ:
@@ -498,6 +570,26 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     for src in dimension_sources:
         for dim, allowed in (src.get("value_filters", {}) or {}).items():
             slice_value_filters[dim] = allowed
+    _validate_value_filters(slice_value_filters)
+
+    # Selected comparison kinds — validated and normalised to canonical order.
+    comparisons_cfg = cfg.get("comparisons", {}) or {}
+    requested_kinds = comparisons_cfg.get("enabled")
+    if requested_kinds is None:
+        requested_kinds = list(COMPARISON_KINDS_ALL)
+    requested_set = {str(k).strip().lower() for k in requested_kinds}
+    invalid_kinds = sorted(requested_set - set(COMPARISON_KINDS_ALL))
+    if invalid_kinds:
+        raise ValueError(
+            f"comparisons.enabled has invalid kinds {invalid_kinds}; "
+            f"allowed: {list(COMPARISON_KINDS_ALL)}"
+        )
+    comparison_kinds = [k for k in COMPARISON_KINDS_ALL if k in requested_set]
+    if not comparison_kinds:
+        raise ValueError(
+            "comparisons.enabled resolved to an empty list; "
+            f"choose at least one of {list(COMPARISON_KINDS_ALL)}"
+        )
 
     output_cfg = cfg["output"]
     output_root = fund_paste(bucket, *output_cfg["path_segments"])
@@ -548,6 +640,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "USE_HYBRID_SCOPE": cfg["scope"]["use_hybrid_scope"],
         "RUN_SCOPE_DIFF": cfg["scope"].get("run_scope_diff", False),
         "COMPARABLE_PAIRS_ENABLED": cfg.get("comparable_pairs", {}).get("enabled", False),
+        "COMPARISON_KINDS": comparison_kinds,
         "SCOPE_ADJUSTMENTS": cfg.get("scope_adjustments", {}),
         **paths,
         "DEFINED_SCOPE": defined_scope,

@@ -208,11 +208,20 @@ This produces an `is_nvrout` slice (`yes` / `no`) alongside `brand` — the `yes
 
 ### Value filters (restrict slice values / drop the NULL bucket)
 
-`value_filters` restricts which values of a slice dimension appear **in that dimension's own report breakdown** — it never affects Overall or any other slice. It is config-only (no environment variable). Available on both `slices.value_filters` and each `dimension_sources[].value_filters`:
+`value_filters` restricts which values of a slice dimension appear **in that dimension's own report breakdown** — it never affects Overall or any other slice. It is config-only (no environment variable). Available on both `slices.value_filters` and each `dimension_sources[].value_filters`. Each entry accepts **two shapes**:
 
-- **Dim omitted** — keep **all** values, including `NULL` (default, current behaviour).
+**LIST form** (include-only; the original, still supported):
+
+- **Dim omitted** — keep **all** values, including `NULL` (default).
 - **`[]` (empty list)** — keep all **non-null** values; drops only the `NULL` bucket.
 - **`["v1", "v2", ...]`** — keep **only** those values; `NULL` and any unlisted value are dropped.
+
+**DICT form** (include and/or exclude, NULL-aware):
+
+- **`{"include": ["A", "B"]}`** — keep **only** `A` and `B` (same as the list form; `NULL` dropped).
+- **`{"exclude": ["X", "Y"]}`** — keep **everything except** `X` and `Y`, **including `NULL`**. This is how you drop a set and keep the whole remainder.
+- **`{"include": [...], "exclude": [...]}`** — apply the include set first, then remove the excludes.
+- **`"keep_null": true｜false`** — optional; force-keep or force-drop the `NULL` bucket. Default: `NULL` is dropped when `include` is present, kept when only `exclude` is given.
 
 ```python
 "dimension_sources": [
@@ -232,6 +241,25 @@ This produces an `is_nvrout` slice (`yes` / `no`) alongside `brand` — the `yes
 ```
 
 `is_nvrout: ["yes"]` above means the `is_nvrout` breakdown in `kpi_long` reports **numbers only for the NVROUT universe** (the `no` and `NULL` panels are dropped); `brand`, Overall, and every other slice are untouched.
+
+**Excluding a set but keeping the rest (e.g. a "not going forward" / NFG list).** When your source only lists the products to *drop* — so non-listed products come through as `NULL` — the list form cannot select the complement. Use `exclude`, which keeps the `NULL` remainder:
+
+```python
+"dimension_sources": [
+    {
+        "enabled": True,
+        "label": "nfg_list",                    # a CSV/Delta list of the not-going-forward product_ids
+        "source": "csv",
+        "path": "/Workspace/Users/you@invent.ai/lists/nfg.csv",
+        "location": "workspace",
+        "join_key": "product_id",
+        "derived": {"nfg": "CASE WHEN product_id IS NOT NULL THEN 'nfg' END"},  # 'nfg' for listed rows
+        "value_filters": {"nfg": {"exclude": ["nfg"]}},   # breakdown = everyone EXCEPT NFG (NULL kept)
+    },
+],
+```
+
+The `nfg` breakdown then covers the going-forward (COMP) universe only, while Overall and `brand` still include the NFG products. (Rows kept by `exclude` here carry `nfg = NULL`, so they appear under the dimension's `NULL`/None panel — give the flag a full-universe `ELSE` value if you want a cleaner label.)
 
 ### Scope vs slices — two different machines
 
@@ -435,6 +463,21 @@ Review Cell 4 output before Cell 5. If `skipped_rows > 0` and you intended to re
 - **Comparisons recomputed from merged history (incremental):** after merging `kpi_long`, the toolkit re-reads the merged partition and recomputes YoY/QoQ/MoM/WoW from the **full saved history**, then overwrites the comparison tables in that partition. A single-week refresh can therefore still produce a YoY vs last year. The same applies to comparable (like-for-like) tables: `comparable_kpi_long` is merged incrementally and comparable comparison tables are recomputed from it. `ctx.comparison_*` / `ctx.comparable_comparison_*` and the notebook/HTML displays reflect the merged history after save. Disable with `output.recompute_comparisons_from_history=False` (or `KPI_RECOMPUTE_COMPARISONS=false`) to keep comparisons scoped to the current run.
 - **Notebook vs saved Delta on overlapping period values:** under `allow_overwrite_existing=False`, overlapping `kpi_long` keys keep the prior saved values (e.g. a stale partial-year annual total is not replaced by a narrower re-run). Enable overwrite or use `full_refresh` to replace them.
 - **Empty outputs skipped:** If a table is empty for this run (e.g. comparisons on a very narrow window), the write for that table is skipped and prior Delta data is left unchanged — even under `full_refresh`.
+
+### Selecting which comparisons to run
+
+`comparisons.enabled` chooses which period-over-period comparisons are **computed, printed, saved, and rendered**. Pick any subset of `"yoy"` (year-over-year), `"qoq"` (quarter-over-quarter), `"mom"` (month-over-month), `"wow"` (week-over-week):
+
+```python
+"comparisons": {
+    "enabled": ["yoy"],          # only year-over-year; others are skipped entirely
+},
+```
+
+- Only the selected kinds produce `comparison_{kind}` (and, when `comparable_pairs.enabled=True`, `comparable_comparison_{kind}`) Delta tables and HTML comparison columns. Unselected kinds are never computed or written.
+- `kpi_long` (the raw per-period metrics) is **always** produced in full — this setting only gates the *comparison* tables, not the underlying period data.
+- **Reading a comparison from saved history:** a single latest-week run can still produce e.g. YoY. With `save_mode="incremental"` and `recompute_comparisons_from_history=True`, the selected comparisons are rebuilt from the **full merged `kpi_long`** (this run's window unioned onto prior saved runs) — so `["yoy"]` on a one-week run compares the current (partial) year against last year's saved annual total. Requires prior saved history at an earlier `run_date` partition.
+- Invalid or empty selections fail loudly at config `materialize()`. Environment override: `KPI_COMPARISONS="yoy,mom"` (comma-separated).
 
 ### Config keys
 

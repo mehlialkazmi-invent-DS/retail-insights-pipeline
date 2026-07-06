@@ -95,28 +95,118 @@ def trim_periods_to_recent(kpi_long: pd.DataFrame, ctx: KPIContext) -> pd.DataFr
     return pd.concat(parts, ignore_index=True) if parts else kpi_long.iloc[0:0].copy()
 
 
+# Frames that carry the slice dimension columns and therefore get value-filtered.
+_VALUE_FILTERED_FRAMES = ("scoped_daily", "inst_data", "lost_base")
+
+
+def _normalize_value_filter(spec) -> Dict[str, object]:
+    """Normalise one ``value_filters`` entry into a canonical include/exclude/keep_null form.
+
+    ``value_filters[dim]`` accepts two shapes:
+
+    LIST form (include-only; the original, still fully supported)::
+
+        []           -> keep all NON-NULL values (drop the NULL bucket)
+        ["A", "B"]   -> keep ONLY 'A' and 'B' (NULL and anything else dropped)
+
+    DICT form (include and/or exclude, NULL-aware; the new richer form)::
+
+        {"include": ["A", "B"]}              -> keep ONLY 'A' and 'B'          (NULL dropped)
+        {"exclude": ["X", "Y"]}              -> keep EVERYTHING EXCEPT 'X'/'Y' (NULL KEPT)
+        {"include": [...], "exclude": [...]} -> keep the include set, then remove the excludes
+        {..., "keep_null": True/False}       -> optional override of the NULL bucket
+
+    Default NULL handling (when ``keep_null`` is not given):
+
+      * ``include`` present -> NULL is DROPPED (you asked for a specific set of values)
+      * ``include`` absent  -> NULL is KEPT   (``exclude`` keeps the whole complement)
+
+    :param spec: the raw ``value_filters[dim]`` value (a list or a dict).
+    :return: ``{"include": Optional[list], "exclude": list, "keep_null": bool}``.
+    :rtype: Dict[str, object]
+    :raises ValueError: on an unrecognised shape or an unknown dict key.
+    """
+    # LIST form (include-only).
+    if isinstance(spec, (list, tuple, set)):
+        values = list(spec)
+        if not values:  # [] -> keep all non-null
+            return {"include": None, "exclude": [], "keep_null": False}
+        return {"include": values, "exclude": [], "keep_null": False}
+
+    # DICT form (include and/or exclude, NULL-aware).
+    if isinstance(spec, dict):
+        allowed_keys = {"include", "exclude", "keep_null"}
+        unknown = set(spec) - allowed_keys
+        if unknown:
+            raise ValueError(
+                f"value_filters entry has unknown key(s) {sorted(unknown)}; "
+                f"allowed keys: {sorted(allowed_keys)}"
+            )
+        include = spec.get("include")
+        include = None if include is None else list(include)
+        exclude = list(spec.get("exclude", []) or [])
+        # include present -> default drop NULL; include absent -> default keep NULL.
+        keep_null = bool(spec.get("keep_null", include is None))
+        return {"include": include, "exclude": exclude, "keep_null": keep_null}
+
+    raise ValueError(
+        "value_filters entry must be a list (include-only) or a dict with "
+        f"include/exclude/keep_null keys; got {type(spec).__name__}: {spec!r}"
+    )
+
+
+def _apply_value_filter(df: DataFrame, dim: str, spec) -> DataFrame:
+    """Filter ``df`` on one slice dimension per the normalised value_filters spec.
+
+    A row is kept when EITHER
+
+      * its value is NON-NULL and satisfies the include/exclude rules, OR
+      * its value is NULL and ``keep_null`` is True.
+
+    Spark ``isin`` / ``NOT isin`` both evaluate to NULL for a NULL cell, so the NULL
+    bucket is handled explicitly here rather than left to SQL three-valued logic.
+
+    :param df: frame carrying the ``dim`` column.
+    :param dim: slice dimension column name.
+    :param spec: raw ``value_filters[dim]`` value (list or dict).
+    :return: the filtered frame.
+    :rtype: DataFrame
+    """
+    norm = _normalize_value_filter(spec)
+    col = F.col(dim)
+
+    # Predicate applied to NON-NULL values only.
+    value_match = F.lit(True)
+    if norm["include"] is not None:
+        value_match = value_match & col.isin(norm["include"])
+    if norm["exclude"]:
+        value_match = value_match & ~col.isin(norm["exclude"])
+
+    keep = col.isNotNull() & value_match
+    if norm["keep_null"]:
+        keep = keep | col.isNull()
+    return df.filter(keep)
+
+
 def _filter_frames_for_dimension(
-    frames: Dict[str, DataFrame], dim: str, value_filters: Dict[str, List]
+    frames: Dict[str, DataFrame], dim: str, value_filters: Dict[str, object]
 ) -> Dict[str, DataFrame]:
-    """Restrict a slice's frames to the dimension values configured in value_filters.
+    """Restrict a slice's frames to the dimension values configured in ``value_filters``.
 
-    Semantics for value_filters[dim]:
-      * dim absent    -> no filtering (keep every value, including NULL)
-      * [] empty      -> keep all NON-NULL values (drop only the NULL bucket)
-      * [v1, v2, ...] -> keep ONLY those values (NULL and unlisted values dropped)
-
-    Only a per-slice breakdown is filtered; the 'overall' totals never pass through here.
+    Only a per-slice breakdown is filtered; the 'overall' totals never pass through here
+    (build_kpi_long / comparable._comparable_period_rows call this only when a slice
+    dimension is present). See ``_normalize_value_filter`` for the accepted shapes: a plain
+    list (include-only) or a dict with include / exclude / keep_null.
     """
     if dim not in value_filters:
         return frames
-    allowed = value_filters[dim]
+    spec = value_filters[dim]
     out = dict(frames)
-    for key in ("scoped_daily", "inst_data", "lost_base"):
+    for key in _VALUE_FILTERED_FRAMES:
         df = out.get(key)
         if df is None:
             continue
-        col = F.col(dim)
-        out[key] = df.filter(col.isNotNull()) if not allowed else df.filter(col.isin(list(allowed)))
+        out[key] = _apply_value_filter(df, dim, spec)
     return out
 
 
