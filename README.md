@@ -59,7 +59,7 @@ generate-kpis-toolkit/
 2. **Edit** `config.py` → `CONFIG` (at minimum):
   - `reporting_window.as_of_date` — anchor date for the run
   - `reporting_window.run_min_date` — optional narrow start (Sunday-aligned)
-  - `scope.use_hybrid_scope` — `True` for hybrid, `False` for defined scope only
+  - `scope.use_hybrid_scope` — `False` (default) for week-agnostic defined scope, `True` for hybrid (covered weeks + score backfill on missing weeks)
   - `defined_scope` — column mapping for your scope Delta table
   - `path_segments.defined_scope` — Delta path segments under the datastore bucket
   - `input_filters` — optional Spark SQL filters on defined scope, lost sales, daily data
@@ -77,16 +77,22 @@ generate-kpis-toolkit/
 
 ## Scope modes
 
-### Defined scope only
+The scope table is read as a **week-agnostic `(product_id, store_id)` universe**. Its own week/date column does **not** gate membership: a pair scoped in **any** period is scoped for **every** week in the report window. This mirrors the v4 script (which flattened scope to product ids) but keeps the store grain, and it is the key behaviour that keeps a pair that has **dropped out of the current-year scope weeks yet still transacts** in the window — without it, a `(product, store, Year, Week)` join to the scope table silently drops those still-selling pairs and undercounts distinct products/pairs.
 
-Set `scope.use_hybrid_scope = False`. KPIs use only rows from your configured defined scope table. Score scope is **not** computed unless `scope.run_scope_diff=True` or hybrid backfill is enabled.
+### Defined scope only (default)
 
-### Hybrid scope (default)
+Set `scope.use_hybrid_scope = False`. Final scope = every scope `(product_id, store_id)` pair **× every week in the report window**. The scope table's own weeks are ignored entirely (so `date_col`/`year_col`/`week_col` are not read). Downstream, daily rows survive when their pair is in scope and their date is in the window. Score scope is **not** computed unless `scope.run_scope_diff=True`.
 
-1. **Defined scope** — Read from your configured Delta table at `product_id × store_id × Year × Week` grain (store optional; product-week fallback if no `store_col`). Weeks are matched by **calendar overlap** with the report window (fixes mid-week `run_min_date` false gaps).
-2. **Gap detection** — Fiscal weeks in the report window with **no** defined-scope rows are treated as missing.
-3. **Score backfill** — The score scope is computed once over the **full** report window: each `(product_id, store_id)` keeps the weeks whose weekly sales and **last available in-week inventory** clear a per-pair percentile threshold (thresholds use all the pair's weeks; **all stores included** — scope membership is store-agnostic, e-com is excluded later only for service metrics). The backfill then adds only the weeks that fall in the **missing** weeks above. Because thresholds use the full window, the defined-vs-score diff mirrors exactly what the backfill contributes.
-4. **Hybrid union** — Defined rows (`scope_origin=defined`) ∪ score backfill rows (`scope_origin=score`).
+### Hybrid scope
+
+Set `scope.use_hybrid_scope = True`. The scope table's week column is now read, but only to split the report window into **covered** weeks (present in the scope table) and **missing** weeks (absent):
+
+1. **Scope pairs** — `distinct(product_id, store_id)` from the scope table (store optional; product-week fallback if no `store_col`), week-agnostic as above.
+2. **Covered weeks** — fiscal weeks in the window that the scope table has rows for (matched by **calendar overlap**, fixing mid-week `run_min_date` false gaps). These get **all** scope pairs (`scope_origin=defined`).
+3. **Missing weeks** — fiscal weeks in the window with **no** scope rows. These are backfilled from **score scope** (`scope_origin=score`): computed once over the **full** window, each `(product_id, store_id)` keeps the weeks whose weekly sales and **last available in-week inventory** clear a per-pair percentile threshold (**all stores included** — scope membership is store-agnostic; e-com is excluded later only for service metrics), restricted to the missing weeks.
+4. **Hybrid union** — covered-week rows ∪ missing-week backfill rows.
+
+> **Note:** hybrid is *stricter* on the missing weeks than the default. The default applies all scope pairs to every week; hybrid applies all pairs only to weeks the scope table covers and falls back to the activity-based score filter for weeks it doesn't. Use hybrid when you trust the scope table's week coverage and want uncovered weeks gated by real activity rather than blanket-included.
 
 ### Manual scope adjustments
 
@@ -363,7 +369,7 @@ Resolved automatically:
 
 - **Start**: Sunday of Jan 1 (YTD) or Sunday of `run_min_date`
 - **End**: **Last completed Saturday** on or before `as_of_date` (excludes the in-progress fiscal week)
-- **Defined scope weeks**: any fiscal week whose Sun–Sat range **overlaps** the effective window
+- **Scope weeks**: any fiscal week whose Sun–Sat range **overlaps** the effective window is a window week; scope pairs are applied across all of them (and, under hybrid, covered vs missing weeks are split within this set)
 
 ### Fiscal calendar vs native time grain
 
@@ -537,7 +543,7 @@ See [Input previews and filters](#input-previews-and-filters) above.
 
 ```python
 "scope": {
-    "use_hybrid_scope": True,   # False = defined scope only
+    "use_hybrid_scope": False,  # False (default) = week-agnostic defined scope; True = hybrid
     "run_scope_diff": False,    # True = compute score scope and defined-vs-score annual diff
 }
 ```
@@ -558,11 +564,13 @@ DATE path (when your scope table has a date column):
 }
 ```
 
-NATIVE path (set `date_col: None` and both `year_col`/`week_col`) — only use this when the scope table has **no date column at all**. It takes `Year` verbatim from your source, bypassing `fiscal_cal` entirely, so it must already be a genuine calendar year — see the ⚠️ warning under [Manual scope adjustments](#manual-scope-adjustments) for why an ISO week-year column here would silently drop late-December weeks from scope.
+NATIVE path (set `date_col: None` and both `year_col`/`week_col`) — only use this when the scope table has **no date column at all**. It takes `Year` verbatim from your source, bypassing `fiscal_cal` entirely, so it must already be a genuine calendar year — see the ⚠️ warning under [Manual scope adjustments](#manual-scope-adjustments) for why an ISO week-year column here would silently mislabel late-December weeks.
+
+`date_col`/`year_col`/`week_col` are read **only under hybrid scope** (to resolve which window weeks the scope table covers). With `use_hybrid_scope=False` they are ignored — the scope is a week-agnostic `(product, store)` universe and only `product_col`/`store_col` matter.
 
 ### `score_scope`
 
-Used when `use_hybrid_scope=True` or `run_scope_diff=True`.
+Used when `use_hybrid_scope=True` or `run_scope_diff=True`. Applies to the **missing** (uncovered) weeks under hybrid scope.
 
 ```python
 "score_scope": {
@@ -688,7 +696,7 @@ If you see slow runs, check: (1) scope table path is correct so defined scope is
 
 ## Known limitations
 
-- **Defined scope without store**: Falls back to product-week grain. Sales/inventory KPIs cover all stores selling the in-scope product-weeks; instock/lost-sales pairs are inferred from lost-sales weekly data.
+- **Defined scope without store**: Falls back to product-week grain — the scope universe is `distinct(product_id)` and applies to every store selling the in-scope products across the window; instock/lost-sales pairs are inferred from lost-sales weekly data.
 - **Incremental skip vs notebook output**: Saved Delta can retain old values for overlapping period keys while the notebook shows fresh `kpi_long` — set `allow_overwrite_existing=True` to replace.
 - **WoW with sparse weeks**: Week-over-week compares the last two weeks **present in `kpi_long`**, not necessarily consecutive fiscal weeks when weekly coverage is sparse (e.g. after a narrow `run_min_date` or partial backfill).
 

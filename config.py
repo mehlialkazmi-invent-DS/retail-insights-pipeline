@@ -39,13 +39,26 @@ CONFIG: Dict[str, Any] = {
         # Score backfill keeps a week when weekly_sales >= p(min_percentile) AND
         # weekly_inventory >= p(min_percentile), per (product_id, store_id).
         # weekly_inventory = last available daily snapshot in the fiscal week (not Saturday-only).
+        # Only consulted for the MISSING weeks under hybrid scope (see "scope" below).
         "min_percentile": 0.2,
         "min_weeks_for_filter": 2,  # skip filter when pair has this many weeks or fewer
     },
     "scope": {
-        # True  = defined scope + score backfill for weeks missing from defined scope
-        # False = defined scope only
-        "use_hybrid_scope": True,
+        # The scope table is read as a WEEK-AGNOSTIC (product, store) universe: its own
+        # week/date column does NOT gate membership. A pair scoped in ANY period is scoped
+        # for EVERY week in the report window (mirrors v4's flatten-to-ids, but keeps the
+        # store grain). This is what makes a pair that dropped out of the current-year scope
+        # weeks — yet still transacts in the window — still count.
+        #
+        # False (default) = every scope pair across every week in the window. The scope
+        #                   table's weeks are ignored entirely.
+        # True (hybrid)   = weeks the scope table COVERS get all scope pairs; weeks it does
+        #                   NOT cover (missing weeks) are backfilled from score scope (the
+        #                   activity percentile above). NOTE: hybrid is therefore STRICTER on
+        #                   the missing weeks than the default (which applies all pairs to
+        #                   every week). Requires date_col OR year_col/week_col on
+        #                   defined_scope so the covered weeks can be resolved.
+        "use_hybrid_scope": False,
         # True  = compute score scope and annual defined-vs-score KPI diff (scope_diff)
         # False = skip score scope unless required for hybrid backfill (default)
         "run_scope_diff": False,
@@ -222,12 +235,17 @@ CONFIG: Dict[str, Any] = {
         "defined_scope": ["analysis", "instock_rate", "instock_rate_scope"],
     },
     "defined_scope": {
-        # DATE path: date_col -> fiscal_cal -> Year/Week. NATIVE path: set date_col=None, year_col/week_col.
-        # NATIVE path only: year_col is taken VERBATIM, never reconciled with fiscal_cal/daily's
-        # Year. If it's an ISO week-year column (late-Dec rows carry the next year), the scope
-        # join to daily/lost-sales on (product[, store], Year, Week) silently mismatches and
-        # drops those weeks. Only use year_col/week_col when there's no date column to join on,
-        # and confirm year_col is a true calendar year first. Prefer date_col otherwise.
+        # product_col / store_col define the (product, store) universe read from the scope
+        # table. store_col=None -> product-week scope (no store grain).
+        #
+        # date_col / year_col / week_col are the scope table's OWN week, used ONLY under
+        # hybrid scope to resolve which window weeks the table covers (see "scope" above).
+        # With hybrid disabled they are not read at all — the scope is week-agnostic.
+        #   DATE path:   date_col -> fiscal_cal -> Year/Week (preferred).
+        #   NATIVE path: date_col=None, set year_col/week_col. year_col is taken VERBATIM;
+        #                if it's an ISO week-year (late-Dec rows carry the next year) the
+        #                covered-week resolution mislabels those weeks, so confirm it's a true
+        #                calendar year first. Prefer date_col.
         "product_col": "product_id",
         "store_col": "store_id",  # omit or set None for product-week scope (no store grain)
         "date_col": "week_start_date",
