@@ -28,7 +28,7 @@ If you are a new DS picking this up for the first time:
    - `service_metrics.excluded_store_ids` → list of e-com store IDs
    - `path_segments.defined_scope` → path to your instock scope table
    - `defined_scope.*_col` → column names in that table
-3. **Run `main.ipynb`** top to bottom. Cell 1 prints resolved settings. Cell 2 previews raw inputs. Cell 3 runs the pipeline.
+3. **Run `main.ipynb`** top to bottom. Cell 1 prints resolved settings. Cell 2 previews raw inputs. The **Scope debug** cell reports distinct product/store counts per slice. Cell 3 runs the pipeline.
 4. **Check the HTML report** written next to the notebook (Cell 6). It has a Metric Details tab explaining every metric.
 5. **If something looks wrong**, check the Troubleshooting section (§8) or ask me what each config key does.
 
@@ -40,6 +40,7 @@ If you are a new DS picking this up for the first time:
 config.py          → materialize(fund.paste) → settings dict
 main.ipynb         Cell 1: config summary
                    Cell 2: input previews (defined_scope, lost_sales, daily_data)
+                   (before Cell 3): scope debug — distinct product/store counts per slice
                    Cell 3: runner.run() — full pipeline (+ scope adjustment logs)
                    (after Cell 3): scope summary display
                    Cell 4: save plan preview (when save_outputs=True)
@@ -58,6 +59,7 @@ kpi_pipeline/
                    dimension_sources left-join; Month column extraction
   inputs.py        cached Delta reads (daily_data_raw, lost_sales_weekly_base) + input_filters
   scope.py         defined scope, score scope (hybrid), manual adjustments
+  scope_debug.py   scope_universe_counts: pre-flight distinct product/store counts per slice
   pipeline.py      build_pipeline_frames: scoped_daily, inst_data, lost_base per scope
   metrics.py       compute_kpis: sales, WOS, mean_stock, instock, weighted_instock_rate
   kpi_long.py      build_kpi_long: loops annual/quarter/monthly/weekly × slices → pandas
@@ -89,6 +91,10 @@ When a user wants to configure the toolkit, ask them (or read from their message
 - Full YTD: `run_min_date: null`
 - Last week only: `run_min_date` = this week's Sunday
 - Multi-year backfill: `run_min_date` = Jan 1 of earliest year
+
+**Fiscal calendar vs native time grain** (`fiscal_calendar.use_fiscal_calendar`):
+- `True` (default): Year/Week/Quarter/Month come from `one_time_uploads/fiscal_cal`.
+- `False`: derived from `noob/daily-data` (`fiscal_calendar.daily_time_columns`). **Year is the calendar year of `date`** (`F.year(date)`); **Week is the native fiscal week column**. The source `daily_time_columns.year` column is **not** used for Year — it can carry the ISO week-year, mislabeling late-December weeks as the next year (e.g. Dec 2025 shown as `2026`), which previously mismatched the Quarter/Month derived from `date` (Dec 2025 → "Q4 2026"). Caveat: a fiscal week straddling Jan 1 now appears as two partial weeks (one per calendar year) in the Weekly view; quarter/month/annual rollups stay correct.
 
 ### 3.2 Scope mode
 
@@ -124,6 +130,20 @@ Inventory for the score filter is the **last available daily snapshot in the fis
 }
 ```
 
+**⚠️ NATIVE path (`year_col`/`week_col`) risk.** Unlike `date_col`, the native path takes `Year` verbatim from the source table — never reconciled with `fiscal_cal`. Scope is joined to daily/lost-sales by an exact match on `(product[, store], Year, Week)`, and when `use_fiscal_calendar=False` daily's `Year` is the calendar year of `date` (see §3.1). If `year_col` follows ISO week-year numbering instead (late-December rows carrying the next year), the join silently mismatches and those weeks vanish from scope with no error. Only use the NATIVE path when the source has no date column at all, and verify `year_col` is a true calendar year first. Same risk applies to `year_col`/`week_col` in `scope_adjustments` entries.
+
+### 3.3a Scope debug (pre-flight product/store counts)
+
+Before Cell 3's full run, the **Scope debug** cell in `main.ipynb` sanity-checks scope size and per-slice coverage — read-only, distinct from `runner.run()`:
+
+```python
+runner.build_dimensions()
+runner.build_scopes(fund_paste=fund.paste)
+display(runner.scope_debug_summary())
+```
+
+`scope_debug_summary()` → `kpi_pipeline.scope_debug.scope_universe_counts(ctx)` returns distinct `product_id`, `store_id`, and pair counts for the **final scope** (after hybrid backfill + adjustments): one `overall` row plus one row per active slice dimension value (`slices`, `derived_dimensions`, enabled `dimension_sources`). It applies the same `value_filters` as the KPI step, so counts match `kpi_long` per slice. Product-week scope (no `store_col`) shows only `distinct_product_count`. NULL slice values show as `"NULL"` here vs blank/None in `kpi_long`. `build_dimensions`/`build_scopes` are idempotent; Cell 3 rebuilds the same scope. Skipped in `html_only` mode (no scope is built).
+
 ### 3.4 Slice dimensions
 
 There are two ways to add breakdown dimensions to the report. Pick based on **where the column lives**:
@@ -139,10 +159,16 @@ Use this when the column already exists on (or is derivable from) the products t
     "derived_dimensions": {           # Spark SQL expressions against the products schema
         "price_tier": "CASE WHEN price_without_tax < 50 THEN 'budget' ELSE 'premium' END"
     },
+    "value_filters": {},              # restrict which values of a dimension appear in its own breakdown
 }
 ```
 
 - Derived expressions are validated at runtime; failures are **skipped with a warning** (unlike dimension sources, which fail loudly).
+- `value_filters` (also available on `dimension_sources`, see 3.4b): applied only to that dimension's own slice breakdown — Overall and other slices are unaffected. Accepts a LIST (include-only: `[]` = non-null, `["A"]` = only A) or a DICT (`{"include": [...]}`, `{"exclude": [...]}` keeps the rest incl NULL, optional `keep_null`).
+  - dim omitted → keep all values, including `NULL` (default)
+  - `[]` → keep all non-null values (drops only the `NULL` bucket)
+  - `["A", "B"]` → keep only those values (drops `NULL` and unlisted values)
+  - Example: `{"brand": ["NIKE", "ADIDAS"]}` or `{"brand": []}` to drop a `NULL` brand bucket.
 
 #### 3.4b — `dimension_sources` (columns from other tables)
 
@@ -161,6 +187,7 @@ Use this **only** when a breakdown column does **not** live on the products tabl
             # Spark SQL over the SOURCE table's columns → new slice dimension(s)
             "is_nvrout": "CASE WHEN program LIKE '%NVROUT%' THEN 'yes' ELSE 'no' END",
         },
+        "value_filters": {"is_nvrout": ["yes"]},  # numbers only for the NVROUT universe
     },
     # Add more sources as needed — one dict per external table
     {
@@ -181,6 +208,7 @@ Use this **only** when a breakdown column does **not** live on the products tabl
 - **Enabled sources fail loudly** on bad path / missing column / bad expression (by design — a silently dropped segment would misreport).
 - **NULL behaviour**: products absent from the source get `NULL` (left join). For a clean yes/no split, ensure the source covers the full product universe, or use `ELSE 'no'` only works for rows that exist.
 - **Overlapping segments** (e.g. COMP includes NVROUT): use independent boolean dimensions (`is_nvrout`, `is_comp`) — one product can be `yes` for both.
+- **`value_filters`** (same semantics as `slices.value_filters`, see 3.4a): restricts that dimension's own breakdown only. LIST form (include-only): omit the dim for all values incl `NULL`, `[]` for all non-null, `["yes"]` for only that value. DICT form (NULL-aware): `{"include": ["yes"]}` keep only yes; `{"exclude": ["nfg"]}` keep everything except nfg **including NULL** (the way to drop an exclusion list and keep the remainder); optional `"keep_null": True/False`. `{"is_nvrout": ["yes"]}` gives numbers only for the NVROUT universe.
 - CSV sources honour the same `location` (`datastore` / `workspace`) and `csv_options` as scope adjustments.
 
 **Scope vs slices — two different machines:**
@@ -275,6 +303,20 @@ All-store sales totals include these stores; only service-specific metrics exclu
 # Rebuild all saved tables from a full-history run
 "output": {"save_outputs": True, "save_mode": "full_refresh", "allow_overwrite_existing": False}
 ```
+
+### 3.6.1 Selecting which comparisons to run
+
+`comparisons.enabled` chooses which period-over-period comparisons are computed, printed, saved, and rendered — any subset of `yoy`/`qoq`/`mom`/`wow` (default: all four).
+
+```python
+"comparisons": {
+    "enabled": ["yoy"],   # only YoY; qoq/mom/wow skipped entirely
+}
+```
+
+- Gates the `comparison_{kind}` (and `comparable_comparison_{kind}`) Delta tables + HTML comparison columns only. `kpi_long` is always built in full.
+- A latest-week run can still produce e.g. YoY: with `save_mode="incremental"` + `recompute_comparisons_from_history=True`, selected comparisons are rebuilt from the full merged `kpi_long` (this run unioned onto prior saved runs). Needs a prior saved partition.
+- Invalid/empty selection fails loudly in `materialize()`. Env override: `KPI_COMPARISONS="yoy,mom"`.
 
 ### 3.7 Comparable pairs (like-for-like)
 
@@ -392,6 +434,7 @@ Metric definitions can be customised per-client:
 | Add a derived slice (products SQL expression) | `slices.derived_dimensions` |
 | Add a slice from another table (e.g. NVROUT) | `dimension_sources` |
 | Add multiple external dimension sources | add another dict to `dimension_sources` list |
+| Restrict a slice's values / drop NULL bucket | `slices.value_filters` or `dimension_sources[].value_filters` |
 | Filter inputs | `input_filters.{defined_scope,lost_sales,daily_data}` |
 | Add a scope addition from Delta | `scope_adjustments.additions` (multiple entries supported) |
 | Add a scope removal from CSV/Delta | `scope_adjustments.removals` (multiple entries supported) |
@@ -523,6 +566,8 @@ render_kpi_html → standalone HTML file
 | Slice from another table (NVROUT, etc.) missing | Use `dimension_sources` — not `slices.dimensions` — when the column lives on another table |
 | Dimension source errors on read | An **enabled** dimension source fails loudly on bad path / missing column / bad expression — fix the source or set `enabled: False` |
 | Slice value count looks doubled | A `dimension_source` table has multiple rows per `join_key` — pre-aggregate to one row per product (toolkit keeps arbitrary row) |
+| `is_nvrout` (or another slice) shows a NULL bucket, or you want only one value (e.g. only NVROUT products) | Set `value_filters` for that dimension in `slices` or the `dimension_source`: `["yes"]` keeps only `yes`; `[]` drops the NULL bucket; `{"exclude": ["nfg"]}` drops a set but keeps the rest incl NULL — see §3.4a/§3.4b |
+| Scope debug counts don't match `kpi_long` per slice | The debug cell recomputes scope independently — re-run it after any config change (scope mode, adjustments, `value_filters`) so it matches Cell 3. NULL values show as `"NULL"` here vs blank/None in `kpi_long` — see §3.3a |
 | Score backfills all weeks | Defined scope path wrong or defined scope table empty for the window |
 | WOS unexpectedly high/low | Check `excluded_store_ids` — missing e-com IDs inflate network inventory |
 | `kpi_long is empty — run pipeline first` | Called `build_html_report` before `runner.run()`, or saved outputs missing in `html_only` mode |
@@ -555,6 +600,8 @@ render_kpi_html → standalone HTML file
 | `comparable_comparison_yoy/qoq/mom/wow` | like-for-like comparison DataFrames |
 | `comparable_yoy_display/…` | like-for-like display DataFrames |
 | `save_plan` | SavePlan from last save_outputs call |
+
+For a quick distinct product/store count of the final scope (overall + per slice) without running the KPI step, use `runner.scope_debug_summary()` — see §3.3a.
 
 ---
 

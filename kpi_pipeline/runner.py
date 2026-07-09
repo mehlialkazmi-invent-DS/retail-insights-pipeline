@@ -18,6 +18,7 @@ from kpi_pipeline.io import build_save_plan, load_saved_outputs, save_outputs
 from kpi_pipeline.kpi_long import build_kpi_long, trim_periods_to_recent
 from kpi_pipeline.pipeline import build_pipeline_frames
 from kpi_pipeline.scope import apply_scope_adjustments, build_defined_scope, build_hybrid_scope, scope_summary_by_origin
+from kpi_pipeline.scope_debug import scope_universe_counts
 
 
 def _write_text_to_datastore(spark: SparkSession, path: str, content: str) -> None:
@@ -251,6 +252,16 @@ class KPIRunner:
                 print(f"Warning: could not save HTML to datastore path ({exc}).")
 
         return written
+
+    def scope_debug_summary(self):
+        """Distinct product/store/pair counts for the final scope — overall and per slice.
+
+        Read-only pre-flight debug helper, distinct from :meth:`run`. Call it after
+        :meth:`build_dimensions` and :meth:`build_scopes` (both idempotent) and before
+        the expensive :meth:`build_kpis`, to sanity-check scope size and per-slice
+        coverage. Returns a pandas DataFrame for ``display()``.
+        """
+        return scope_universe_counts(self.ctx)
 
     def hybrid_scope_summary(self):
         return scope_summary_by_origin(self.ctx.hybrid_scope_keys)

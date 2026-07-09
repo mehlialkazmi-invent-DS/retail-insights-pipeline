@@ -28,7 +28,7 @@ If you are a new DS picking this up for the first time:
    - `service_metrics.excluded_store_ids` → list of e-com store IDs
    - `path_segments.defined_scope` → path to your instock scope table
    - `defined_scope.*_col` → column names in that table
-3. **Run `main.ipynb`** top to bottom. Cell 1 prints resolved settings. Cell 2 previews raw inputs. Cell 3 runs the pipeline.
+3. **Run `main.ipynb`** top to bottom. Cell 1 prints resolved settings. Cell 2 previews raw inputs. The **Scope debug** cell reports distinct product/store counts per slice. Cell 3 runs the pipeline.
 4. **Check the HTML report** written next to the notebook (Cell 6). It has a Metric Details tab explaining every metric.
 5. **If something looks wrong**, check the Troubleshooting section (§8) or ask me what each config key does.
 
@@ -40,6 +40,7 @@ If you are a new DS picking this up for the first time:
 config.py          → materialize(fund.paste) → settings dict
 main.ipynb         Cell 1: config summary
                    Cell 2: input previews (defined_scope, lost_sales, daily_data)
+                   (before Cell 3): scope debug — distinct product/store counts per slice
                    Cell 3: runner.run() — full pipeline (+ scope adjustment logs)
                    (after Cell 3): scope summary display
                    Cell 4: save plan preview (when save_outputs=True)
@@ -58,6 +59,7 @@ kpi_pipeline/
                    dimension_sources left-join; Month column extraction
   inputs.py        cached Delta reads (daily_data_raw, lost_sales_weekly_base) + input_filters
   scope.py         defined scope, score scope (hybrid), manual adjustments
+  scope_debug.py   scope_universe_counts: pre-flight distinct product/store counts per slice
   pipeline.py      build_pipeline_frames: scoped_daily, inst_data, lost_base per scope
   metrics.py       compute_kpis: sales, WOS, mean_stock, instock, weighted_instock_rate
   kpi_long.py      build_kpi_long: loops annual/quarter/monthly/weekly × slices → pandas
@@ -129,6 +131,18 @@ Inventory for the score filter is the **last available daily snapshot in the fis
 ```
 
 **⚠️ NATIVE path (`year_col`/`week_col`) risk.** Unlike `date_col`, the native path takes `Year` verbatim from the source table — never reconciled with `fiscal_cal`. Scope is joined to daily/lost-sales by an exact match on `(product[, store], Year, Week)`, and when `use_fiscal_calendar=False` daily's `Year` is the calendar year of `date` (see §3.1). If `year_col` follows ISO week-year numbering instead (late-December rows carrying the next year), the join silently mismatches and those weeks vanish from scope with no error. Only use the NATIVE path when the source has no date column at all, and verify `year_col` is a true calendar year first. Same risk applies to `year_col`/`week_col` in `scope_adjustments` entries.
+
+### 3.3a Scope debug (pre-flight product/store counts)
+
+Before Cell 3's full run, the **Scope debug** cell in `main.ipynb` sanity-checks scope size and per-slice coverage — read-only, distinct from `runner.run()`:
+
+```python
+runner.build_dimensions()
+runner.build_scopes(fund_paste=fund.paste)
+display(runner.scope_debug_summary())
+```
+
+`scope_debug_summary()` → `kpi_pipeline.scope_debug.scope_universe_counts(ctx)` returns distinct `product_id`, `store_id`, and pair counts for the **final scope** (after hybrid backfill + adjustments): one `overall` row plus one row per active slice dimension value (`slices`, `derived_dimensions`, enabled `dimension_sources`). It applies the same `value_filters` as the KPI step, so counts match `kpi_long` per slice. Product-week scope (no `store_col`) shows only `distinct_product_count`. NULL slice values show as `"NULL"` here vs blank/None in `kpi_long`. `build_dimensions`/`build_scopes` are idempotent; Cell 3 rebuilds the same scope. Skipped in `html_only` mode (no scope is built).
 
 ### 3.4 Slice dimensions
 
@@ -553,6 +567,7 @@ render_kpi_html → standalone HTML file
 | Dimension source errors on read | An **enabled** dimension source fails loudly on bad path / missing column / bad expression — fix the source or set `enabled: False` |
 | Slice value count looks doubled | A `dimension_source` table has multiple rows per `join_key` — pre-aggregate to one row per product (toolkit keeps arbitrary row) |
 | `is_nvrout` (or another slice) shows a NULL bucket, or you want only one value (e.g. only NVROUT products) | Set `value_filters` for that dimension in `slices` or the `dimension_source`: `["yes"]` keeps only `yes`; `[]` drops the NULL bucket; `{"exclude": ["nfg"]}` drops a set but keeps the rest incl NULL — see §3.4a/§3.4b |
+| Scope debug counts don't match `kpi_long` per slice | The debug cell recomputes scope independently — re-run it after any config change (scope mode, adjustments, `value_filters`) so it matches Cell 3. NULL values show as `"NULL"` here vs blank/None in `kpi_long` — see §3.3a |
 | Score backfills all weeks | Defined scope path wrong or defined scope table empty for the window |
 | WOS unexpectedly high/low | Check `excluded_store_ids` — missing e-com IDs inflate network inventory |
 | `kpi_long is empty — run pipeline first` | Called `build_html_report` before `runner.run()`, or saved outputs missing in `html_only` mode |
@@ -585,6 +600,8 @@ render_kpi_html → standalone HTML file
 | `comparable_comparison_yoy/qoq/mom/wow` | like-for-like comparison DataFrames |
 | `comparable_yoy_display/…` | like-for-like display DataFrames |
 | `save_plan` | SavePlan from last save_outputs call |
+
+For a quick distinct product/store count of the final scope (overall + per slice) without running the KPI step, use `runner.scope_debug_summary()` — see §3.3a.
 
 ---
 

@@ -38,6 +38,7 @@ generate-kpis-toolkit/
 └── kpi_pipeline/       # Pipeline logic (imported by main.ipynb)
     ├── runner.py       # KPIRunner orchestrates the full run + HTML report generation
     ├── scope.py        # Defined scope, hybrid/score scope, manual adjustments
+    ├── scope_debug.py  # Pre-flight distinct product/store counts overall + per slice
     ├── fiscal.py       # Fiscal calendar + product attributes / slice dims
     ├── inputs.py       # Cached Delta reads (daily_data, lost_sales) + input_filters
     ├── pipeline.py     # Scoped daily, lost sales, instock input frames per scope
@@ -65,7 +66,7 @@ generate-kpis-toolkit/
   - `slices.dimensions` — product-master columns to slice by (e.g. `brand`)
   - `dimension_sources` — optional, gated: pull extra slice dimensions from tables other than products (e.g. NVROUT from `extended_product`) — see [Dimension sources](#dimension-sources-extra-slices-from-other-tables)
   - `output.save_mode` — `initial`, `incremental`, or `full_refresh`
-3. **Open** `main.ipynb` and **Run All** — Cell 2 previews inputs before the pipeline run in Cell 3.
+3. **Open** `main.ipynb` and **Run All** — Cell 2 previews inputs, then the **Scope debug** cell reports distinct product/store counts per slice, before the full pipeline run in Cell 3.
 4. **Review** the save plan cell before the write cell runs. Set `allow_overwrite_existing=True` if you intentionally want to replace overlapping periods.
 
 ### Prerequisites
@@ -166,6 +167,20 @@ Example (Delta + CSV):
     }],
 }
 ```
+
+### Scope debug (product/store counts before the full run)
+
+Before the heavy KPI computation, sanity-check scope with a lightweight, read-only pre-flight count. The **Scope debug** cell in `main.ipynb` (between the input previews and the pipeline run) calls:
+
+```python
+runner.build_dimensions()
+runner.build_scopes(fund_paste=fund.paste)
+display(runner.scope_debug_summary())
+```
+
+`scope_debug_summary()` returns a pandas DataFrame with distinct `product_id`, `store_id`, and pair counts for the **final scope** (after hybrid backfill and manual adjustments) — one `overall` row plus one row per **active slice dimension** value (`slices`, `derived_dimensions`, and any enabled `dimension_sources`). It applies the same `value_filters` the KPI step uses, so the counts match what `kpi_long` reports per slice. For a product-week scope (no `store_col`), only `distinct_product_count` is shown.
+
+`build_dimensions()` and `build_scopes()` are idempotent; Cell 3's `runner.run()` rebuilds the same scope as part of the full pipeline. NULL slice values appear here as the string `"NULL"`; in `kpi_long` those rows carry an empty/None `dimension_value`.
 
 ## Dimension sources (extra slices from other tables)
 
@@ -623,8 +638,13 @@ Default metrics (configurable in `CONFIG["metrics"]`):
 from kpi_pipeline import KPIRunner
 from kpi_pipeline.io import save_outputs, load_saved_outputs
 
-# Full run
+# Pre-flight scope debug (distinct product/store counts overall + per slice)
 runner = KPIRunner(spark, settings)
+runner.build_dimensions()
+runner.build_scopes(fund_paste=fund.paste)
+print(runner.scope_debug_summary())
+
+# Full run
 ctx = runner.run(fund_paste=fund.paste, save=False)
 runner.preview_save_plan(fund.paste)
 save_outputs(ctx, fund.paste)
@@ -667,6 +687,7 @@ If you see slow runs, check: (1) scope table path is correct so defined scope is
 | Dimension source errors on read | An **enabled** dimension source fails loudly on bad path / missing column / bad expression (by design) — fix the source or set `enabled: False` |
 | Slice value count looks doubled | A `dimension_source` table has multiple rows per `join_key` — pre-aggregate to one row per product (toolkit keeps an arbitrary row, see [Dimension sources](#dimension-sources-extra-slices-from-other-tables)) |
 | `is_nvrout` (or another slice) shows a NULL bucket, or you want only one value (e.g. only NVROUT products) | set `value_filters` for that dimension in `slices` or the `dimension_source`: `["yes"]` keeps only `yes`; `[]` drops the NULL bucket; see [Value filters](#value-filters-restrict-slice-values--drop-the-null-bucket) |
+| Scope debug counts don't match `kpi_long` per slice | The debug cell recomputes scope independently — re-run it after any `config.py` change (scope mode, adjustments, `value_filters`) so it reflects the same scope Cell 3 builds. NULL slice values show as `"NULL"` here but as blank/None in `kpi_long` |
 
 
 ## HTML report
