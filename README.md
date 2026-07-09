@@ -217,7 +217,25 @@ This produces an `is_nvrout` slice (`yes` / `no`) alongside `brand` — the `yes
 
 - **One row per `join_key`.** The source is reduced with `dropDuplicates([join_key])` **before** the join so it can never fan out (duplicate) the product rows. If the raw table has several rows per product (e.g. `extended_product` with multiple `program` values), the surviving row is **arbitrary** — pre-aggregate the source to one row per product (or to a clean membership flag) before pointing the toolkit at it, exactly as the v4 script did with `.select(product_id).distinct()`. The toolkit does **not** clean the source (same data-quality contract as scope adjustments).
 - **Mutually exclusive within one column.** A single dimension column gives each product one value. To represent **overlapping** segments (e.g. v4's "COMP includes NVROUT"), model them as **independent boolean dimensions** — `is_nvrout`, `is_comp` — each its own slice; a product can be `yes` under both. A single `segment` column cannot express the overlap.
-- **Products missing from the source get NULL.** The join is a **left** join (it must keep every product). A product with no row in the source table gets `NULL` for the new dimension — *not* a default like `"no"`. A `CASE WHEN program LIKE '%NVROUT%' ... ELSE 'no'` expression only yields `"no"` for products that **have** a row in the source; products absent from `extended_product` are `NULL` (their own panel). Make the source cover the full product universe, or accept the `NULL` bucket, if you want a clean `yes`/`no` split.
+- **Products missing from the source get NULL.** The join is a **left** join (it must keep every product). A product with no row in the source table gets `NULL` for the new dimension — *not* a default like `"no"`. A `CASE WHEN program LIKE '%NVROUT%' ... ELSE 'no'` expression only yields `"no"` for products that **have** a row in the source; products absent from `extended_product` are `NULL` (their own panel). Make the source cover the full product universe, use `fillna` (below), or accept the `NULL` bucket, if you want a clean `yes`/`no` split.
+- **`fillna` — impute the NULL side of a partial source.** `dimension_sources[].fillna` is `{dim_name: default_value}`, applied **after** the join, coalescing NULLs (products absent from the source) to a literal. This is the direct fix for a source that intentionally lists only one side of a split (e.g. a CSV of just the NON-COMP product_ids) — instead of leaving the complement `NULL`, it reads as the value you choose:
+
+  ```python
+  "dimension_sources": [
+      {
+          "enabled": True,
+          "label": "ngf_comp_split",
+          "source": "csv",
+          "path": "/Workspace/Users/you@invent.ai/lists/ngf_product_ids.csv",
+          "location": "workspace",
+          "join_key": "product_id",
+          "derived": {"is_comp": "'no'"},      # only fires for rows present in the CSV (NGF items)
+          "fillna": {"is_comp": "yes"},        # everyone else -> 'yes' instead of NULL
+      },
+  ],
+  ```
+
+  `fillna` keys must be among that source's own `columns`/`derived` dimensions — the toolkit fails loudly otherwise. Nothing is removed from scope; this only affects the `is_comp` slice breakdown, same as any other `dimension_sources` entry.
 - **Enabled sources fail loudly.** Unlike `derived_dimensions` (best-effort, skipped on error), an **enabled** dimension source raises on a bad path, missing column, or unresolved expression — a silently dropped segment would misreport the very breakdown you added it to produce. Disable the source if you want it ignored.
 - **CSV location.** Delta or CSV; CSV honours the same `location` (`datastore` / `workspace`) and `csv_options` as [scope adjustments](#manual-scope-adjustments).
 
@@ -257,7 +275,7 @@ This produces an `is_nvrout` slice (`yes` / `no`) alongside `brand` — the `yes
 
 `is_nvrout: ["yes"]` above means the `is_nvrout` breakdown in `kpi_long` reports **numbers only for the NVROUT universe** (the `no` and `NULL` panels are dropped); `brand`, Overall, and every other slice are untouched.
 
-**Excluding a set but keeping the rest (e.g. a "not going forward" / NFG list).** When your source only lists the products to *drop* — so non-listed products come through as `NULL` — the list form cannot select the complement. Use `exclude`, which keeps the `NULL` remainder:
+**Excluding a set but keeping the rest (e.g. a "not going forward" / NFG list).** When your source only lists the products to *drop* — so non-listed products come through as `NULL` — the list form cannot select the complement. Two options: give the complement a real label with `fillna` (see above — the breakdown then has clean named panels instead of a `NULL` one), or keep the `NULL` remainder and use `exclude`:
 
 ```python
 "dimension_sources": [
@@ -687,6 +705,7 @@ If you see slow runs, check: (1) scope table path is correct so defined scope is
 | Dimension source errors on read | An **enabled** dimension source fails loudly on bad path / missing column / bad expression (by design) — fix the source or set `enabled: False` |
 | Slice value count looks doubled | A `dimension_source` table has multiple rows per `join_key` — pre-aggregate to one row per product (toolkit keeps an arbitrary row, see [Dimension sources](#dimension-sources-extra-slices-from-other-tables)) |
 | `is_nvrout` (or another slice) shows a NULL bucket, or you want only one value (e.g. only NVROUT products) | set `value_filters` for that dimension in `slices` or the `dimension_source`: `["yes"]` keeps only `yes`; `[]` drops the NULL bucket; see [Value filters](#value-filters-restrict-slice-values--drop-the-null-bucket) |
+| A `dimension_source` NULL bucket should really read as a real value (e.g. "everyone not on this list is comp") | add `fillna: {dim_name: default}` on that `dimension_sources` entry — coalesces the NULL left by the join to your literal; see [Dimension sources](#dimension-sources-extra-slices-from-other-tables) |
 | Scope debug counts don't match `kpi_long` per slice | The debug cell recomputes scope independently — re-run it after any `config.py` change (scope mode, adjustments, `value_filters`) so it reflects the same scope Cell 3 builds. NULL slice values show as `"NULL"` here but as blank/None in `kpi_long` |
 
 

@@ -146,8 +146,14 @@ CONFIG: Dict[str, Any] = {
     # rather than a single mutually-exclusive column — a product can be "yes" for both.
     #
     # NULL behaviour: products absent from the source get NULL for the new dimension
-    # (left join). If you need a clean yes/no split, make the source cover the full
-    # product universe or CASE WHEN … ELSE 'no' only applies to rows that exist.
+    # (left join) — a "derived" CASE...ELSE never fires for them, since they have no row
+    # in the source to evaluate it against. Two ways to fix this:
+    #   1. fillna (below): coalesce those NULLs to a literal default AFTER the join.
+    #      Use this when the source is intentionally partial (e.g. a list of only the
+    #      "special" items) and everything else should read as one fixed complement value.
+    #   2. Make the source cover the full product universe (a pre-agg table with the
+    #      flag already computed for every product) so "derived" itself yields a clean
+    #      yes/no split with no NULLs to begin with.
     "dimension_sources": [
         {
             "enabled": False,
@@ -168,6 +174,13 @@ CONFIG: Dict[str, Any] = {
                 # Add more dimensions from this source here, e.g.:
                 # "is_comp": "CASE WHEN program LIKE '%COMP%' THEN 'yes' ELSE 'no' END",
             },
+            # fillna: {dim_name: default_value} — coalesces NULLs left by the join to a
+            # literal, for products that have no row in this source at all. Keys must be
+            # among this source's own "columns"/"derived" dimensions. Example: a source
+            # listing only NON-COMP product_ids, with derived {"is_comp": "'no'"} — every
+            # other product would otherwise be NULL; fillna makes them read as 'yes':
+            #   "fillna": {"is_comp": "yes"},
+            #
             # value_filters: restrict which values of a dimension appear in the report
             # breakdown (applied to that dimension's OWN slice only — never to Overall or
             # any other slice). Two shapes are accepted:

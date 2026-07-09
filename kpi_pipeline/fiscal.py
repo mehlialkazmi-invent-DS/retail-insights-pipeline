@@ -142,6 +142,13 @@ def _join_dimension_sources(
     dimension source fails loudly on a bad path, missing column, or unresolved
     expression — a silently dropped segment would misreport the breakdown it was added
     to produce.
+
+    ``fillna`` (optional, per source): ``{dim_name: default_value}``. Because the join is
+    a LEFT join, a product with no row in the source table gets ``NULL`` for that source's
+    dimensions — a ``CASE ... ELSE`` in ``derived`` never fires for it, since it has no row
+    to evaluate the expression against. ``fillna`` runs *after* the join and coalesces those
+    NULLs to the given literal, e.g. ``{"is_comp": "yes"}`` treats every product absent from
+    a partial (non-full-universe) source as the complement value.
     """
     source_dims: List[str] = []
     for src in dimension_sources:
@@ -189,8 +196,25 @@ def _join_dimension_sources(
             sel.append(F.expr(derived[name]).alias(name) if name in derived else F.col(name))
         src_proj = raw.select(*sel).dropDuplicates([join_key])
         products_proj = products_proj.join(broadcast(src_proj), on=join_key, how="left")
+
+        fillna_cfg = dict(src.get("fillna", {}) or {})
+        unknown_fillna = set(fillna_cfg) - set(wanted)
+        if unknown_fillna:
+            raise ValueError(
+                f"dimension_source {label!r} fillna has key(s) {sorted(unknown_fillna)} not "
+                f"among its own dimensions {wanted}."
+            )
+        for name, default in fillna_cfg.items():
+            products_proj = products_proj.withColumn(name, F.coalesce(F.col(name), F.lit(default)))
+
         source_dims.extend(wanted)
-        print(f"  dimension_source {label!r}: joined on '{join_key}' -> dims {wanted}")
+        if fillna_cfg:
+            print(
+                f"  dimension_source {label!r}: joined on '{join_key}' -> dims {wanted} "
+                f"(fillna: {fillna_cfg})"
+            )
+        else:
+            print(f"  dimension_source {label!r}: joined on '{join_key}' -> dims {wanted}")
 
     return products_proj, source_dims
 
