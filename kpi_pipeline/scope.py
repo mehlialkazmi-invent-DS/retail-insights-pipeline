@@ -22,88 +22,81 @@ def _window_weeks(ctx: KPIContext) -> DataFrame:
     )
 
 
-def _resolve_defined_weeks(ctx: KPIContext, raw: DataFrame) -> DataFrame:
-    """Distinct (Year, Week) present in the scope table that fall in the report window.
+def _defined_scope_pairs(ctx: KPIContext, raw: DataFrame) -> DataFrame:
+    """Distinct scope universe at the configured grain, without any time column."""
+    config = ctx.settings["DEFINED_SCOPE"]
+    sel = [F.col(config["product_col"]).alias("product_id")]
+    if "store_id" in ctx.scope_keys:
+        sel.append(F.col(config["store_col"]).alias("store_id"))
+    return raw.select(*sel).distinct()
 
-    Used only by the hybrid backfill: it identifies which window weeks the scope table
-    actually covers, so the remaining ("missing") weeks can be filled from score scope.
-    Resolved from date_col via fiscal_cal, or from native year_col/week_col.
+
+def _defined_scope_weekly(ctx: KPIContext, raw: DataFrame) -> DataFrame:
+    """Honour the scope table's own (product, store, Year, Week) rows, window-filtered.
+
+    Used for the ``product_store_week`` grain. Weeks are resolved from ``date_col`` via
+    fiscal_cal, or from native ``year_col``/``week_col``.
     """
     config = ctx.settings["DEFINED_SCOPE"]
+    sel = [
+        F.col(config["product_col"]).alias("product_id"),
+        F.col(config["store_col"]).alias("store_id"),
+    ]
     date_col = config.get("date_col")
     if date_col is not None:
-        weeks = (
-            raw.select(F.to_date(F.col(date_col)).alias("scope_date"))
+        keyed = (
+            raw.select(*sel, F.to_date(F.col(date_col)).alias("scope_date"))
             .distinct()
             .join(
                 broadcast(ctx.fiscal_cal.select(F.col("date").alias("scope_date"), "Year", "Week")),
                 on="scope_date",
                 how="inner",
             )
-            .select("Year", "Week")
-            .distinct()
+            .drop("scope_date")
         )
     else:
         year_col, week_col = config.get("year_col"), config.get("week_col")
-        if not year_col or not week_col:
-            raise ValueError(
-                "hybrid scope needs the scope table's weeks: set date_col OR both "
-                f"year_col and week_col in defined_scope; got date_col=None, "
-                f"year_col={year_col!r}, week_col={week_col!r}."
-            )
-        weeks = raw.select(
+        keyed = raw.select(
+            *sel,
             F.col(year_col).cast("int").alias("Year"),
             F.col(week_col).cast("int").alias("Week"),
         ).distinct()
     window_yw = _window_weeks(ctx).select("Year", "Week").distinct()
-    return weeks.join(broadcast(window_yw), on=["Year", "Week"], how="inner")
+    return keyed.join(broadcast(window_yw), on=["Year", "Week"], how="inner").select(*ctx.scope_keys).distinct()
 
 
 def build_defined_scope(ctx: KPIContext) -> None:
-    """Read the scope table as a week-agnostic (product[, store]) universe.
+    """Read the scope table into defined_scope_keys at the configured grain.
 
-    The scope table's own week/date column does NOT gate membership: a (product, store)
-    pair scoped in ANY period is scoped for EVERY week in the report window. This mirrors
-    the v4 behaviour (scope flattened to ids) but keeps the store grain, so a pair that
-    dropped out of the scope table's current-year weeks yet still transacts in the window
-    is still counted. The scope's weeks are read separately (defined_scope_weeks) and used
-    only by the hybrid backfill to find weeks the scope table does not cover.
+    ``defined_scope.grain`` controls how the scope table defines membership:
+      * ``"product"``            -> distinct product_id; store- and week-agnostic.
+      * ``"product_store"``      -> distinct (product_id, store_id); week-agnostic.
+      * ``"product_store_week"`` -> the scope table's own (product, store, week) rows, honoured.
+
+    For the week-agnostic grains (product, product_store) the pairs are applied to EVERY week
+    in the report window, so a pair scoped in any period counts for the whole window (mirrors
+    v4's flatten-to-ids). For product_store_week the scope table's own weeks are honoured.
+    Downstream always consumes (product[, store], Year, Week) keys.
     """
     config = ctx.settings["DEFINED_SCOPE"]
-    raw = read_defined_scope_source(ctx.spark, ctx.settings, quiet=True)
-
-    pair_sel = [F.col(config["product_col"]).alias("product_id")]
-    store_col = config.get("store_col")
-    if store_col is not None:
-        pair_sel.append(F.col(store_col).alias("store_id"))
-    scope_pairs = raw.select(*pair_sel).distinct()
-
-    has_store = "store_id" in scope_pairs.columns
+    grain = config["grain"]
+    has_store = grain in ("product_store", "product_store_week")
     ctx.scope_keys = (
         ["product_id", "store_id", "Year", "Week"] if has_store else ["product_id", "Year", "Week"]
     )
-    if not has_store:
-        print("NOTE: defined scope has no store grain -> product-week scoping downstream.")
 
-    ctx.scope_pairs_defined = scope_pairs.cache()
+    raw = read_defined_scope_source(ctx.spark, ctx.settings, quiet=True)
 
-    # Week-agnostic defined scope: every scope pair applied to every week in the window.
-    window_yw = _window_weeks(ctx).select("Year", "Week").distinct()
-    ctx.defined_scope_keys = (
-        scope_pairs.crossJoin(broadcast(window_yw)).select(*ctx.scope_keys).distinct().cache()
-    )
-
-    # Scope's own weeks — only needed for hybrid backfill (which weeks scope covers).
-    if ctx.settings["USE_HYBRID_SCOPE"]:
-        ctx.defined_scope_weeks = _resolve_defined_weeks(ctx, raw).cache()
-        print(
-            "scope pairs:", scope_pairs.count(),
-            "| scope weeks in window:", ctx.defined_scope_weeks.count(),
-        )
+    if grain == "product_store_week":
+        ctx.defined_scope_keys = _defined_scope_weekly(ctx, raw).cache()
     else:
-        ctx.defined_scope_weeks = None
-        print("scope pairs:", scope_pairs.count(), "(week-agnostic; scope weeks ignored)")
-    print("defined_scope_keys grain:", ctx.scope_keys, "| count:", ctx.defined_scope_keys.count())
+        pairs = _defined_scope_pairs(ctx, raw)
+        window_yw = _window_weeks(ctx).select("Year", "Week").distinct()
+        ctx.defined_scope_keys = (
+            pairs.crossJoin(broadcast(window_yw)).select(*ctx.scope_keys).distinct().cache()
+        )
+
+    print(f"defined scope grain: {grain} | keys: {ctx.scope_keys} | count: {ctx.defined_scope_keys.count()}")
 
 
 def read_daily_for_scope(ctx: KPIContext, start_date: datetime.date, end_date: datetime.date) -> DataFrame:
@@ -198,18 +191,16 @@ def build_score_scope_keys(ctx: KPIContext, daily_in: DataFrame) -> DataFrame:
 
 
 def build_hybrid_scope(ctx: KPIContext) -> None:
-    """Build the final scope keys from the week-agnostic defined scope.
+    """Finalise scope keys, optionally backfilling weeks the defined scope does not cover.
 
-    Not hybrid (default): the final scope is every defined (product, store) pair across
-    every week in the report window (``defined_scope_keys``) — the scope table's own weeks
-    are ignored, so a pair scoped in any period counts for the whole window.
+    Not hybrid (default): final scope = ``defined_scope_keys`` as built at the configured grain.
 
-    Hybrid: weeks the scope table covers (``defined_scope_weeks``) get ALL defined scope
-    pairs; weeks it does NOT cover (missing weeks) are backfilled from score scope (the
-    per-pair sales/inventory activity percentile). Defined weeks are trusted wholesale;
-    only un-covered weeks fall back to the data-driven activity filter — so, by design,
-    hybrid is STRICTER on the missing weeks than the not-hybrid default (which applies all
-    pairs to every week).
+    Hybrid: window weeks the defined scope does NOT cover (missing weeks) are backfilled from
+    score scope (per-(product, store) sales/inventory activity percentile, computed once over the
+    full window). For the week-agnostic grains (product, product_store) the defined scope already
+    covers every window week, so there are no missing weeks and the backfill is a no-op; it is
+    meaningful for the product_store_week grain, whose covered weeks are only those present in the
+    scope table.
     """
     s = ctx.settings
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
@@ -226,31 +217,23 @@ def build_hybrid_scope(ctx: KPIContext) -> None:
 
     if not use_hybrid:
         ctx.hybrid_scope_keys = ctx.defined_scope_keys.withColumn("scope_origin", F.lit("defined")).cache()
-        print("scope mode: defined only (week-agnostic; hybrid disabled)")
+        print("scope mode: defined only (hybrid disabled)")
         print("grain:", ctx.scope_keys, "| final_scope:", ctx.hybrid_scope_keys.count())
         return
 
     window_weeks = _window_weeks(ctx).select("Year", "Week").distinct()
-    defined_weeks = ctx.defined_scope_weeks.select("Year", "Week").distinct()
-    missing_weeks = window_weeks.join(broadcast(defined_weeks), on=["Year", "Week"], how="left_anti").cache()
+    covered_weeks = ctx.defined_scope_keys.select("Year", "Week").distinct()
+    missing_weeks = window_weeks.join(broadcast(covered_weeks), on=["Year", "Week"], how="left_anti").cache()
 
-    # Covered weeks: all defined scope pairs. Missing weeks: full-window score scope
-    # (thresholds over all weeks) restricted to those weeks.
-    defined_part = (
-        ctx.scope_pairs_defined.crossJoin(broadcast(defined_weeks))
-        .select(*ctx.scope_keys)
-        .distinct()
-        .withColumn("scope_origin", F.lit("defined"))
-    )
+    defined_part = ctx.defined_scope_keys.withColumn("scope_origin", F.lit("defined"))
     score_backfill = ctx.score_only_scope_keys.join(
         broadcast(missing_weeks), on=["Year", "Week"], how="left_semi"
     ).withColumn("scope_origin", F.lit("score"))
     ctx.hybrid_scope_keys = defined_part.unionByName(score_backfill).cache()
 
-    print("scope mode: hybrid (covered weeks: all scope pairs; missing weeks: score backfill)")
+    print("scope mode: hybrid (defined scope + score backfill on missing weeks)")
     print("grain:", ctx.scope_keys)
-    print("scope weeks:", defined_weeks.count(), "| missing_weeks:", missing_weeks.count())
-    print("final_scope:", ctx.hybrid_scope_keys.count())
+    print("missing_weeks:", missing_weeks.count(), "| final_scope:", ctx.hybrid_scope_keys.count())
 
 
 def _resolve_adjustment_path(

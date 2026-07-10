@@ -20,8 +20,6 @@ class KPIContext:
     product_dims: Optional[DataFrame] = None
     active_slice_dimensions: List[str] = field(default_factory=list)
 
-    scope_pairs_defined: Optional[DataFrame] = None
-    defined_scope_weeks: Optional[DataFrame] = None
     defined_scope_keys: Optional[DataFrame] = None
     scope_keys: List[str] = field(default_factory=list)
 

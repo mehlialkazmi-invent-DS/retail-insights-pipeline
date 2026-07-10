@@ -44,20 +44,15 @@ CONFIG: Dict[str, Any] = {
         "min_weeks_for_filter": 2,  # skip filter when pair has this many weeks or fewer
     },
     "scope": {
-        # The scope table is read as a WEEK-AGNOSTIC (product, store) universe: its own
-        # week/date column does NOT gate membership. A pair scoped in ANY period is scoped
-        # for EVERY week in the report window (mirrors v4's flatten-to-ids, but keeps the
-        # store grain). This is what makes a pair that dropped out of the current-year scope
-        # weeks — yet still transacts in the window — still count.
+        # The defined-scope grain (product / product_store / product_store_week) is set in
+        # "defined_scope" below. Hybrid only layers a backfill on top of the defined scope:
         #
-        # False (default) = every scope pair across every week in the window. The scope
-        #                   table's weeks are ignored entirely.
-        # True (hybrid)   = weeks the scope table COVERS get all scope pairs; weeks it does
-        #                   NOT cover (missing weeks) are backfilled from score scope (the
-        #                   activity percentile above). NOTE: hybrid is therefore STRICTER on
-        #                   the missing weeks than the default (which applies all pairs to
-        #                   every week). Requires date_col OR year_col/week_col on
-        #                   defined_scope so the covered weeks can be resolved.
+        # False (default) = final scope is the defined scope exactly as built at its grain.
+        # True (hybrid)   = also backfill (from score scope, the activity percentile above)
+        #                   the window weeks the defined scope leaves uncovered. This is a
+        #                   no-op for the week-agnostic grains (product, product_store), which
+        #                   already cover every window week; it is meaningful only for the
+        #                   product_store_week grain, whose covered weeks are those in the table.
         "use_hybrid_scope": False,
         # True  = compute score scope and annual defined-vs-score KPI diff (scope_diff)
         # False = skip score scope unless required for hybrid backfill (default)
@@ -235,19 +230,20 @@ CONFIG: Dict[str, Any] = {
         "defined_scope": ["analysis", "instock_rate", "instock_rate_scope"],
     },
     "defined_scope": {
-        # product_col / store_col define the (product, store) universe read from the scope
-        # table. store_col=None -> product-week scope (no store grain).
-        #
-        # date_col / year_col / week_col are the scope table's OWN week, used ONLY under
-        # hybrid scope to resolve which window weeks the table covers (see "scope" above).
-        # With hybrid disabled they are not read at all — the scope is week-agnostic.
-        #   DATE path:   date_col -> fiscal_cal -> Year/Week (preferred).
-        #   NATIVE path: date_col=None, set year_col/week_col. year_col is taken VERBATIM;
-        #                if it's an ISO week-year (late-Dec rows carry the next year) the
-        #                covered-week resolution mislabels those weeks, so confirm it's a true
-        #                calendar year first. Prefer date_col.
+        # grain — how the scope table defines membership:
+        #   "product"            -> distinct product_id (store- and week-agnostic: every store,
+        #                           every window week, for each in-scope product). Matches v4.
+        #   "product_store"      -> distinct (product_id, store_id); week-agnostic (default).
+        #   "product_store_week" -> the scope table's own (product, store, week) rows are honoured
+        #                           (strict); weeks come from date_col (or year_col/week_col).
+        # Week-agnostic grains span the whole report window; product_store_week is the only grain
+        # whose hybrid backfill fills weeks the scope table does not cover.
+        "grain": "product_store",
         "product_col": "product_id",
-        "store_col": "store_id",  # omit or set None for product-week scope (no store grain)
+        "store_col": "store_id",        # required for product_store / product_store_week grains
+        # date/year/week: read ONLY for product_store_week grain (to resolve the scope's weeks).
+        #   DATE path:   date_col -> fiscal_cal -> Year/Week (preferred).
+        #   NATIVE path: date_col=None, set year_col/week_col (year must be a true calendar year).
         "date_col": "week_start_date",
         "year_col": None,
         "week_col": None,
@@ -584,6 +580,20 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     )
 
     defined_scope = {**cfg["defined_scope"], "path": paths["PATH_DEFINED_SCOPE"]}
+
+    grain = defined_scope.get("grain", "product_store")
+    valid_grains = {"product", "product_store", "product_store_week"}
+    if grain not in valid_grains:
+        raise ValueError(f"defined_scope.grain must be one of {sorted(valid_grains)}; got {grain!r}")
+    if grain in ("product_store", "product_store_week") and not defined_scope.get("store_col"):
+        raise ValueError(f"defined_scope.grain={grain!r} requires defined_scope.store_col")
+    if grain == "product_store_week" and not (
+        defined_scope.get("date_col") or (defined_scope.get("year_col") and defined_scope.get("week_col"))
+    ):
+        raise ValueError(
+            "defined_scope.grain='product_store_week' requires date_col OR both year_col and week_col"
+        )
+    defined_scope["grain"] = grain
 
     # Resolve optional dimension-source paths up front (same pattern as PATH_* above) so
     # fiscal.py reads absolute paths without needing fund_paste. path_segments are joined
