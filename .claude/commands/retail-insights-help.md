@@ -1,8 +1,8 @@
 ---
-name: generate-kpis-toolkit
+name: retail-insights-help
 description: >-
   Operate, configure, extend, troubleshoot, and answer questions about the
-  generate-kpis-toolkit — a PySpark retail KPI pipeline for Databricks.
+  retail-insights-pipeline — a PySpark retail KPI pipeline for Databricks.
   Covers onboarding, config editing, scope modes, metric computation, HTML
   report, output saves, comparable pairs, dimension sources, performance
   patterns, and how to add/change anything.
@@ -11,9 +11,9 @@ description: >-
   a specific metric means.
 ---
 
-# Generate KPIs Toolkit — Operate, Configure, Extend
+# Retail Insights Pipeline — Operate, Configure, Extend
 
-Toolkit root: `generate-kpis-toolkit/`  
+Toolkit root: `retail-insights-pipeline/`  
 **Always edit `config.py` first. Never change pipeline internals to alter behaviour.**
 
 ---

@@ -2,7 +2,7 @@
   <img src="docs/images/readme-banner.png" alt="Retail KPI analytics — sales, inventory, in-stock rate, and weeks of supply" width="100%" />
 </p>
 
-# Generate KPIs Toolkit
+# Retail Insights Pipeline
 
 PySpark toolkit for weekly, monthly, quarterly, and annual retail KPIs with configurable scope (defined-only or hybrid with score backfill), optional manual scope adjustments, comparable (like-for-like) pair analysis, and incremental Delta output saves.
 
@@ -31,7 +31,7 @@ Default example: `.../analysis/kpi_reports/outputs/kpi_long/run_date=2026-06-15/
 ## Repository layout
 
 ```
-generate-kpis-toolkit/
+retail-insights-pipeline/
 ├── README.md           # This file
 ├── config.py           # All user-editable settings (edit CONFIG, then %run in notebook)
 ├── main.ipynb          # Databricks runner — compute, preview save plan, write, HTML report
