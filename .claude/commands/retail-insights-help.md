@@ -436,6 +436,7 @@ Metric definitions can be customised per-client:
 | Add multiple external dimension sources | add another dict to `dimension_sources` list |
 | Restrict a slice's values / drop NULL bucket | `slices.value_filters` or `dimension_sources[].value_filters` |
 | Filter inputs | `input_filters.{defined_scope,lost_sales,daily_data}` |
+| Blend fast/slow-mover lost-sales models by product velocity | `lost_sales_ensemble.enabled: True` (+ `slow_path_segments`, `speed_cluster_path_segments`, `speed_cluster_attribute_name`, `fast_mover_clusters`) |
 | Add a scope addition from Delta | `scope_adjustments.additions` (multiple entries supported) |
 | Add a scope removal from CSV/Delta | `scope_adjustments.removals` (multiple entries supported) |
 | Enable comparable (like-for-like) pairs | `comparable_pairs.enabled: True` |
@@ -534,6 +535,11 @@ daily_data_raw (cached Delta)
   └─ build_scoped_daily → scoped_daily (fiscal + products joined)
 
 lost_sales_source (cached as lost_sales_weekly_base)
+  └─ lost_sales_ensemble.enabled=False (default): single fast-mover model (PATH_LOST_SALES)
+  └─ lost_sales_ensemble.enabled=True: fast + slow models full-outer joined on
+     (product_id, store_id, week_start_date), left-joined to product_speed_cluster
+     (PATH_SPEED_CLUSTER) → one shared boolean picks lost_sales/in_stock_days/total_days
+     together per row from whichever model matches the product's cluster
   └─ scoped to hybrid_scope_keys → lost_sales_weekly → inst_data, lost_base
 
 build_pipeline_frames(scope) → {scoped_daily, inst_data, lost_base, ...}

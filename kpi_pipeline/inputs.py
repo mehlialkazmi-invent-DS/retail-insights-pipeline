@@ -93,6 +93,20 @@ def read_lost_sales_source(
     return apply_input_filters(raw, filters, "lost_sales", quiet=quiet)
 
 
+def read_speed_cluster_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
+    """One row per product_id with its numeric sales-speed cluster (long-format attrs table)."""
+    path = settings["PATH_SPEED_CLUSTER"]
+    attr = settings["SPEED_CLUSTER_ATTRIBUTE_NAME"]
+    if not quiet:
+        print(f"reading speed_cluster: {path} (attribute_name == {attr!r})")
+    raw = spark.read.format("delta").load(path)
+    return (
+        raw.filter(F.col("attribute_name") == attr)
+        .select("product_id", F.col("attribute_value").cast("int").alias("sales_speed_cluster"))
+        .dropDuplicates(["product_id"])
+    )
+
+
 def read_daily_data_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
     path = settings["PATH_DAILY_DATA"]
     filters = _input_filters(settings, "daily_data")

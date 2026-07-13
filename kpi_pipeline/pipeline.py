@@ -9,7 +9,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import broadcast
 
 from kpi_pipeline.context import KPIContext
-from kpi_pipeline.inputs import get_daily_data_raw, read_lost_sales_source
+from kpi_pipeline.inputs import get_daily_data_raw, read_lost_sales_source, read_speed_cluster_source
 
 
 def is_service_store(ctx: KPIContext) -> F.Column:
@@ -36,14 +36,8 @@ def _enrich_lost_sales_with_time_grain(ctx: KPIContext, lost_sales_pair: DataFra
     return enriched.drop("week_start_date").join(broadcast(ctx.fiscal_week.select(*fw_cols)), on=["Year", "Week"], how="inner")
 
 
-def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataFrame:
-    """Weekly lost-sales aggregates for the report window (cached per run)."""
-    if ctx.lost_sales_weekly_base is not None:
-        return ctx.lost_sales_weekly_base
-
-    path = path or ctx.settings["PATH_LOST_SALES"]
-    start, end = ctx.settings["EFFECTIVE_REPORT_START_DATE"], ctx.settings["REPORT_END_DATE"]
-    raw = read_lost_sales_source(ctx.spark, ctx.settings, path, quiet=True)
+def _aggregate_lost_sales_pairweek(ctx: KPIContext, raw: DataFrame, start, end) -> DataFrame:
+    """Aggregate ONE raw lost-sales model to (product_id, store_id, week_start_date) grain."""
     filtered = (
         raw.withColumn("week_start_date", F.to_date("week_start_date"))
         .filter(F.col("week_start_date").between(F.lit(start), F.lit(end)))
@@ -59,9 +53,92 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
         # (calendar year) rather than the source 'year' column, which can carry the ISO
         # week-year (late-December weeks labelled as the next year). See fiscal.py.
         agg_exprs.append(F.first(F.col("week").cast("int"), ignorenulls=True).alias("_ls_week"))
-    deduped = filtered.groupBy("product_id", "store_id", "week_start_date").agg(*agg_exprs)
-    if ls_native_week:
-        deduped = deduped.withColumn("_ls_year", F.year("week_start_date"))
+    return filtered.groupBy("product_id", "store_id", "week_start_date").agg(*agg_exprs)
+
+
+def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataFrame:
+    """Weekly lost-sales aggregates for the report window (cached per run).
+
+    OFF (default, lost_sales_ensemble.enabled=False): reads the single fast-mover
+    model at PATH_LOST_SALES exactly as before.
+
+    ON (lost_sales_ensemble.enabled=True): blends the fast (120-day) and slow
+    (365-day) models by product sales-speed cluster — products whose cluster is in
+    FAST_MOVER_CLUSTERS take the fast model; everyone else (other clusters AND
+    products with no/NULL cluster row) takes the slow model. A single boolean drives
+    all three aggregate fields (lost_sales, in_stock_days, total_days) for a given
+    pair-week, so they always come from the SAME chosen model.
+    """
+    if ctx.lost_sales_weekly_base is not None:
+        return ctx.lost_sales_weekly_base
+
+    s = ctx.settings
+    start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
+
+    if not s["LOST_SALES_ENSEMBLE_ENABLED"]:
+        path = path or s["PATH_LOST_SALES"]
+        raw = read_lost_sales_source(ctx.spark, s, path, quiet=True)
+        deduped = _aggregate_lost_sales_pairweek(ctx, raw, start, end)
+        if not s["USE_FISCAL_CALENDAR"] and "week" in raw.columns:
+            deduped = deduped.withColumn("_ls_year", F.year("week_start_date"))
+    else:
+        fast_raw = read_lost_sales_source(ctx.spark, s, s["PATH_LOST_SALES"], quiet=True)
+        slow_raw = read_lost_sales_source(ctx.spark, s, s["PATH_LOST_SALES_SLOW"], quiet=True)
+        native_week = not s["USE_FISCAL_CALENDAR"] and "week" in fast_raw.columns
+
+        fast_cols = [
+            "product_id", "store_id", "week_start_date",
+            F.col("lost_sales").alias("lost_sales_fast"),
+            F.col("in_stock_days").alias("in_stock_days_fast"),
+            F.col("total_days").alias("total_days_fast"),
+        ]
+        slow_cols = [
+            "product_id", "store_id", "week_start_date",
+            F.col("lost_sales").alias("lost_sales_slow"),
+            F.col("in_stock_days").alias("in_stock_days_slow"),
+            F.col("total_days").alias("total_days_slow"),
+        ]
+        if native_week:
+            fast_cols.append(F.col("_ls_week").alias("_ls_week_fast"))
+            slow_cols.append(F.col("_ls_week").alias("_ls_week_slow"))
+        fast = _aggregate_lost_sales_pairweek(ctx, fast_raw, start, end).select(*fast_cols)
+        slow = _aggregate_lost_sales_pairweek(ctx, slow_raw, start, end).select(*slow_cols)
+
+        cluster = read_speed_cluster_source(ctx.spark, s, quiet=True)
+        merged = (
+            fast.join(slow, on=["product_id", "store_id", "week_start_date"], how="fullouter")
+            .join(cluster, on="product_id", how="left")
+        )
+        # ONE shared boolean drives ALL field selections -> fields never mix across models.
+        use_fast = F.col("sales_speed_cluster").isin(*s["FAST_MOVER_CLUSTERS"])
+        merged = (
+            merged.withColumn("_use_fast", use_fast)
+            .withColumn(
+                "lost_sales",
+                F.when(F.col("_use_fast"), F.col("lost_sales_fast")).otherwise(F.col("lost_sales_slow")),
+            )
+            .withColumn(
+                "in_stock_days",
+                F.when(F.col("_use_fast"), F.col("in_stock_days_fast")).otherwise(F.col("in_stock_days_slow")),
+            )
+            .withColumn(
+                "total_days",
+                F.when(F.col("_use_fast"), F.col("total_days_fast")).otherwise(F.col("total_days_slow")),
+            )
+            # Keep the legacy invariant: a pair-week exists ONLY if the CHOSEN model has a
+            # row. If the selected side is absent (full-outer null), all three fields are
+            # null together -> drop the row (do NOT coalesce to 0).
+            .filter(F.col("total_days").isNotNull())
+        )
+        if native_week:
+            merged = merged.withColumn("_ls_week", F.coalesce(F.col("_ls_week_fast"), F.col("_ls_week_slow")))
+        select_cols = ["product_id", "store_id", "week_start_date", "lost_sales", "in_stock_days", "total_days"]
+        if native_week:
+            select_cols.append("_ls_week")
+        deduped = merged.select(*select_cols)
+        if native_week:
+            deduped = deduped.withColumn("_ls_year", F.year("week_start_date"))
+
     ctx.lost_sales_weekly_base = _enrich_lost_sales_with_time_grain(ctx, deduped).withColumn(
         "fiscal_week_days",
         F.datediff(F.col("week_end_date"), F.col("week_start_date")) + 1,

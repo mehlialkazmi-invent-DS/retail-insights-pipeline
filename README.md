@@ -367,6 +367,8 @@ Each entry is a Spark SQL expression passed to `.filter()`. You can also filter 
 
 Preview cells re-read the same tables the pipeline uses (with the same config filters). The pipeline caches daily data and lost-sales weekly aggregates within each run.
 
+**Ensemble note:** when `lost_sales_ensemble.enabled=True`, the `input_filters.lost_sales` list is applied to **both** the fast and slow lost-sales sources (same schema). Cell 2 also previews the slow source and the speed-cluster table in addition to the fast source — see [`lost_sales_ensemble`](#lost_sales_ensemble).
+
 ## Reporting window
 
 Only two inputs in config:
@@ -603,6 +605,29 @@ Used when `use_hybrid_scope=True` or `run_scope_diff=True`. Applies to the **mis
 }
 ```
 
+### `lost_sales_ensemble`
+
+**Off by default.** When disabled, the pipeline reads the single fast-mover model at `path_segments.lost_sales` (the 120-day model) exactly as before — other customers are unaffected.
+
+```python
+"lost_sales_ensemble": {
+    "enabled": False,
+    "slow_path_segments": ["noob", "lost-sales", "model_id=top_down_excluding_ecom_365days"],
+    "speed_cluster_path_segments": ["noob", "product-cluster-attributes-snapshot"],
+    "speed_cluster_attribute_name": "sales_speed",
+    "fast_mover_clusters": [1, 2, 3],
+}
+```
+
+When `enabled=True`, the pipeline blends **two** lost-sales models by product sales-speed cluster:
+
+- Products whose `sales_speed` cluster is in `fast_mover_clusters` use the **fast (120-day)** model at `path_segments.lost_sales`.
+- Every other product — slower clusters **and** products with no/NULL cluster row in `speed_cluster_path_segments` — uses the **slow (365-day)** model at `slow_path_segments`.
+- The three lost-sales aggregate fields (`lost_sales`, `in_stock_days`, `total_days`) for a given `(product_id, store_id, week_start_date)` always come from **one** model — never mixed — so downstream in-stock-rate and lost-sales-% math stays internally consistent.
+- A pair-week is kept only if the **chosen** model has a row for it (same as the legacy single-model behaviour); if the chosen side is missing from the full-outer join, the row is dropped rather than coalesced to zero.
+
+`materialize()` fails loudly when `enabled=True` and `fast_mover_clusters` is empty/non-list/non-integer, or `speed_cluster_attribute_name` is blank.
+
 ### `output`
 
 See [Output saves](#output-saves) for full mode behaviour, merge keys, workflows, and caveats.
@@ -644,6 +669,11 @@ See [HTML report](#html-report) section.
 | `KPI_RUN_SCOPE_DIFF`              | `true`/`false` — enable defined-vs-score scope diff          |
 | `KPI_COMPARABLE_PAIRS`            | `true`/`false` — enable comparable (like-for-like) pairs     |
 | `KPI_RECOMPUTE_COMPARISONS`       | `true`/`false` — recompute comparisons from merged history (default `true` under incremental) |
+| `KPI_LOST_SALES_ENSEMBLE`         | `true`/`false` — blend fast (120d) + slow (365d) lost-sales models by speed cluster |
+| `KPI_LOST_SALES_SLOW_PATH`        | Comma-separated path segments for the 365-day model          |
+| `KPI_SPEED_CLUSTER_PATH`          | Comma-separated path segments for the product speed-cluster attributes table |
+| `KPI_SPEED_CLUSTER_ATTRIBUTE`     | `attribute_name` value selecting the speed cluster (default `sales_speed`) |
+| `KPI_FAST_MOVER_CLUSTERS`         | Comma-separated cluster ints taking the fast model (default `1,2,3`) |
 | `KPI_USE_FISCAL_CALENDAR`         | `true`/`false`                                               |
 | `KPI_SCOPE_MIN_PERCENTILE`        | e.g. `20` or `0.2`                                           |
 | `KPI_SCOPE_MIN_WEEKS_FOR_FILTER`  | Integer                                                      |
@@ -739,6 +769,10 @@ If you see slow runs, check: (1) scope table path is correct so defined scope is
 | `is_nvrout` (or another slice) shows a NULL bucket, or you want only one value (e.g. only NVROUT products) | set `value_filters` for that dimension in `slices` or the `dimension_source`: `["yes"]` keeps only `yes`; `[]` drops the NULL bucket; see [Value filters](#value-filters-restrict-slice-values--drop-the-null-bucket) |
 | A `dimension_source` NULL bucket should really read as a real value (e.g. "everyone not on this list is comp") | add `fillna: {dim_name: default}` on that `dimension_sources` entry — coalesces the NULL left by the join to your literal; see [Dimension sources](#dimension-sources-extra-slices-from-other-tables) |
 | Scope debug counts don't match `kpi_long` per slice | The debug cell recomputes scope independently — re-run it after any `config.py` change (scope mode, adjustments, `value_filters`) so it reflects the same scope Cell 3 builds. NULL slice values show as `"NULL"` here but as blank/None in `kpi_long` |
+| Lost-sales / in-stock numbers change only for slower products after enabling ensemble | Expected — clusters not in `fast_mover_clusters` (and products with no/NULL cluster) now use the 365-day model |
+| Slice/pair counts for the speed cluster look doubled | `product-cluster-attributes-snapshot` has >1 `sales_speed` row per product — reader dedupes on `product_id`; verify upstream data |
+| Ensemble run fails loudly on read | An enabled ensemble source path (`slow_path_segments` / `speed_cluster_path_segments`) is wrong, or the attributes table lacks the `attribute_name` value — fix path/attribute or set `enabled: False` |
+| Some fast-mover pair-weeks missing under ensemble | Expected — a pair-week is kept only if the *chosen* model has a row; the 120-day model simply had no record for it (same as legacy single-model behaviour) |
 
 
 ## HTML report

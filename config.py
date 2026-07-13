@@ -252,9 +252,38 @@ CONFIG: Dict[str, Any] = {
         # Optional Spark SQL expressions applied when reading each source.
         # Used by the pipeline and the notebook input-preview cells.
         # Example: "brand = 'NIKE'" or "store_id NOT IN (829, 639, 917)"
+        # NOTE: when lost_sales_ensemble.enabled=True, this "lost_sales" filter list is
+        # applied to BOTH the fast (path_segments.lost_sales) and slow
+        # (lost_sales_ensemble.slow_path_segments) sources — same schema, same filters.
         "defined_scope": [],
         "lost_sales": [],
         "daily_data": [],
+    },
+    # ---------------------------------------------------------------------------
+    # LOST-SALES ENSEMBLE — blend two lost-sales models by product sales speed
+    # ---------------------------------------------------------------------------
+    # OFF by default: the pipeline reads the SINGLE fast-mover model at
+    # path_segments.lost_sales (the 120-day model) exactly as before, so other
+    # customers are unaffected. Set enabled=True (TBretail) to blend two models:
+    # fast-movers (speed cluster in fast_mover_clusters) take the 120-day model;
+    # everyone else — slower clusters AND products with no/NULL cluster — takes
+    # the 365-day model. All three aggregate fields (lost_sales, in_stock,
+    # details.total_days) for a given product/store/week come from ONE model
+    # (never mixed), so downstream in-stock-rate math stays internally consistent.
+    "lost_sales_ensemble": {
+        "enabled": False,
+        # Slow-mover (365-day lookback) model. SAME schema as the fast model
+        # (path_segments.lost_sales), different model_id partition. Read only when
+        # enabled=True.
+        "slow_path_segments": ["noob", "lost-sales", "model_id=top_down_excluding_ecom_365days"],
+        # Product sales-speed source: long-format attributes table. Filter to
+        # attribute_name below; the numeric attribute_value (1=fastest .. 5=slowest)
+        # per product_id is the cluster. Read only when enabled=True.
+        "speed_cluster_path_segments": ["noob", "product-cluster-attributes-snapshot"],
+        "speed_cluster_attribute_name": "sales_speed",
+        # Clusters whose products use the FAST (120-day) model. Everything else
+        # (other clusters AND products with no/NULL cluster row) uses the SLOW model.
+        "fast_mover_clusters": [1, 2, 3],
     },
     # ---------------------------------------------------------------------------
     # SLICES — breakdown dimensions sourced from master-data/products
@@ -463,6 +492,24 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
             c.strip().lower() for c in os.environ["KPI_COMPARISONS"].split(",") if c.strip()
         ]
 
+    lse = out.setdefault("lost_sales_ensemble", {})
+    if "KPI_LOST_SALES_ENSEMBLE" in os.environ:
+        lse["enabled"] = _parse_bool(os.environ["KPI_LOST_SALES_ENSEMBLE"])
+    if "KPI_LOST_SALES_SLOW_PATH" in os.environ:
+        lse["slow_path_segments"] = [
+            s.strip() for s in os.environ["KPI_LOST_SALES_SLOW_PATH"].split(",") if s.strip()
+        ]
+    if "KPI_SPEED_CLUSTER_PATH" in os.environ:
+        lse["speed_cluster_path_segments"] = [
+            s.strip() for s in os.environ["KPI_SPEED_CLUSTER_PATH"].split(",") if s.strip()
+        ]
+    if "KPI_SPEED_CLUSTER_ATTRIBUTE" in os.environ:
+        lse["speed_cluster_attribute_name"] = os.environ["KPI_SPEED_CLUSTER_ATTRIBUTE"].strip()
+    if "KPI_FAST_MOVER_CLUSTERS" in os.environ:
+        lse["fast_mover_clusters"] = [
+            int(c.strip()) for c in os.environ["KPI_FAST_MOVER_CLUSTERS"].split(",") if c.strip()
+        ]
+
     op = out.setdefault("output", {})
     if "KPI_SAVE_OUTPUTS" in os.environ:
         op["save_outputs"] = _parse_bool(os.environ["KPI_SAVE_OUTPUTS"])
@@ -572,6 +619,8 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "PATH_PRODUCTS": fund_paste(bucket, *path_segments["products"]),
         "PATH_LOST_SALES": fund_paste(bucket, *path_segments["lost_sales"]),
         "PATH_DEFINED_SCOPE": fund_paste(bucket, *path_segments["defined_scope"]),
+        "PATH_LOST_SALES_SLOW": fund_paste(bucket, *cfg["lost_sales_ensemble"]["slow_path_segments"]),
+        "PATH_SPEED_CLUSTER": fund_paste(bucket, *cfg["lost_sales_ensemble"]["speed_cluster_path_segments"]),
     }
 
     window = _resolve_report_window(
@@ -594,6 +643,16 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             "defined_scope.grain='product_store_week' requires date_col OR both year_col and week_col"
         )
     defined_scope["grain"] = grain
+
+    lse = cfg["lost_sales_ensemble"]
+    if lse.get("enabled"):
+        fast_clusters = lse.get("fast_mover_clusters")
+        if not isinstance(fast_clusters, (list, tuple)) or not fast_clusters:
+            raise ValueError("lost_sales_ensemble.fast_mover_clusters must be a non-empty list when enabled")
+        if not all(isinstance(c, int) for c in fast_clusters):
+            raise ValueError("lost_sales_ensemble.fast_mover_clusters must be integers (e.g. [1, 2, 3])")
+        if not lse.get("speed_cluster_attribute_name"):
+            raise ValueError("lost_sales_ensemble.speed_cluster_attribute_name is required when enabled")
 
     # Resolve optional dimension-source paths up front (same pattern as PATH_* above) so
     # fiscal.py reads absolute paths without needing fund_paste. path_segments are joined
@@ -683,6 +742,9 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "COMPARABLE_PAIRS_ENABLED": cfg.get("comparable_pairs", {}).get("enabled", False),
         "COMPARISON_KINDS": comparison_kinds,
         "SCOPE_ADJUSTMENTS": cfg.get("scope_adjustments", {}),
+        "LOST_SALES_ENSEMBLE_ENABLED": lse["enabled"],
+        "FAST_MOVER_CLUSTERS": list(lse["fast_mover_clusters"]),
+        "SPEED_CLUSTER_ATTRIBUTE_NAME": lse["speed_cluster_attribute_name"],
         **paths,
         "DEFINED_SCOPE": defined_scope,
         "INPUT_FILTERS": cfg.get("input_filters", {}),
