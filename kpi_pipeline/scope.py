@@ -74,8 +74,8 @@ def build_defined_scope(ctx: KPIContext) -> None:
       * ``"product_store_week"`` -> the scope table's own (product, store, week) rows, honoured.
 
     For the week-agnostic grains (product, product_store) the pairs are applied to EVERY week
-    in the report window, so a pair scoped in any period counts for the whole window (mirrors
-    v4's flatten-to-ids). For product_store_week the scope table's own weeks are honoured.
+    in the report window, so a pair scoped in any period counts for the whole window. For
+    product_store_week the scope table's own weeks are honoured.
     Downstream always consumes (product[, store], Year, Week) keys.
     """
     config = ctx.settings["DEFINED_SCOPE"]

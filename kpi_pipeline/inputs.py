@@ -16,8 +16,7 @@ def resolve_csv_path(path: str, location: str = "datastore") -> str:
         (e.g. /mnt/invent-{customer}-datastore/...). Used as-is.
       - "workspace": a Databricks **workspace** file (e.g. /Workspace/Users/...).
         Spark reads workspace files through the ``file:`` scheme, so the prefix is
-        added when missing. This mirrors how the v4 script read CSVs that lived next
-        to the notebook in the workspace rather than in the datastore.
+        added when missing.
     """
     loc = (location or "datastore").strip().lower()
     if loc not in {"datastore", "workspace"}:

@@ -47,6 +47,7 @@ def compute_kpis(
             F.sum("inventory").alias("total_inventory"),
             F.sum("sales_quantity").alias("total_sales_quantity"),
             F.sum("sales_revenue").alias("total_sales_revenue"),
+            F.sum("sales_cost").alias("total_sales_cost"),
             F.countDistinct("product_id").alias("distinct_product_count"),
             F.countDistinct("store_id").alias("distinct_store_count"),
             F.countDistinct("product_id", "store_id").alias("distinct_pair_count"),
@@ -55,6 +56,12 @@ def compute_kpis(
             "AUR",
             F.when(F.col("total_sales_quantity") == 0, F.lit(None)).otherwise(
                 F.col("total_sales_revenue") / F.col("total_sales_quantity")
+            ),
+        )
+        .withColumn(
+            "AUC",
+            F.when(F.col("total_sales_quantity") == 0, F.lit(None)).otherwise(
+                F.col("total_sales_cost") / F.col("total_sales_quantity")
             ),
         )
     )

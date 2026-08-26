@@ -59,7 +59,7 @@ CONFIG: Dict[str, Any] = {
         "run_scope_diff": False,
     },
     "comparable_pairs": {
-        # GATED, opt-in like-for-like view (mirrors v4's same-pair YoY). When enabled, for each
+        # GATED, opt-in like-for-like view. When enabled, for each
         # comparison (YoY/QoQ/MoM/WoW) the metrics are recomputed over ONLY the (product_id,
         # store_id) pairs present in BOTH compared periods, then compared — isolating like-for-like
         # change from mix shifts (new/closed pairs). Pair-level data exists only for the current run
@@ -232,7 +232,7 @@ CONFIG: Dict[str, Any] = {
     "defined_scope": {
         # grain — how the scope table defines membership:
         #   "product"            -> distinct product_id (store- and week-agnostic: every store,
-        #                           every window week, for each in-scope product). Matches v4.
+        #                           every window week, for each in-scope product).
         #   "product_store"      -> distinct (product_id, store_id); week-agnostic (default).
         #   "product_store_week" -> the scope table's own (product, store, week) rows are honoured
         #                           (strict); weeks come from date_col (or year_col/week_col).
@@ -264,7 +264,7 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     # OFF by default: the pipeline reads the SINGLE fast-mover model at
     # path_segments.lost_sales (the 120-day model) exactly as before, so other
-    # customers are unaffected. Set enabled=True (TBretail) to blend two models:
+    # customers are unaffected. Set enabled=True to blend two models:
     # fast-movers (speed cluster in fast_mover_clusters) take the 120-day model;
     # everyone else — slower clusters AND products with no/NULL cluster — takes
     # the 365-day model. All three aggregate fields (lost_sales, in_stock,
@@ -319,6 +319,7 @@ CONFIG: Dict[str, Any] = {
             "total_sales_quantity",
             "total_sales_revenue",
             "AUR",
+            "AUC",
             "total_inventory",
             "distinct_product_count",
             "distinct_store_count",
@@ -348,6 +349,7 @@ CONFIG: Dict[str, Any] = {
             "total_sales_revenue": "Sales Revenue",
             "total_sales_quantity": "Sales Units",
             "AUR": "AUR",
+            "AUC": "AUC",
             "total_inventory": "Total Inventory",
             "mean_stock": "Daily stock avg (M units)",
             "mean_stock_retail": "Daily stock avg retail (M $)",

@@ -46,7 +46,7 @@ retail-insights-pipeline/
     ├── kpi_long.py     # Long-format output across periods and slices
     ├── comparisons.py  # YoY / QoQ / WoW + defined vs score diff
     ├── io.py           # Incremental Delta saves + save plan preview
-    ├── html_report.py  # Standalone HTML renderer (v4-style tabbed report)
+    ├── html_report.py  # Standalone HTML renderer (offline, tabbed report)
     └── context.py      # Shared runtime state (KPIContext)
 ```
 
@@ -85,7 +85,7 @@ retail-insights-pipeline/
 | `"product_store"` (default) | distinct `(product_id, store_id)` | week-agnostic: every window week, for each in-scope pair |
 | `"product_store_week"` | the scope table's own `(product_id, store_id, week)` rows | honoured (strict) — weeks come from `date_col` (or `year_col`/`week_col`) |
 
-The two week-agnostic grains (`product`, `product_store`) mirror the v4 script's flatten-to-ids behaviour: a pair (or product) scoped in **any** period is scoped for **every** week in the report window — this is the key behaviour that keeps a pair that has **dropped out of the current-year scope weeks yet still transacts** in the window, instead of being silently dropped and undercounted. `product_store_week` is stricter: only the scope table's own weeks count.
+The two week-agnostic grains (`product`, `product_store`) flatten scope down to ids: a pair (or product) scoped in **any** period is scoped for **every** week in the report window — this is the key behaviour that keeps a pair that has **dropped out of the current-year scope weeks yet still transacts** in the window, instead of being silently dropped and undercounted. `product_store_week` is stricter: only the scope table's own weeks count.
 
 Downstream always consumes `ctx.scope_keys` — `[product_id, Year, Week]` for `"product"`, `[product_id, store_id, Year, Week]` for `"product_store"`/`"product_store_week"`.
 
@@ -127,7 +127,7 @@ CSV options (optional): `"csv_options": {"header": True, "inferSchema": True}`
 | `location` | Reads from | Notes |
 | ---------- | ---------- | ----- |
 | `datastore` (default) | A cloud / DBFS path under the datastore mount (`/mnt/invent-{customer}-datastore/...`) | Path used as-is by Spark |
-| `workspace` | A Databricks **workspace** file (`/Workspace/Users/...`) | Read through the `file:` scheme — mirrors how the v4 script loaded CSVs next to the notebook |
+| `workspace` | A Databricks **workspace** file (`/Workspace/Users/...`) | Read through the `file:` scheme, for CSVs kept alongside the notebook |
 
 When adjustments run, the pipeline prints the scope **before**, after **each** addition/removal, and the **final** scope. The notebook scope summary cell displays before/after tables and a steps table.
 
@@ -201,7 +201,7 @@ display(runner.scope_debug_summary())
 
 **What it is.** By default, every slice dimension (the breakdown columns in the report) comes from the **products master** (`master-data/products`) — either a real column listed in `slices.dimensions` or a `slices.derived_dimensions` SQL expression over products columns. `dimension_sources` lets you pull a breakdown column from a **different table** when it does not live on products.
 
-**Why it exists.** Some segmentations are not products attributes. The classic example is tbretail's **NVROUT** flag, which is derived from `program` on `operation/extended_product`, not `master-data/products`. Without this feature you could only slice by products columns; the segment would be invisible to the report. `dimension_sources` joins that external column onto the product attribute table *after* scope is built, so it becomes a normal slice dimension everywhere downstream (`kpi_long`, comparisons, HTML).
+**Why it exists.** Some segmentations are not products attributes. A common example is a program/channel flag derived from a column on a separate operational table, not `master-data/products`. Without this feature you could only slice by products columns; the segment would be invisible to the report. `dimension_sources` joins that external column onto the product attribute table *after* scope is built, so it becomes a normal slice dimension everywhere downstream (`kpi_long`, comparisons, HTML).
 
 **It is gated and opt-in.** The default config ships one **disabled** example. With nothing enabled, behaviour is exactly as before — slices come from products only. A data scientist who does *not* need external dimensions never has to think about this block; one who does flips `enabled: True` on a source. **If your breakdown column already exists on (or is derivable from) the products table, use `slices` — not this.** Dimension sources are only for columns that genuinely live elsewhere.
 
@@ -230,8 +230,8 @@ This produces an `is_nvrout` slice (`yes` / `no`) alongside `brand` — the `yes
 
 ### Source-specific behaviour to know
 
-- **One row per `join_key`.** The source is reduced with `dropDuplicates([join_key])` **before** the join so it can never fan out (duplicate) the product rows. If the raw table has several rows per product (e.g. `extended_product` with multiple `program` values), the surviving row is **arbitrary** — pre-aggregate the source to one row per product (or to a clean membership flag) before pointing the toolkit at it, exactly as the v4 script did with `.select(product_id).distinct()`. The toolkit does **not** clean the source (same data-quality contract as scope adjustments).
-- **Mutually exclusive within one column.** A single dimension column gives each product one value. To represent **overlapping** segments (e.g. v4's "COMP includes NVROUT"), model them as **independent boolean dimensions** — `is_nvrout`, `is_comp` — each its own slice; a product can be `yes` under both. A single `segment` column cannot express the overlap.
+- **One row per `join_key`.** The source is reduced with `dropDuplicates([join_key])` **before** the join so it can never fan out (duplicate) the product rows. If the raw table has several rows per product (e.g. a source with multiple `program` values), the surviving row is **arbitrary** — pre-aggregate the source to one row per product (or to a clean membership flag) before pointing the toolkit at it. The toolkit does **not** clean the source (same data-quality contract as scope adjustments).
+- **Mutually exclusive within one column.** A single dimension column gives each product one value. To represent **overlapping** segments (e.g. a group whose membership includes part of another group), model them as **independent boolean dimensions** — one flag per segment — each its own slice; a product can be `yes` under both. A single `segment` column cannot express the overlap.
 - **Products missing from the source get NULL.** The join is a **left** join (it must keep every product). A product with no row in the source table gets `NULL` for the new dimension — *not* a default like `"no"`. A `CASE WHEN program LIKE '%NVROUT%' ... ELSE 'no'` expression only yields `"no"` for products that **have** a row in the source; products absent from `extended_product` are `NULL` (their own panel). Make the source cover the full product universe, use `fillna` (below), or accept the `NULL` bucket, if you want a clean `yes`/`no` split.
 - **`fillna` — impute the NULL side of a partial source.** `dimension_sources[].fillna` is `{dim_name: default_value}`, applied **after** the join, coalescing NULLs (products absent from the source) to a literal. This is the direct fix for a source that intentionally lists only one side of a split (e.g. a CSV of just the NON-COMP product_ids) — instead of leaving the complement `NULL`, it reads as the value you choose:
 
@@ -316,11 +316,11 @@ The `nfg` breakdown then covers the going-forward (COMP) universe only, while Ov
 | Include/exclude which (product, store, week) rows enter the KPIs (e.g. a JAB include list) | `scope_adjustments` | Changes scope **membership**; the addition's `scope_origin` label is for reporting only — it is **not** a report breakdown |
 | Break the report out by a segment (NVROUT vs COMP, etc.) | `slices` + `dimension_sources` | Adds a **dimension** the report groups by |
 
-`scope_adjustments` decide *which rows*; `slices` / `dimension_sources` decide *how rows are grouped*. A typical tbretail setup uses both: a JAB scope addition **and** an `is_nvrout` dimension source.
+`scope_adjustments` decide *which rows*; `slices` / `dimension_sources` decide *how rows are grouped*. A typical setup uses both: a scope addition **and** a dimension source for a segment flag.
 
 ## Comparable pairs (like-for-like)
 
-**Gated, opt-in** (default off). When enabled, for each comparison (YoY / QoQ / MoM / WoW) the metrics are recomputed over **only the `(product_id, store_id)` pairs present in both compared periods**, then compared. This isolates like-for-like movement (same pairs in both periods) from mix shifts caused by newly listed or closed pairs — the same idea as v4's `_pairs_same_calendar_years` same-pair YoY.
+**Gated, opt-in** (default off). When enabled, for each comparison (YoY / QoQ / MoM / WoW) the metrics are recomputed over **only the `(product_id, store_id)` pairs present in both compared periods**, then compared. This isolates like-for-like movement (same pairs in both periods) from mix shifts caused by newly listed or closed pairs.
 
 ```python
 "comparable_pairs": {
@@ -698,7 +698,7 @@ See [HTML report](#html-report) section.
 
 Default metrics (configurable in `CONFIG["metrics"]`):
 
-- Sales / inventory (all scoped stores): `total_sales_quantity`, `total_sales_revenue`, `AUR`, `total_inventory`
+- Sales / inventory (all scoped stores): `total_sales_quantity`, `total_sales_revenue`, `AUR`, `AUC`, `total_inventory`
 - Coverage (all scoped stores): `distinct_product_count`, `distinct_store_count`, `distinct_pair_count`
 - Service stores only: `mean_stock`, `mean_stock_retail`, `mean_stock_cost`, `WOS`, `wos_revenue`, `wos_cost`, `inventory_turnover_rate`, `in_stock_rate`, `weighted_instock_rate`, `lost_sales_pct`
 

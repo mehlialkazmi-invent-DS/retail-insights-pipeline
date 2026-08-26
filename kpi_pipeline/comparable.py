@@ -1,9 +1,9 @@
 """Gated 'comparable pairs' (like-for-like) KPIs and comparisons.
 
 For each comparison kind (YoY / QoQ / MoM / WoW) the metrics are recomputed over only the
-``(product_id, store_id)`` pairs present in **both** compared periods — the same fixed universe v4
-built with ``_pairs_same_calendar_years``. This isolates like-for-like movement (same pairs, both
-periods) from mix shifts caused by newly listed or closed pairs.
+``(product_id, store_id)`` pairs present in **both** compared periods, then compared. This isolates
+like-for-like movement (same pairs, both periods) from mix shifts caused by newly listed or closed
+pairs.
 
 Because every slice dimension is a product attribute, the comparable-pair universe computed once
 across the two periods and then grouped by slice is identical to computing it per slice value — so a

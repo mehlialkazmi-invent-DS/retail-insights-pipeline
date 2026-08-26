@@ -484,6 +484,7 @@ Add a path to `path_segments` in config, read in `fiscal.py` or a new module, an
 | `total_sales_revenue` | Sales Revenue | All stores | Sum of daily sales revenue |
 | `total_sales_quantity` | Sales Units | All stores | Sum of daily sales quantity |
 | `AUR` | AUR | All stores | Revenue ÷ Units |
+| `AUC` | AUC | All stores | Cost ÷ Units |
 | `total_inventory` | Total Inventory | All stores | Sum of daily inventory units across the period |
 | `distinct_product_count` | Distinct Products | All stores | COUNT DISTINCT product_id |
 | `distinct_store_count` | Distinct Stores | All stores | COUNT DISTINCT store_id |

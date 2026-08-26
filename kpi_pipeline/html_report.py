@@ -35,6 +35,7 @@ _CAT: Dict[str, str] = {
     "total_sales_revenue": "revenue",
     "total_sales_quantity": "revenue",
     "AUR": "revenue",
+    "AUC": "revenue",
     "in_stock_rate": "service",
     "weighted_instock_rate": "service",
     "lost_sales_pct": "service",
@@ -74,6 +75,12 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "definition": "Average Unit Retail — average net selling price per unit in the period.",
         "store_scope": "All scoped stores",
         "formula": "Sales Revenue ÷ Sales Units",
+    },
+    "AUC": {
+        "label": "AUC",
+        "definition": "Average Unit Cost — average cost per unit sold in the period.",
+        "store_scope": "All scoped stores",
+        "formula": "Sales Cost ÷ Sales Units",
     },
     "total_inventory": {
         "label": "Total Inventory",
@@ -657,7 +664,7 @@ def _fmt(metric: str, value: Any) -> str:
         return f"{v / 1e6:.2f}M"
     if metric in ("mean_stock_retail", "mean_stock_cost"):
         return f"${v / 1e6:.1f}M"
-    if metric == "AUR":
+    if metric in ("AUR", "AUC"):
         return f"${v:.2f}"
     if metric in ("in_stock_rate", "weighted_instock_rate"):
         return f"{v * 100:.1f}%"
