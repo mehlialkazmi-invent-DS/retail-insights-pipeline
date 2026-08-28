@@ -45,8 +45,8 @@ main.ipynb         Cell 1: config summary
                    (after Cell 3): scope summary display
                    Cell 4: save plan preview (when save_outputs=True)
                    Cell 5: Delta write
-                   (unnumbered): kpi_long sample, YoY / QoQ / MoM / WoW / YTD comparisons,
-                                 comparable pairs, scope diff
+                   (unnumbered): kpi_long sample, YoY / YTD comparisons,
+                                 comparable pairs (YTD-only), scope diff
                    Cell 6: HTML report
 
 kpi_pipeline/
@@ -66,11 +66,13 @@ kpi_pipeline/
   metrics.py       compute_kpis: sales, WOS, mean_stock, instock, weighted_instock_rate
   kpi_long.py      build_kpi_long: loops annual/ytd/quarter/monthly/weekly × slices → pandas
                    trim_periods_to_recent: trims each period type to N most recent
-  comparisons.py   YoY / QoQ / MoM / WoW / YTD + build_scope_diff. QoQ/MoM/YTD compare the SAME
-                   quarter/month/elapsed-window across years (not sequential), chained across
-                   every consecutive year pair present — see _consecutive_year_pairs
-  comparable.py    build_comparable_pairs: like-for-like metrics; YoY/WoW over the last two
-                   periods, QoQ/MoM/YTD over the intersection across EVERY year present
+  comparisons.py   YoY / YTD + build_scope_diff. YTD compares the SAME elapsed-window across
+                   years (not sequential), chained across every consecutive year pair present —
+                   see _consecutive_year_pairs. No QoQ/MoM/WoW comparison table exists — the
+                   Quarter/Monthly/Weekly period tabs show value trends only.
+  comparable.py    build_comparable_pairs: like-for-like YTD metrics only. Each consecutive-year
+                   link gets its OWN pair universe (intersection of just that link's two years),
+                   not a universe fixed across the whole window — see rebuild_comparable_ytd_from_saved_rows
   io.py            incremental Delta saves, save plan, load_saved_outputs (html_only),
                    recompute comparisons from merged kpi_long history
   html_report.py   standalone HTML renderer — period → dimension → value tabs;
@@ -241,7 +243,7 @@ All-store sales totals include these stores; only service-specific metrics exclu
     "run_date": None,               # null = reporting_window.as_of_date → run_date=YYYY-MM-DD partition
     "save_mode": "incremental",     # initial | incremental | full_refresh
     "allow_overwrite_existing": False,
-    "recompute_comparisons_from_history": True,  # incremental: recompute YoY/QoQ/MoM/WoW/YTD from full merged kpi_long
+    "recompute_comparisons_from_history": True,  # incremental: recompute YoY/YTD from full merged kpi_long
 }
 ```
 
@@ -255,13 +257,12 @@ All-store sales totals include these stores; only service-specific metrics exclu
 |-------|----------|
 | `kpi_long` | All metrics × periods (annual/ytd/quarter/monthly/weekly) × slices |
 | `comparison_yoy` | YoY comparison rows |
-| `comparison_qoq` | QoQ comparison rows (one row set per fiscal-quarter number × consecutive-year pair) |
-| `comparison_mom` | MoM comparison rows (one row set per fiscal-month number × consecutive-year pair) |
-| `comparison_wow` | WoW comparison rows |
 | `comparison_ytd` | YTD comparison rows (one row set per consecutive-year pair, elapsed-window sums) |
 | `scope_diff` | Defined vs score annual diff (only when `scope.run_scope_diff=True`) |
-| `comparable_kpi_long` | Like-for-like per-period metrics + `comparable_pair_count` (only when `comparable_pairs.enabled=True`) |
-| `comparable_comparison_{yoy,qoq,mom,wow,ytd}` | Like-for-like comparison rows (only when `comparable_pairs.enabled=True`) |
+| `comparable_kpi_long` | Like-for-like per-link YTD metrics + `comparable_pair_count` + `link_prior_year`/`link_current_year` (only when `comparable_pairs.enabled=True`) |
+| `comparable_comparison_ytd` | Like-for-like YTD comparison rows (only when `comparable_pairs.enabled=True`) |
+
+No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — comparable is YTD-only and there's no separate QoQ/MoM/WoW comparison at all.
 
 **Merge keys (incremental only)** — defined in `io.py` `TABLE_ROW_KEYS`:
 
@@ -270,7 +271,7 @@ All-store sales totals include these stores; only service-specific metrics exclu
 | `kpi_long` | `period_type`, `period`, `dimension`, `dimension_value` |
 | `comparison_*` | `comparison_type`, `dimension`, `dimension_value`, `metric_key`, `current_period` |
 | `scope_diff` | `Year`, `metric` |
-| `comparable_kpi_long` | `comparison_type`, `period_type`, `period`, `dimension`, `dimension_value` |
+| `comparable_kpi_long` | `comparison_type`, `period_type`, `period`, `dimension`, `dimension_value`, `link_prior_year`, `link_current_year` (the link tag is required — the same year can carry a different value per link it's paired with) |
 
 **Save modes:**
 
@@ -283,8 +284,8 @@ All-store sales totals include these stores; only service-specific metrics exclu
 **Incremental — how history accumulates:**
 - Each weekly run loads the **latest existing `run_date` partition on or before** the current run, appends only new merge keys, and writes the full merged result to this run's `run_date` partition.
 - Each `run_date` partition is therefore a self-contained snapshot of the full merged history as of that run.
-- Comparison tables (`comparison_yoy/qoq/mom/wow/ytd`) are **recomputed from the merged `kpi_long` history** after the kpi_long save, then overwritten wholesale — so a single-week refresh can still produce YoY vs last year. Disable with `recompute_comparisons_from_history: False`.
-- `comparable_kpi_long` is merged incrementally like `kpi_long`; comparable comparison tables are then recomputed from the merged `comparable_kpi_long`. A single-week refresh produces comparable YoY/QoQ/MoM/WoW/YTD relative to prior saved history.
+- Comparison tables (`comparison_yoy`/`comparison_ytd`) are **recomputed from the merged `kpi_long` history** after the kpi_long save, then overwritten wholesale — so a single-week refresh can still produce YoY vs last year. Disable with `recompute_comparisons_from_history: False`.
+- `comparable_kpi_long` is merged incrementally like `kpi_long`; `comparable_comparison_ytd` is then recomputed from the merged `comparable_kpi_long` (grouped by `link_prior_year`/`link_current_year` — see `rebuild_comparable_ytd_from_saved_rows`). A single-week refresh produces a comparable YTD comparison relative to prior saved history. Comparable is YTD-only.
 
 **Full refresh details:**
 - Replaces the **entire** Delta table — not "update 2026 inside a multi-year table."
@@ -312,27 +313,25 @@ All-store sales totals include these stores; only service-specific metrics exclu
 
 ### 3.6.1 Selecting which comparisons to run
 
-`comparisons.enabled` chooses which period-over-period comparisons are computed, printed, saved, and rendered — any subset of `yoy`/`qoq`/`mom`/`wow`/`ytd` (default: all five).
+`comparisons.enabled` chooses which period-over-period comparisons are computed, printed, saved, and rendered — any subset of `yoy`/`ytd` (default: both). There is no `qoq`/`mom`/`wow` comparison kind — dropped for simplicity; the Quarter/Monthly/Weekly period tabs already show recent-period value trends (`kpi_long`, always built in full) without a delta table.
 
 ```python
 "comparisons": {
-    "enabled": ["yoy"],   # only YoY; qoq/mom/wow/ytd skipped entirely
+    "enabled": ["yoy"],   # only YoY; ytd skipped entirely
 }
 ```
 
-- **`yoy`** — last two full calendar/fiscal years (unchanged).
-- **`qoq`** — the **same fiscal quarter across years** (e.g. `2026-Q1` vs `2025-Q1`), NOT the prior sequential quarter. One mini-table per fiscal-quarter number present, chained across every consecutive pair of years present for that quarter number (also `2025-Q1` vs `2024-Q1` if a 3rd year exists). A quarter number present in <2 years is skipped, not an error.
-- **`mom`** — same pattern by fiscal-month number.
-- **`ytd`** — each year's **elapsed window** (only the fiscal quarters fully closed as of `as_of_date` for the latest year — `fiscal.available_fiscal_quarters` — applied to every year) vs the prior year's same window, chained across consecutive years like `qoq`/`mom`. Use instead of `yoy` once the current year is only partially reported, so a partial current year isn't compared against a full prior year.
-- **`wow`** — last two sequential weeks (unchanged).
-- Gates the `comparison_{kind}` (and `comparable_comparison_{kind}`) Delta tables + HTML comparison columns only. `kpi_long` is always built in full, including a `"ytd"` `period_type`.
-- HTML rendering: `qoq`/`mom`/`ytd` render as several stacked mini comparison tables in one panel (one per quarter/month number or year-pair) when more than one pair exists, instead of a single table.
+- **`yoy`** — last two full calendar/fiscal years.
+- **`ytd`** — each year's **elapsed window** (only the fiscal quarters fully closed as of `as_of_date` for the latest year — `fiscal.available_fiscal_quarters` — applied to every year) vs the prior year's same window, chained across consecutive years. Use instead of `yoy` once the current year is only partially reported, so a partial current year isn't compared against a full prior year.
+- Gates the `comparison_{kind}` (and, when `comparable_pairs.enabled=True` and `"ytd"` is selected, `comparable_comparison_ytd`) Delta tables + HTML comparison columns only. `kpi_long` is always built in full, including a `"ytd"` `period_type`.
+- HTML rendering: `ytd`, if more than one consecutive-year pair exists, renders as several stacked mini comparison tables in one panel (one per year-pair) instead of a single table. `yoy` always renders as a single table.
 - A latest-week run can still produce e.g. YoY: with `save_mode="incremental"` + `recompute_comparisons_from_history=True`, selected comparisons are rebuilt from the full merged `kpi_long` (this run unioned onto prior saved runs). Needs a prior saved partition.
-- Invalid/empty selection fails loudly in `materialize()`. Env override: `KPI_COMPARISONS="yoy,mom"`.
+- Invalid/empty selection fails loudly in `materialize()`. Env override: `KPI_COMPARISONS="yoy,ytd"`.
+- Need a quarter-over-quarter or month-over-month percentage change? Compute it from consecutive `kpi_long` rows (`period_type="quarter"`/`"monthly"`) directly — there's no built-in comparison table for it.
 
-### 3.7 Comparable pairs (like-for-like)
+### 3.7 Comparable pairs (like-for-like, YTD-only)
 
-**Gated, opt-in** (default off). For each comparison the metrics are recomputed over **only the `(product_id, store_id)` pairs present across the periods that comparison touches**, then compared. Isolates like-for-like movement from mix shifts caused by new/closed pairs.
+**Gated, opt-in** (default off). YTD metrics are recomputed over **only the `(product_id, store_id)` pairs present in both years of each consecutive-year link**, then compared. Isolates like-for-like movement from mix shifts caused by new/closed pairs. There is no comparable YoY/QoQ/MoM/WoW — comparable is YTD-only, and QoQ/MoM/WoW aren't comparison kinds at all (see §3.6.1).
 
 ```python
 "comparable_pairs": {
@@ -340,19 +339,20 @@ All-store sales totals include these stores; only service-specific metrics exclu
 }
 ```
 
-**How it works — depends on the kind:**
-- **yoy/wow** (unchanged): the two most recent periods in the run window; comparable universe = pairs present in `scoped_daily` for **both**.
-- **qoq/mom/ytd**: comparable universe = pairs present in **every year** that has that quarter/month number (qoq/mom) or in every year's elapsed window (ytd) — not just the two years in one chain link, so the universe stays fixed across every consecutive-year link. Mirrors the reference implementation's `sameytd` ("same pairs across all the years specified").
+Requires `"ytd"` in `comparisons.enabled` — otherwise a no-op (logged, not an error).
 
-In every case, all metric frames are restricted to that pair set and metrics recomputed for Overall and every slice (since slice dims are product attributes, no extra per-slice intersections needed), then the standard comparison logic diffs/chains as usual.
+**How it works — per link, not a fixed universe across the window:**
+Each consecutive-year link's pair universe is computed from just that link's two years. With 2024/2025/2026 all present: the 2025-vs-2026 link's universe = pairs present in **both 2025 and 2026** (2024 irrelevant to this link); the 2024-vs-2025 link's universe = pairs present in **both 2024 and 2025** (2026 irrelevant). A pair in 2025+2026 but not 2024 still counts for the 2025-vs-2026 link. Consequence: the **same year can carry a different metric value depending on which link it's in** — 2025 as "current" in the 2024-2025 link (restricted to 2024∩2025 pairs) generally differs from 2025 as "prior" in the 2025-2026 link (restricted to 2025∩2026 pairs). This is why `comparable_kpi_long` rows are tagged with `link_prior_year`/`link_current_year` (see §3.6 merge keys) — without the tag, two links' rows for the same year would collide under one merge key.
+
+All metric frames are restricted to a link's pair set and metrics recomputed for Overall and every slice (since slice dims are product attributes, no extra per-slice intersections needed).
 
 **Outputs:**
-- `comparable_kpi_long` — per-period comparable metrics + `comparable_pair_count` (varies per quarter/month number for qoq/mom).
-- `comparable_comparison_{yoy,qoq,mom,wow,ytd}` — comparison rows (same schema as regular tables).
-- HTML report — a second "Comparable YoY/QoQ/MoM/WoW/YTD" table beneath each standard comparison, same stacking as the standard one.
-- Notebook — a "Comparable pairs (like-for-like)" cell.
+- `comparable_kpi_long` — per-link YTD metrics + `comparable_pair_count` + `link_prior_year`/`link_current_year`.
+- `comparable_comparison_ytd` — comparison rows (same schema as `comparison_ytd`).
+- HTML report — a second "Comparable YTD" table beneath the standard one, on the YTD panel only, same stacking as the standard one.
+- Notebook — a "Comparable pairs (like-for-like, YTD-only)" cell.
 
-**Single-week run and history:** `comparable_kpi_long` is merged incrementally (same as `kpi_long`). A single-week refresh can still produce comparable YoY/QoQ/MoM/WoW/YTD **relative to prior saved `comparable_kpi_long` history** — even if the current window only spans one week. A comparable comparison is skipped for the current run only when there aren't enough periods (or years, for qoq/mom/ytd) *and* there is no saved history covering them yet.
+**Single-week run and history:** `comparable_kpi_long` is merged incrementally (same as `kpi_long`). A single-week refresh can still produce a comparable YTD comparison **relative to prior saved `comparable_kpi_long` history** — even if the current window only spans one week. Recomputation from saved history (`rebuild_comparable_ytd_from_saved_rows`) is pure pandas grouped by `link_prior_year`/`link_current_year` — no Spark recomputation needed, since each link's rows already carry that link's own pair-restricted values. A comparable comparison is skipped for the current run only when fewer than 2 years are present *and* there is no saved history covering more.
 
 ### 3.8 Run mode
 
@@ -396,11 +396,11 @@ Environment override: `KPI_RUN_MODE=html_only`
 ```
 
 The report has six top-level tabs:
-- **Annual** — KPI table by year + YoY comparison (+ comparable YoY when enabled)
+- **Annual** — KPI table by year + YoY comparison (no comparable YoY — comparable is YTD-only)
 - **YTD** — KPI table by year over each year's elapsed (fully-closed-quarters) window + YTD comparison, stacked one mini-table per consecutive-year pair (+ comparable YTD when enabled)
-- **Quarter** — KPI table by fiscal quarter + QoQ comparison, stacked one mini-table per fiscal-quarter number × consecutive-year pair (same-quarter-across-years, not sequential)
-- **Monthly** — KPI table by month (`YYYY-MM`) + MoM comparison, same stacking as Quarter but by fiscal-month number
-- **Weekly** — KPI table for the **most recent N fiscal weeks** (default 5; sorted by `week_start_date`) + WoW comparison
+- **Quarter** — KPI table by fiscal quarter, **value trend only** (most recent N quarters, default 5) — no comparison table
+- **Monthly** — KPI table by month (`YYYY-MM`), **value trend only** (most recent N months, default 5) — no comparison table
+- **Weekly** — KPI table for the **most recent N fiscal weeks** (default 5; sorted by `week_start_date`), **value trend only** — no comparison table
 - **Metric Details** — plain-English definition, store scope, and formula for every active metric
 
 Within each period tab, navigation is three levels:
@@ -582,11 +582,14 @@ build_pipeline_frames(scope) → {scoped_daily, inst_data, lost_base, ...}
 
 build_kpi_long → kpi_long (period_type|period|dimension|dimension_value|metrics)
                → annual / ytd / quarter / monthly / weekly × overall × slices
-trim_periods_to_recent → trims each period_type to N most recent (applied before save and HTML;
-                          no trim setting yet for ytd — always shows every year present)
-build_comparisons → yoy/qoq/mom/wow/ytd pandas tables (qoq/mom/ytd: one row set per
-                     quarter/month-number or year-pair, chained across consecutive years)
-build_comparable_pairs → comparable_kpi_long + comparable_comparison_* (when enabled)
+trim_periods_to_recent → produces ctx.kpi_long_display (HTML rendering ONLY) trimmed to N most
+                          recent per period_type; ctx.kpi_long itself is NEVER trimmed — it's
+                          always the full computed window, which is what gets saved to Delta
+                          (no trim setting for ytd — always shows every year present)
+build_comparisons → yoy/ytd pandas tables (ytd: one row set per year-pair, chained across
+                     consecutive years). No qoq/mom/wow comparison table exists.
+build_comparable_pairs → comparable_kpi_long + comparable_comparison_ytd (when enabled; YTD-only,
+                          per-link pair restriction — see §3.7)
 build_scope_diff → scope_diff pandas table (defined vs score; only when run_scope_diff=True)
 save_outputs → kpi_long (incremental) → recompute comparisons from merged history → save all
 render_kpi_html → standalone HTML file
@@ -601,7 +604,7 @@ render_kpi_html → standalone HTML file
 | `initial save blocked` | Output tables already exist — switch to `incremental` or `full_refresh` |
 | Overlapping periods skipped | Expected with `incremental`; set `allow_overwrite_existing=True` to replace (see §3.6) |
 | Saved Delta stale vs notebook | Incremental skip left old rows on disk; enable overwrite or use `full_refresh` |
-| Comparisons skipped | Need ≥2 years (YoY/YTD), ≥2 years present for a given fiscal-quarter/month number (QoQ/MoM), or ≥2 fiscal weeks (WoW) in window |
+| Comparisons skipped | Need ≥2 years present in the run window (both YoY and YTD) |
 | Ensemble read fails on `attribute_name` not found | Speed-cluster table is **wide**-shaped (cluster already its own column) but `speed_cluster_format` is still `"long"` (default) — set `speed_cluster_format: "wide"` + `speed_cluster_value_col` |
 | Comparisons only show current run period | `recompute_comparisons_from_history` may be False or no prior partition found; ensure incremental save ran first |
 | Empty slice dimension | Column missing from products table or derived SQL failed validation |
@@ -615,9 +618,9 @@ render_kpi_html → standalone HTML file
 | `kpi_long is empty — run pipeline first` | Called `build_html_report` before `runner.run()`, or saved outputs missing in `html_only` mode |
 | HTML file not generated | `html_report.enabled` is False, or check the Cell 6 output for errors |
 | `html_only` fails on load | Output tables not at `.../run_date={OUTPUT_RUN_DATE}/` — run full save first or set `output.run_date` |
-| WoW looks wrong with sparse weeks | WoW compares last two weeks in `kpi_long`, not necessarily consecutive fiscal weeks |
-| QoQ/MoM/YTD show nothing for a slice | That quarter/month number (or the whole run) has fewer than 2 years present — degrades to "no comparison," not an error; the KPI value table still shows whatever data exists |
-| Comparable pairs skipped for a kind | Fewer than 2 periods/years available for that kind in the current run window AND no saved `comparable_kpi_long` history covering them yet |
+| Weekly tab looks wrong with sparse weeks | The display trim (`weekly_display_weeks`) shows the N most recent weeks present in `kpi_long`, not necessarily consecutive fiscal weeks. There's no WoW comparison table to be affected by this — QoQ/MoM/WoW aren't comparison kinds (see §3.6.1). |
+| YTD shows nothing for a slice | The whole run has fewer than 2 years present — degrades to "no comparison," not an error; the `"ytd"` period_type rows in `kpi_long` still show whatever data exists |
+| Comparable YTD skipped | Fewer than 2 years available in the current run window AND no saved `comparable_kpi_long` history covering them yet. Also skipped if `"ytd"` isn't in `comparisons.enabled` — comparable is YTD-only. |
 | Monthly tab missing from HTML | Monthly period type may not be present in `kpi_long` — check `Fiscal_Month` is derived (requires fiscal calendar upload or daily data with civil month fallback) |
 | YTD tab missing or empty from HTML | No `"ytd"` `period_type` rows in `kpi_long` — check `ctx.available_fiscal_quarters` isn't empty (would mean even the latest year's Q1 hasn't fully closed as of `as_of_date`) |
 | HTML report header shows wrong reporting-window start date | Header was reading `REPORT_START_DATE` (raw Jan-1-anchored) instead of `EFFECTIVE_REPORT_START_DATE` (incorporating `run_min_date`) — now fixed. If you set `run_min_date` to narrow the window, the header now correctly reflects the effective start. |
@@ -643,12 +646,12 @@ render_kpi_html → standalone HTML file
 | `lost_sales_weekly_base` | cached weekly lost-sales aggregates |
 | `kpi_long` | primary pandas output — FULL computed/loaded history, never trimmed; includes `period_type="ytd"` rows. This is what `save_outputs()` persists to Delta. |
 | `kpi_long_display` | trimmed-to-recent copy of `kpi_long` (per `html_report.*_display_*` settings), used ONLY by `render_kpi_html`. Set by `runner.build_comparisons()` / `run_html_only()` / `_recompute_comparisons_from_saved_history`; `render_kpi_html` falls back to `ctx.kpi_long` if this is `None`. |
-| `comparison_yoy/qoq/mom/wow/ytd` | full comparison long-format DataFrames (qoq/mom/ytd can carry multiple period-pair rows per metric) |
-| `yoy_display/qoq_display/mom_display/wow_display/ytd_display` | display-format DataFrames (overall); for qoq/mom/ytd this is just the **latest** consecutive-year pair — see `comparison_{kind}` for the full multi-pair detail |
+| `comparison_yoy/ytd` | full comparison long-format DataFrames (ytd can carry multiple year-pair rows per metric). No qoq/mom/wow — not comparison kinds. |
+| `yoy_display/ytd_display` | display-format DataFrames (overall); for ytd this is just the **latest** consecutive-year pair — see `comparison_ytd` for the full multi-pair detail |
 | `scope_diff` | defined vs score annual diff (when `run_scope_diff=True`) |
-| `comparable_kpi_long` | like-for-like kpi_long rows (when `comparable_pairs.enabled=True`) |
-| `comparable_comparison_yoy/qoq/mom/wow/ytd` | like-for-like comparison DataFrames |
-| `comparable_yoy_display/…/comparable_ytd_display` | like-for-like display DataFrames |
+| `comparable_kpi_long` | like-for-like per-link YTD rows, tagged with `link_prior_year`/`link_current_year` (when `comparable_pairs.enabled=True`) |
+| `comparable_comparison_ytd` | like-for-like YTD comparison DataFrame. Comparable is YTD-only — no comparable_comparison_yoy/qoq/mom/wow. |
+| `comparable_ytd_display` | like-for-like YTD display DataFrame (latest link) |
 | `save_plan` | SavePlan from last save_outputs call |
 
 For a quick distinct product/store count of the final scope (overall + per slice) without running the KPI step, use `runner.scope_debug_summary()` — see §3.3a.
@@ -680,7 +683,7 @@ For a quick distinct product/store count of the final scope (overall + per slice
 | `KPI_USE_HYBRID_SCOPE` | `scope.use_hybrid_scope` |
 | `KPI_RUN_SCOPE_DIFF` | `scope.run_scope_diff` |
 | `KPI_COMPARABLE_PAIRS` | `comparable_pairs.enabled` |
-| `KPI_COMPARISONS` | `comparisons.enabled` (comma-separated, e.g. `yoy,mom,ytd`) |
+| `KPI_COMPARISONS` | `comparisons.enabled` (comma-separated subset of `yoy,ytd`) |
 | `KPI_LOST_SALES_ENSEMBLE` | `lost_sales_ensemble.enabled` |
 | `KPI_LOST_SALES_SLOW_PATH` | `lost_sales_ensemble.slow_path_segments` (comma-separated) |
 | `KPI_SPEED_CLUSTER_PATH` | `lost_sales_ensemble.speed_cluster_path_segments` (comma-separated) |
@@ -732,10 +735,12 @@ For a quick distinct product/store count of the final scope (overall + per slice
 5. **E-com exclusion at metric compute only** — WOS/instock/lost_sales_pct/mean_stock exclude `excluded_store_ids`; scope and total sales include them. Never add e-com exclusion to scope building.
 6. **Scope adjustment data quality is caller's responsibility** — the toolkit maps columns, never validates or cleans input files.
 7. **Scope diff is optional and pre-adjustment** — `scope_diff` runs only when `scope.run_scope_diff=True`; compares defined-only vs score-only scope before manual additions/removals.
-8. **WoW with sparse weeks** — week-over-week uses the last two weeks present in `kpi_long`, not necessarily consecutive fiscal weeks when coverage is sparse.
+8. **Weekly tab display trim uses the last N weeks present in `kpi_long`**, not necessarily consecutive fiscal weeks when coverage is sparse. There is no WoW comparison table — QoQ/MoM/WoW are not comparison kinds at all (only `yoy`/`ytd` exist).
 9. **Incremental merge reads the latest prior partition** — not the current run's partition. History accumulates across runs as `run_date` advances with `as_of_date`.
-10. **QoQ/MoM are same-period-across-years, not sequential** — `qoq`/`mom` compare a given fiscal quarter/month number against the same number in the prior year(s), chained across every consecutive year pair present. They are NOT the prior calendar quarter/month. Use `yoy`/`ytd` for full-year-scale comparisons.
+10. **YTD is same-period-across-years, not sequential** — `ytd` compares a given year's elapsed window against the prior year's same window, chained across every consecutive year pair present. `yoy` is the last two full years. Neither has a sequential-quarter/month equivalent — that need is served by the Quarter/Monthly period tabs' plain value trends, not a comparison table.
 11. **YTD's elapsed window is fixed once per run, from the latest year** — `available_fiscal_quarters` only looks at whether each quarter's weeks are within `REPORT_END_DATE` for the latest year; it is not recomputed per year being compared, so every year sums the same quarter-set.
 12. **Speed-cluster table shape is config, not auto-detected** — `speed_cluster_format` must match the actual source table (`"long"` attribute_name/attribute_value vs `"wide"` a direct cluster column); pointing at the wrong shape fails loudly on read rather than silently returning nulls.
-10. **Comparisons recomputed from merged history** — under incremental, `comparison_*` tables reflect the full saved `kpi_long` history, not just the current run window.
+13. **Comparisons recomputed from merged history** — under incremental, `comparison_*` tables reflect the full saved `kpi_long` history, not just the current run window.
+14. **`ctx.kpi_long` is never trimmed; only `ctx.kpi_long_display` is** — the HTML display trim (`*_display_*` settings) must only ever write to `kpi_long_display`. Trimming `ctx.kpi_long` itself would silently truncate what `save_outputs()` persists, since `main.ipynb` calls `runner.run(save=False)` then `save_outputs(ctx, ...)` separately in a later cell — this was a real, previously-shipped bug.
+15. **Comparable-pairs (YTD-only) restriction is per consecutive-year link, not fixed across the whole window** — each link's pair universe comes from just that link's two years; a pair need not be present in every year in the run window to count for a link it's genuinely common to. This means the same year's metric value can legitimately differ across the two links it participates in — `comparable_kpi_long` rows carry `link_prior_year`/`link_current_year` specifically so incremental merge doesn't collide two links' rows for the same year under one key.
 11. **Dimension sources fail loudly** — unlike `slices.derived_dimensions` (skipped on error), an enabled `dimension_sources` entry always raises on bad path/column/expression.

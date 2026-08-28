@@ -6,7 +6,10 @@ import os
 from typing import Any, Callable, Dict, Optional
 
 # Period-over-period comparison kinds the pipeline can produce, in canonical order.
-COMPARISON_KINDS_ALL = ("yoy", "qoq", "mom", "wow", "ytd")
+# QoQ/MoM/WoW comparison tables were dropped for simplicity — the Quarter/Monthly/Weekly period
+# tabs already show recent-period value trends (see html_report's *_display_* settings), which
+# covers the same "recent quarters/months/weeks" need without a separate delta table.
+COMPARISON_KINDS_ALL = ("yoy", "ytd")
 
 CONFIG: Dict[str, Any] = {
     "customer": "your_client",
@@ -59,40 +62,35 @@ CONFIG: Dict[str, Any] = {
         "run_scope_diff": False,
     },
     "comparable_pairs": {
-        # GATED, opt-in like-for-like view. When enabled, the metrics are recomputed over ONLY
-        # the (product_id, store_id) pairs present across the periods a comparison touches, then
-        # compared — isolating like-for-like change from mix shifts (new/closed pairs):
-        #   * YoY / WoW: pairs present in BOTH of the last two compared periods.
-        #   * QoQ / MoM: same fiscal quarter/month across years (see "comparisons" below) — the
-        #       pair universe is pairs present in EVERY year that has that quarter/month number,
-        #       not just the two years in one chain link, so the universe stays fixed across links.
-        #   * YTD: pairs present in EVERY year's elapsed (fully-closed-quarters) window, same idea.
+        # GATED, opt-in like-for-like view, YTD-only (no comparable YoY). When enabled, YTD
+        # metrics are recomputed over only the (product_id, store_id) pairs present in BOTH years
+        # of each consecutive-year link, then compared — isolating like-for-like change from mix
+        # shifts (new/closed pairs). Each link gets its OWN pair universe: comparing 2025 YTD vs
+        # 2026 YTD uses pairs present in both 2025 and 2026; if 2024 is also in the window, the
+        # 2024-vs-2025 link independently uses pairs present in both 2024 and 2025 — a pair need
+        # not also be present in 2026 to count for that link.
         # Pair-level data exists only for the current run window, so a comparable comparison
-        # appears only when the run window SPANS enough periods (e.g. a multi-year window for
-        # comparable YoY/YTD, or a quarter/month number present in >=2 years for comparable QoQ/MoM).
+        # appears only when the run window spans at least 2 years.
         # Output:
-        #   * comparable_kpi_long Delta table (per-period comparable metrics + comparable_pair_count)
-        #   * comparable_comparison_{yoy,qoq,mom,wow,ytd} Delta tables
-        #   * a second "Comparable pairs" comparison table per panel in the HTML report
+        #   * comparable_kpi_long Delta table (per-link YTD metrics + comparable_pair_count)
+        #   * comparable_comparison_ytd Delta table
+        #   * a second "Comparable pairs" comparison table on the YTD panel in the HTML report
         "enabled": False,
     },
     "comparisons": {
         # Which period-over-period comparisons to compute, print, save, and render.
         # Choose any subset of:
         #   "yoy" (year-over-year, full calendar/fiscal year vs the prior full year)
-        #   "qoq" (same fiscal quarter across years, e.g. Q1-2026 vs Q1-2025 — NOT the prior
-        #       sequential quarter. One pill per quarter number present, chained across every
-        #       consecutive pair of years present for that quarter number, e.g. also emits
-        #       2025-Q1 vs 2024-Q1 if a third year exists.)
-        #   "mom" (same fiscal month across years, e.g. Jun-2026 vs Jun-2025 — NOT the prior
-        #       sequential month. Same one-pill-per-month-number, chained-consecutive-years pattern.)
         #   "ytd" (each year's elapsed window — only the fiscal quarters fully closed as of
         #       as_of_date for the latest year, that SAME quarter-set applied to every year —
         #       vs the prior year's same window, chained across consecutive years, e.g. 2026 YTD
         #       vs 2025 YTD and 2025 YTD vs 2024 YTD. Use this instead of "yoy" once the current
         #       year is only partially reported — "yoy" would otherwise compare a partial current
         #       year against a full prior year.)
-        #   "wow" (week-over-week, the prior sequential week)
+        # There is no separate QoQ/MoM/WoW comparison table — the Quarter/Monthly/Weekly period
+        # tabs (kpi_long, always produced in full) already show the N most recent quarters/
+        # months/weeks as plain value trends (see html_report's *_display_* settings), which
+        # covers "recent period" reporting without a delta table.
         # Only the selected kinds are computed, saved as comparison_{kind} Delta tables,
         # and shown in the HTML report; the others are skipped entirely. kpi_long (the raw
         # per-period metrics, including the "ytd" period type) is always produced in full
@@ -102,9 +100,9 @@ CONFIG: Dict[str, Any] = {
         # produce e.g. YoY. With output.save_mode="incremental" and
         # output.recompute_comparisons_from_history=True, the selected comparisons are
         # rebuilt from the FULL merged kpi_long (this run's window unioned onto prior saved
-        # runs), so prior years/quarters come from the saved data — no need to recompute
-        # them this run. (Same applies to comparable_pairs comparisons.)
-        "enabled": ["yoy", "qoq", "mom", "wow", "ytd"],
+        # runs), so prior years come from the saved data — no need to recompute them this run.
+        # (Same applies to comparable_pairs comparisons.)
+        "enabled": ["yoy", "ytd"],
     },
     "scope_adjustments": {
         # Optional manual adds/removes applied after hybrid/defined scope is built.
@@ -443,8 +441,8 @@ CONFIG: Dict[str, Any] = {
         "save_mode": "incremental",
         "allow_overwrite_existing": False,
         # Incremental only: after merging kpi_long onto the latest prior run_date partition,
-        # recompute YoY/QoQ/MoM/WoW/YTD from the full merged history (not just this run's window)
-        # and overwrite the comparison tables in this partition. Lets a single-week refresh still
+        # recompute YoY/YTD from the full merged history (not just this run's window) and
+        # overwrite the comparison tables in this partition. Lets a single-week refresh still
         # produce a YoY vs last year. Set False to keep comparisons scoped to the current run.
         "recompute_comparisons_from_history": True,
     },

@@ -40,30 +40,17 @@ class KPIContext:
     # to Delta and what comparisons are built from; only this display copy is ever narrowed.
     kpi_long_display: Optional[pd.DataFrame] = None
     comparison_yoy: Optional[pd.DataFrame] = None
-    comparison_qoq: Optional[pd.DataFrame] = None
-    comparison_mom: Optional[pd.DataFrame] = None
-    comparison_wow: Optional[pd.DataFrame] = None
     comparison_ytd: Optional[pd.DataFrame] = None
     scope_diff: Optional[pd.DataFrame] = None
 
-    # Gated comparable-pairs (like-for-like) outputs: metrics over only the (product_id, store_id)
-    # pairs present in BOTH compared periods. Populated only when comparable_pairs.enabled=True.
+    # Gated comparable-pairs (like-for-like) output: YTD only, metrics over only the
+    # (product_id, store_id) pairs present in BOTH years of each consecutive-year link.
+    # Populated only when comparable_pairs.enabled=True.
     comparable_kpi_long: Optional[pd.DataFrame] = None
-    comparable_comparison_yoy: Optional[pd.DataFrame] = None
-    comparable_comparison_qoq: Optional[pd.DataFrame] = None
-    comparable_comparison_mom: Optional[pd.DataFrame] = None
-    comparable_comparison_wow: Optional[pd.DataFrame] = None
     comparable_comparison_ytd: Optional[pd.DataFrame] = None
 
     yoy_display: Optional[pd.DataFrame] = None
-    qoq_display: Optional[pd.DataFrame] = None
-    mom_display: Optional[pd.DataFrame] = None
-    wow_display: Optional[pd.DataFrame] = None
     ytd_display: Optional[pd.DataFrame] = None
-    comparable_yoy_display: Optional[pd.DataFrame] = None
-    comparable_qoq_display: Optional[pd.DataFrame] = None
-    comparable_mom_display: Optional[pd.DataFrame] = None
-    comparable_wow_display: Optional[pd.DataFrame] = None
     comparable_ytd_display: Optional[pd.DataFrame] = None
     save_plan: Optional[Any] = None
 

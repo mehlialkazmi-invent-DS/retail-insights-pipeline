@@ -1,10 +1,8 @@
-"""YoY / QoQ / MoM / WoW / YTD comparison tables (overall + slice dimensions) and defined-vs-score diff.
+"""YoY / YTD comparison tables (overall + slice dimensions) and defined-vs-score diff.
 
-QoQ and MoM compare the SAME fiscal quarter/month across years (e.g. Q1-2026 vs Q1-2025), chained
-across every consecutive pair of years present (also 2025-Q1 vs 2024-Q1 if a third year exists) —
-not the sequential prior-period comparison their names might suggest elsewhere. YTD compares each
-year's elapsed (fully-closed-quarters) window against the prior year's same window, chained the same
-way. YoY (full year) and WoW are unchanged: always just the latest two periods.
+YoY compares the latest two full years present. YTD compares each year's elapsed
+(fully-closed-quarters) window against the prior year's same window, chained across every
+consecutive pair of years present (e.g. also 2025 YTD vs 2024 YTD if a third year exists).
 """
 
 from __future__ import annotations
@@ -136,34 +134,7 @@ def _prepare_period_tables_for_slice(
         ytd["Year"] = pd.Series(dtype=int)
     ytd = ytd[["Year", "dimension_value"] + metric_cols]
 
-    quarter = sub[sub["period_type"] == "quarter"].copy()
-    quarter["Year"] = quarter["period"].str.split("-").str[0].astype(int)
-    quarter["Fiscal_Quarter"] = quarter["period"].str.extract(r"Q(\d+)", expand=False).astype(int)
-    quarter = quarter[["Year", "Fiscal_Quarter", "dimension_value"] + metric_cols]
-
-    monthly = sub[sub["period_type"] == "monthly"].copy()
-    if not monthly.empty:
-        monthly["Year"] = monthly["period"].str[:4].astype(int)
-        monthly["Fiscal_Month"] = monthly["period"].str[5:].astype(int)
-    else:
-        monthly["Year"] = pd.Series(dtype=int)
-        monthly["Fiscal_Month"] = pd.Series(dtype=int)
-    monthly = monthly[["Year", "Fiscal_Month", "dimension_value"] + metric_cols]
-
-    weekly = sub[sub["period_type"] == "weekly"].rename(columns={"period": "Year_Week"})
-    week_order = (
-        ctx.fiscal_week.select("Year_Week", "week_start_date", "Year", "Week", "Fiscal_Quarter")
-        .toPandas()
-        .sort_values("week_start_date")
-    )
-    weekly = (
-        weekly[["Year_Week", "dimension_value"] + metric_cols]
-        .merge(week_order, on="Year_Week", how="left")
-        .sort_values(["dimension_value", "week_start_date"])
-        .reset_index(drop=True)
-    )
-
-    return {"annual": annual, "ytd": ytd, "quarter": quarter, "monthly": monthly, "weekly": weekly}
+    return {"annual": annual, "ytd": ytd}
 
 
 def _series_groups(df: pd.DataFrame, dimension: str) -> List[Tuple[str, pd.DataFrame]]:
@@ -180,7 +151,7 @@ def _series_groups(df: pd.DataFrame, dimension: str) -> List[Tuple[str, pd.DataF
 def _consecutive_year_pairs(df: pd.DataFrame) -> List[Tuple[pd.Series, pd.Series]]:
     """Every consecutive pair of years present in ``df`` (must have a ``Year`` column), sorted
     ascending. Empty if fewer than 2 years are present — the shared "gracefully skip" guard for
-    a single-year (or single quarter-number/month-number) window."""
+    a single-year window."""
     ordered = df.sort_values("Year").reset_index(drop=True)
     return [(ordered.iloc[i], ordered.iloc[i + 1]) for i in range(len(ordered) - 1)]
 
@@ -227,72 +198,6 @@ def yoy_comparison_long(
     )
 
 
-def qoq_comparison_long(
-    ctx: KPIContext,
-    quarter: pd.DataFrame,
-    metrics: Sequence[str],
-    dimension: str,
-    dimension_value: str,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Same fiscal quarter across years (e.g. Q1-2026 vs Q1-2025), one pill per Fiscal_Quarter
-    number present, each chained across every consecutive pair of years present for that quarter
-    number. A quarter number with fewer than 2 years is skipped (no comparison for it)."""
-    pairs_with_display: List[Tuple[Any, pd.DataFrame, pd.DataFrame]] = []
-    for q_num in sorted(quarter["Fiscal_Quarter"].dropna().unique()):
-        grp = quarter[quarter["Fiscal_Quarter"] == q_num]
-        for prior, current in _consecutive_year_pairs(grp):
-            prior_label = f"{int(prior['Year'])}-Q{int(q_num)}"
-            current_label = f"{int(current['Year'])}-Q{int(q_num)}"
-            disp, save = build_comparison_long(
-                ctx,
-                prior_label,
-                current_label,
-                f"QoQ {current_label}",
-                prior.to_dict(),
-                current.to_dict(),
-                metrics,
-                "qoq",
-                dimension,
-                dimension_value,
-            )
-            if not save.empty:
-                pairs_with_display.append(((int(current["Year"]), int(q_num)), disp, save))
-    return _concat_pair_comparisons(pairs_with_display)
-
-
-def mom_comparison_long(
-    ctx: KPIContext,
-    monthly: pd.DataFrame,
-    metrics: Sequence[str],
-    dimension: str,
-    dimension_value: str,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Same fiscal month across years (e.g. Jun-2026 vs Jun-2025), one pill per Fiscal_Month
-    number present, each chained across every consecutive pair of years present for that month
-    number. A month number with fewer than 2 years is skipped (no comparison for it)."""
-    pairs_with_display: List[Tuple[Any, pd.DataFrame, pd.DataFrame]] = []
-    for m_num in sorted(monthly["Fiscal_Month"].dropna().unique()):
-        grp = monthly[monthly["Fiscal_Month"] == m_num]
-        for prior, current in _consecutive_year_pairs(grp):
-            prior_label = f"{int(prior['Year'])}-{int(m_num):02d}"
-            current_label = f"{int(current['Year'])}-{int(m_num):02d}"
-            disp, save = build_comparison_long(
-                ctx,
-                prior_label,
-                current_label,
-                f"MoM {current_label}",
-                prior.to_dict(),
-                current.to_dict(),
-                metrics,
-                "mom",
-                dimension,
-                dimension_value,
-            )
-            if not save.empty:
-                pairs_with_display.append(((int(current["Year"]), int(m_num)), disp, save))
-    return _concat_pair_comparisons(pairs_with_display)
-
-
 def ytd_comparison_long(
     ctx: KPIContext,
     ytd: pd.DataFrame,
@@ -323,37 +228,6 @@ def ytd_comparison_long(
     return _concat_pair_comparisons(pairs_with_display)
 
 
-def _week_metric_values_from_row(week_row: pd.Series, metrics: Sequence[str]) -> Dict[str, object]:
-    return {metric: week_row.get(metric) for metric in metrics}
-
-
-def wow_comparison_long(
-    ctx: KPIContext,
-    weekly: pd.DataFrame,
-    metrics: Sequence[str],
-    dimension: str,
-    dimension_value: str,
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    if len(weekly) < 2:
-        return pd.DataFrame(), pd.DataFrame()
-    prior, current = weekly.iloc[-2], weekly.iloc[-1]
-    prior_label, current_label = str(prior["Year_Week"]), str(current["Year_Week"])
-    prior_vals = _week_metric_values_from_row(prior, metrics)
-    current_vals = _week_metric_values_from_row(current, metrics)
-    return build_comparison_long(
-        ctx,
-        prior_label,
-        current_label,
-        f"WoW {current_label}",
-        prior_vals,
-        current_vals,
-        metrics,
-        "wow",
-        dimension,
-        dimension_value,
-    )
-
-
 def _build_comparison_for_dimension(
     ctx: KPIContext,
     dimension: str,
@@ -367,18 +241,9 @@ def _build_comparison_for_dimension(
     if comparison_kind == "yoy":
         compare_fn = yoy_comparison_long
         period_df, key_cols = tables["annual"], ["Year"]
-    elif comparison_kind == "ytd":
+    else:
         compare_fn = ytd_comparison_long
         period_df, key_cols = tables["ytd"], ["Year"]
-    elif comparison_kind == "qoq":
-        compare_fn = qoq_comparison_long
-        period_df, key_cols = tables["quarter"], ["Year", "Fiscal_Quarter"]
-    elif comparison_kind == "mom":
-        compare_fn = mom_comparison_long
-        period_df, key_cols = tables["monthly"], ["Year", "Fiscal_Month"]
-    else:
-        compare_fn = wow_comparison_long
-        period_df, key_cols = tables["weekly"], ["Year_Week"]
 
     for dval, grp in _series_groups(period_df, dimension):
         cols = key_cols + metric_cols
@@ -395,15 +260,12 @@ def _build_comparison_for_dimension(
 # kind -> (save attribute on ctx, overall-display attribute on ctx)
 _KIND_CTX_ATTRS = {
     "yoy": ("comparison_yoy", "yoy_display"),
-    "qoq": ("comparison_qoq", "qoq_display"),
-    "mom": ("comparison_mom", "mom_display"),
-    "wow": ("comparison_wow", "wow_display"),
     "ytd": ("comparison_ytd", "ytd_display"),
 }
 
 
 def _selected_comparison_kinds(ctx: KPIContext) -> List[str]:
-    """Comparison kinds to build, in canonical order (defaults to all four)."""
+    """Comparison kinds to build, in canonical order (defaults to both)."""
     selected = set(ctx.settings.get("COMPARISON_KINDS") or _KIND_CTX_ATTRS.keys())
     return [k for k in _KIND_CTX_ATTRS if k in selected]
 
@@ -438,9 +300,6 @@ def build_comparisons(ctx: KPIContext) -> None:
         "comparisons:",
         f"kinds={kinds}",
         f"YoY rows={len(ctx.comparison_yoy)}",
-        f"QoQ rows={len(ctx.comparison_qoq)}",
-        f"MoM rows={len(ctx.comparison_mom)}",
-        f"WoW rows={len(ctx.comparison_wow)}",
         f"YTD rows={len(ctx.comparison_ytd)}",
         "| slice dimensions:",
         slice_dims or "(none)",

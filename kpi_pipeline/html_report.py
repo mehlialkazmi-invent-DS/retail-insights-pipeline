@@ -6,12 +6,13 @@ Entry point
 
 Produces a self-contained, offline HTML file with:
   * Executive-style header (client, reporting window, scope, slices)
-  * CSS-only major tabs: Annual / Quarter / Weekly / Metric Details
+  * CSS-only major tabs: Annual / YTD / Quarter / Monthly / Weekly / Metric Details
   * Within each period tab: dimension tabs (Overall + every slice column in data)
   * Within each slice dimension: vertical value tabs (one KPI panel per value)
-  * Weekly tab columns limited to the most recent N fiscal weeks (configurable, default 5)
+  * Quarter/Monthly/Weekly tabs are value trends only, limited to the most recent N periods
+    (configurable, default 5) — no comparison table on these tabs
   * KPI tables with category row coloring (revenue / service / inventory / scale)
-  * Comparison section per value panel (YoY / QoQ / WoW)
+  * Comparison section on the Annual (YoY) and YTD panels only
   * Metric Details tab: definition, store scope, and formula for every active metric
 
 Slice dimensions and values are inferred from ``kpi_long`` — no hard-coded brand logic.
@@ -785,10 +786,9 @@ def _comparison_html(
 ) -> str:
     """Render one comparison mini-table per distinct (prior_period, current_period) pair present.
 
-    YoY/WoW always have exactly one pair, so this renders identically to before. QoQ/MoM/YTD can
-    carry multiple pairs (one per quarter/month number, or one per consecutive year-pair) — each
-    gets its own stacked mini-table, labeled with its own period pair, in the order they appear in
-    ``comp_df`` (ascending by year, then by quarter/month number).
+    YoY always has exactly one pair. YTD can carry multiple pairs (one per consecutive year-pair
+    present) — each gets its own stacked mini-table, labeled with its own period pair, in
+    ascending year order.
     """
     if comp_df is None or comp_df.empty:
         return ""
@@ -1058,7 +1058,7 @@ def _report_info_html(
 
 _PERIOD_ORDER = ["annual", "ytd", "quarter", "monthly", "weekly"]
 _PERIOD_LABELS = {"annual": "Annual", "ytd": "YTD", "quarter": "Quarter", "monthly": "Monthly", "weekly": "Weekly"}
-_PERIOD_COMP_LABEL = {"annual": "YoY", "ytd": "YTD", "quarter": "QoQ", "monthly": "MoM", "weekly": "WoW"}
+_PERIOD_COMP_LABEL = {"annual": "YoY", "ytd": "YTD"}
 
 _TURNOVER_PERIOD_LABELS = {
     "annual": "Annual Inventory Turnover Rate",
@@ -1131,26 +1131,27 @@ def render_kpi_html(
     if not period_types:
         raise ValueError("kpi_long contains no recognised period_types (annual/quarter/monthly/weekly).")
 
+    # Quarter/Monthly/Weekly tabs show the raw value trend only (no comparison table) — the
+    # display-trimmed period tabs already cover "recent quarters/months/weeks" reporting.
     comp_map: Dict[str, Optional[pd.DataFrame]] = {
         "annual": ctx.comparison_yoy,
         "ytd": getattr(ctx, "comparison_ytd", None),
-        "quarter": ctx.comparison_qoq,
-        "monthly": getattr(ctx, "comparison_mom", None),
-        "weekly": ctx.comparison_wow,
+        "quarter": None,
+        "monthly": None,
+        "weekly": None,
     }
 
-    # Gated comparable (like-for-like) comparison tables — rendered as a second comparison table
-    # per panel when comparable_pairs was enabled and data is present (else _comparison_html is a
-    # no-op on the empty/None frame).
+    # Gated comparable (like-for-like) comparison table — YTD-only — rendered as a second
+    # comparison table on the YTD panel when comparable_pairs was enabled and data is present
+    # (else _comparison_html is a no-op on the empty/None frame).
     comparable_comp_map: Dict[str, Optional[pd.DataFrame]] = {
-        "annual": getattr(ctx, "comparable_comparison_yoy", None),
+        "annual": None,
         "ytd": getattr(ctx, "comparable_comparison_ytd", None),
-        "quarter": getattr(ctx, "comparable_comparison_qoq", None),
-        "monthly": getattr(ctx, "comparable_comparison_mom", None),
-        "weekly": getattr(ctx, "comparable_comparison_wow", None),
+        "quarter": None,
+        "monthly": None,
+        "weekly": None,
     }
-    _COMPARABLE_LABELS = {"annual": "Comparable YoY", "ytd": "Comparable YTD", "quarter": "Comparable QoQ",
-                          "monthly": "Comparable MoM", "weekly": "Comparable WoW"}
+    _COMPARABLE_LABELS = {"ytd": "Comparable YTD"}
 
     week_start_by_period: Dict[str, Any] = {}
     if getattr(ctx, "fiscal_week", None) is not None:

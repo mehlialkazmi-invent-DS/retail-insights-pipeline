@@ -10,13 +10,13 @@ Incremental merge reads the **latest existing run_date partition on or before** 
 written — not the partition being written — so weekly runs (whose ``run_date`` advances with
 ``as_of_date``) accumulate history instead of writing isolated single-window snapshots. Each
 run_date partition is therefore a self-contained snapshot of the full merged history as of that
-run. Comparison tables are recomputed from that merged ``kpi_long`` so YoY/QoQ/MoM/WoW reflect the
-full saved history, not just the current run window.
+run. Comparison tables are recomputed from that merged ``kpi_long`` so YoY/YTD reflect the full
+saved history, not just the current run window.
 
-The same pattern applies to comparable (like-for-like) tables: ``comparable_kpi_long`` is merged
-incrementally across runs just like ``kpi_long``, and comparable comparison tables are then
-recomputed from the merged ``comparable_kpi_long``. A single-week refresh therefore produces
-comparable YoY/QoQ/MoM/WoW relative to the full saved history.
+The same pattern applies to the comparable (like-for-like) YTD table: ``comparable_kpi_long`` is
+merged incrementally across runs just like ``kpi_long``, and ``comparable_comparison_ytd`` is then
+recomputed from the merged ``comparable_kpi_long``. A single-week refresh therefore produces a
+comparable YTD comparison relative to the full saved history. Comparable is YTD-only.
 """
 
 from __future__ import annotations
@@ -72,39 +72,32 @@ class SavePlan:
 TABLE_ROW_KEYS: Dict[str, Sequence[str]] = {
     "kpi_long": ("period_type", "period", "dimension", "dimension_value"),
     "comparison_yoy": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
-    "comparison_qoq": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
-    "comparison_mom": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
-    "comparison_wow": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
     "comparison_ytd": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
     "scope_diff": ("Year", "metric"),
-    "comparable_kpi_long": ("comparison_type", "period_type", "period", "dimension", "dimension_value"),
-    "comparable_comparison_yoy": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
-    "comparable_comparison_qoq": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
-    "comparable_comparison_mom": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
-    "comparable_comparison_wow": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
+    # link_prior_year/link_current_year included: the same year's row can legitimately carry a
+    # different metric value per link it participates in (each link has its own pair
+    # restriction), so the link identifies which occurrence a given row is.
+    "comparable_kpi_long": (
+        "comparison_type", "period_type", "period", "dimension", "dimension_value",
+        "link_prior_year", "link_current_year",
+    ),
     "comparable_comparison_ytd": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
 }
 
 # Comparison tables are a deterministic function of the saved kpi_long snapshot. They are
 # recomputed from the merged kpi_long and overwritten wholesale into the current run_date
 # partition (never key-merged), so the comparisons in a partition always match its kpi_long.
-COMPARISON_TABLES: Tuple[str, ...] = ("comparison_yoy", "comparison_qoq", "comparison_mom", "comparison_wow", "comparison_ytd")
+COMPARISON_TABLES: Tuple[str, ...] = ("comparison_yoy", "comparison_ytd")
 
 # comparable_kpi_long is period-grain (same shape as kpi_long) and is merged incrementally across
-# runs. Comparable comparison tables are then recomputed from the merged comparable_kpi_long —
-# the same pattern as regular comparisons from kpi_long.
-COMPARABLE_COMPARISON_TABLES: Tuple[str, ...] = (
-    "comparable_comparison_yoy",
-    "comparable_comparison_qoq",
-    "comparable_comparison_mom",
-    "comparable_comparison_wow",
-    "comparable_comparison_ytd",
-)
+# runs. The comparable comparison table is then recomputed from the merged comparable_kpi_long —
+# the same pattern as regular comparisons from kpi_long. Comparable is YTD-only.
+COMPARABLE_COMPARISON_TABLES: Tuple[str, ...] = ("comparable_comparison_ytd",)
 
 
 def _selected_comparison_kinds(ctx: KPIContext) -> List[str]:
-    """Comparison kinds selected via config (defaults to all five), in canonical order."""
-    all_kinds = ("yoy", "qoq", "mom", "wow", "ytd")
+    """Comparison kinds selected via config (defaults to both), in canonical order."""
+    all_kinds = ("yoy", "ytd")
     selected = set(ctx.settings.get("COMPARISON_KINDS") or all_kinds)
     return [k for k in all_kinds if k in selected]
 
@@ -113,17 +106,17 @@ def _output_frames(ctx: KPIContext) -> Dict[str, pd.DataFrame]:
     """Tables to persist, in save order.
 
     Only the comparison kinds selected via ``comparisons.enabled`` are persisted; the others
-    are skipped entirely. Comparable tables are included only when comparable_pairs is gated on.
+    are skipped entirely. Comparable tables (YTD-only) are included only when comparable_pairs
+    is gated on AND "ytd" is among the selected kinds.
     """
     kinds = _selected_comparison_kinds(ctx)
     frames: Dict[str, pd.DataFrame] = {"kpi_long": ctx.kpi_long}
     for kind in kinds:
         frames[f"comparison_{kind}"] = getattr(ctx, f"comparison_{kind}")
     frames["scope_diff"] = ctx.scope_diff
-    if ctx.settings.get("COMPARABLE_PAIRS_ENABLED", False):
+    if ctx.settings.get("COMPARABLE_PAIRS_ENABLED", False) and "ytd" in kinds:
         frames["comparable_kpi_long"] = ctx.comparable_kpi_long
-        for kind in kinds:
-            frames[f"comparable_comparison_{kind}"] = getattr(ctx, f"comparable_comparison_{kind}")
+        frames["comparable_comparison_ytd"] = ctx.comparable_comparison_ytd
     return frames
 
 
@@ -382,7 +375,7 @@ def build_save_plan(ctx: KPIContext, fund_paste) -> SavePlan:
 
     if recompute:
         plan.warnings.append(
-            "Comparison tables (YoY/QoQ/MoM/WoW) will be recomputed from the merged kpi_long history "
+            "Comparison tables (YoY/YTD) will be recomputed from the merged kpi_long history "
             "and overwritten in this run_date partition (full saved history, not just this run window)."
         )
     if recompute_comparable:
@@ -464,17 +457,11 @@ def save_pandas_table(
 _SAVED_OUTPUT_TABLES = {
     "kpi_long": "kpi_long",
     "comparison_yoy": "comparison_yoy",
-    "comparison_qoq": "comparison_qoq",
-    "comparison_mom": "comparison_mom",
-    "comparison_wow": "comparison_wow",
     "comparison_ytd": "comparison_ytd",
     "scope_diff": "scope_diff",
     # Comparable (like-for-like) tables — optional; absent unless comparable_pairs was enabled.
+    # Comparable is YTD-only.
     "comparable_kpi_long": "comparable_kpi_long",
-    "comparable_comparison_yoy": "comparable_comparison_yoy",
-    "comparable_comparison_qoq": "comparable_comparison_qoq",
-    "comparable_comparison_mom": "comparable_comparison_mom",
-    "comparable_comparison_wow": "comparable_comparison_wow",
     "comparable_comparison_ytd": "comparable_comparison_ytd",
 }
 
@@ -528,9 +515,9 @@ def _recompute_comparisons_from_saved_history(ctx: KPIContext, fund_paste) -> No
 
     After an incremental save, the current run_date partition holds the full merged history
     (this run's window unioned onto the latest prior partition). Reloading it and rebuilding
-    comparisons makes YoY/QoQ/MoM/WoW reflect the full saved history rather than only the
-    current run window. ``ctx.comparison_*`` and the overall display tables are updated in place
-    so the notebook comparison cells and the HTML report also reflect the merged history.
+    comparisons makes YoY/YTD reflect the full saved history rather than only the current run
+    window. ``ctx.comparison_*`` and the overall display tables are updated in place so the
+    notebook comparison cells and the HTML report also reflect the merged history.
 
     ``ctx.kpi_long`` is set to the full merged frame (not trimmed) — the kpi_long Delta save
     already happened before this runs, so this only affects what the notebook/HTML sees
@@ -552,19 +539,15 @@ def _recompute_comparisons_from_saved_history(ctx: KPIContext, fund_paste) -> No
 
 
 def _recompute_comparable_comparisons_from_saved_history(ctx: KPIContext, fund_paste) -> None:
-    """Re-read the merged comparable_kpi_long and recompute comparable comparison tables from it.
+    """Re-read the merged comparable_kpi_long and recompute the comparable YTD comparison from it.
 
     Mirrors ``_recompute_comparisons_from_saved_history``: after ``comparable_kpi_long`` has been
-    incrementally merged onto prior history, reload it and rebuild each comparable comparison so the
-    saved comparable numbers reflect the full accumulated history, not just the current run window.
-    ``ctx.comparable_comparison_*`` and display tables are updated in place.
+    incrementally merged onto prior history, reload it and rebuild the comparison from every
+    link present (each link's rows already carry that link's own pair-restricted metric values,
+    tagged via link_prior_year/link_current_year) so the saved comparable numbers reflect the
+    full accumulated history, not just the current run window. Comparable is YTD-only.
     """
-    from kpi_pipeline.comparable import (
-        _COMPARABLE_KINDS,
-        _KIND_DISPLAY_ATTR,
-        _KIND_SAVE_ATTR,
-        _comparisons_from_rows,
-    )
+    from kpi_pipeline.comparable import rebuild_comparable_ytd_from_saved_rows
 
     output_root = ctx.settings["PATH_OUTPUT_ROOT"]
     run_date = ctx.settings["OUTPUT_RUN_DATE"]
@@ -576,16 +559,11 @@ def _recompute_comparable_comparisons_from_saved_history(ctx: KPIContext, fund_p
 
     ctx.comparable_kpi_long = merged
 
-    selected_kinds = set(_selected_comparison_kinds(ctx))
-    for kind, _period_name, _ in _COMPARABLE_KINDS:
-        if kind not in selected_kinds:
-            continue
-        kind_rows = merged[merged["comparison_type"] == kind].drop(columns=["comparison_type"], errors="ignore")
-        if kind_rows.empty:
-            continue
-        display, save = _comparisons_from_rows(ctx, kind, kind_rows)
-        setattr(ctx, _KIND_SAVE_ATTR[kind], save)
-        setattr(ctx, _KIND_DISPLAY_ATTR[kind], display)
+    if "ytd" not in set(_selected_comparison_kinds(ctx)):
+        return
+    display, save = rebuild_comparable_ytd_from_saved_rows(ctx, merged)
+    ctx.comparable_comparison_ytd = save
+    ctx.comparable_ytd_display = display
 
     print("recomputed comparable comparisons from merged comparable_kpi_long history (run_date=%s)" % run_date)
 
@@ -666,9 +644,9 @@ def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
         _save(f"comparison_{kind}", getattr(ctx, f"comparison_{kind}"), comparison_mode)
     _save("scope_diff", ctx.scope_diff, save_mode)
 
-    # 4. Comparable (like-for-like) tables: comparable_kpi_long merges incrementally like kpi_long;
-    #    comparable comparison tables are then recomputed from the merged comparable_kpi_long.
-    if comparable_enabled:
+    # 4. Comparable (like-for-like) tables (YTD-only): comparable_kpi_long merges incrementally
+    #    like kpi_long; comparable_comparison_ytd is then recomputed from the merged comparable_kpi_long.
+    if comparable_enabled and "ytd" in selected_kinds:
         _save("comparable_kpi_long", ctx.comparable_kpi_long, save_mode)
 
         comparable_comp_mode = save_mode
@@ -676,12 +654,7 @@ def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
             _recompute_comparable_comparisons_from_saved_history(ctx, fund_paste)
             comparable_comp_mode = "full_refresh"
 
-        for kind in selected_kinds:
-            _save(
-                f"comparable_comparison_{kind}",
-                getattr(ctx, f"comparable_comparison_{kind}"),
-                comparable_comp_mode,
-            )
+        _save("comparable_comparison_ytd", ctx.comparable_comparison_ytd, comparable_comp_mode)
 
     ctx.save_plan = plan
     return plan
