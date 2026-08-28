@@ -75,18 +75,20 @@ TABLE_ROW_KEYS: Dict[str, Sequence[str]] = {
     "comparison_qoq": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
     "comparison_mom": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
     "comparison_wow": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
+    "comparison_ytd": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
     "scope_diff": ("Year", "metric"),
     "comparable_kpi_long": ("comparison_type", "period_type", "period", "dimension", "dimension_value"),
     "comparable_comparison_yoy": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
     "comparable_comparison_qoq": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
     "comparable_comparison_mom": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
     "comparable_comparison_wow": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
+    "comparable_comparison_ytd": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
 }
 
 # Comparison tables are a deterministic function of the saved kpi_long snapshot. They are
 # recomputed from the merged kpi_long and overwritten wholesale into the current run_date
 # partition (never key-merged), so the comparisons in a partition always match its kpi_long.
-COMPARISON_TABLES: Tuple[str, ...] = ("comparison_yoy", "comparison_qoq", "comparison_mom", "comparison_wow")
+COMPARISON_TABLES: Tuple[str, ...] = ("comparison_yoy", "comparison_qoq", "comparison_mom", "comparison_wow", "comparison_ytd")
 
 # comparable_kpi_long is period-grain (same shape as kpi_long) and is merged incrementally across
 # runs. Comparable comparison tables are then recomputed from the merged comparable_kpi_long —
@@ -96,13 +98,14 @@ COMPARABLE_COMPARISON_TABLES: Tuple[str, ...] = (
     "comparable_comparison_qoq",
     "comparable_comparison_mom",
     "comparable_comparison_wow",
+    "comparable_comparison_ytd",
 )
 COMPARABLE_TABLES: Tuple[str, ...] = ("comparable_kpi_long",) + COMPARABLE_COMPARISON_TABLES
 
 
 def _selected_comparison_kinds(ctx: KPIContext) -> List[str]:
-    """Comparison kinds selected via config (defaults to all four), in canonical order."""
-    all_kinds = ("yoy", "qoq", "mom", "wow")
+    """Comparison kinds selected via config (defaults to all five), in canonical order."""
+    all_kinds = ("yoy", "qoq", "mom", "wow", "ytd")
     selected = set(ctx.settings.get("COMPARISON_KINDS") or all_kinds)
     return [k for k in all_kinds if k in selected]
 
@@ -465,6 +468,7 @@ _SAVED_OUTPUT_TABLES = {
     "comparison_qoq": "comparison_qoq",
     "comparison_mom": "comparison_mom",
     "comparison_wow": "comparison_wow",
+    "comparison_ytd": "comparison_ytd",
     "scope_diff": "scope_diff",
     # Comparable (like-for-like) tables — optional; absent unless comparable_pairs was enabled.
     "comparable_kpi_long": "comparable_kpi_long",
@@ -472,6 +476,7 @@ _SAVED_OUTPUT_TABLES = {
     "comparable_comparison_qoq": "comparable_comparison_qoq",
     "comparable_comparison_mom": "comparable_comparison_mom",
     "comparable_comparison_wow": "comparable_comparison_wow",
+    "comparable_comparison_ytd": "comparable_comparison_ytd",
 }
 
 
@@ -527,6 +532,10 @@ def _recompute_comparisons_from_saved_history(ctx: KPIContext, fund_paste) -> No
     comparisons makes YoY/QoQ/MoM/WoW reflect the full saved history rather than only the
     current run window. ``ctx.comparison_*`` and the overall display tables are updated in place
     so the notebook comparison cells and the HTML report also reflect the merged history.
+
+    ``ctx.kpi_long`` is set to the full merged frame (not trimmed) — the kpi_long Delta save
+    already happened before this runs, so this only affects what the notebook/HTML sees
+    afterward. ``ctx.kpi_long_display`` gets the trimmed-for-HTML copy instead.
     """
     from kpi_pipeline.comparisons import build_comparisons
     from kpi_pipeline.kpi_long import trim_periods_to_recent
@@ -539,7 +548,7 @@ def _recompute_comparisons_from_saved_history(ctx: KPIContext, fund_paste) -> No
 
     ctx.kpi_long = merged
     build_comparisons(ctx)
-    ctx.kpi_long = trim_periods_to_recent(merged, ctx)
+    ctx.kpi_long_display = trim_periods_to_recent(merged, ctx)
     print("recomputed comparisons from merged kpi_long history (run_date=%s)" % run_date)
 
 

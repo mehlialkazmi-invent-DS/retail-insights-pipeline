@@ -55,6 +55,32 @@ def _build_fiscal_week_frame(daily_grain: DataFrame) -> DataFrame:
     return frame
 
 
+def _compute_available_fiscal_quarters(ctx: KPIContext) -> List[int]:
+    """Fiscal-quarter numbers fully elapsed (as of REPORT_END_DATE) for the latest year in the
+    report window. Applied identically to every year for the "ytd" period (see kpi_long.py) so
+    the YTD comparison stays apples-to-apples once the current year is only partially reported —
+    e.g. if only Q1 has fully closed for the latest year, YTD sums Q1 for every year, not the
+    calendar-to-date weeks of an in-progress Q2.
+
+    Handles a single-year or single-quarter report window the same way — it only looks at the
+    latest year's own weeks, so nothing else needs to exist.
+    """
+    report_end = ctx.settings["REPORT_END_DATE"]
+    fw = ctx.fiscal_week
+    latest_year = fw.agg(F.max("Year")).collect()[0][0]
+    quarter_ends = (
+        fw.filter(F.col("Year") == latest_year)
+        .groupBy("Fiscal_Quarter")
+        .agg(F.max("week_end_date").alias("quarter_end"))
+        .collect()
+    )
+    return sorted(
+        int(row["Fiscal_Quarter"])
+        for row in quarter_ends
+        if row["quarter_end"] is not None and row["quarter_end"] <= report_end
+    )
+
+
 def build_fiscal_cal_and_week_from_upload(
     ctx: KPIContext,
     path: str,
@@ -242,6 +268,18 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
             f"{null_quarter_weeks} fiscal week(s) in the report window have a null Fiscal_Quarter "
             "(unparseable 'Quarter' value). Fix the fiscal calendar / Quarter column before running."
         )
+
+    null_month_weeks = ctx.fiscal_week.filter(F.col("Fiscal_Month").isNull()).count()
+    if null_month_weeks > 0:
+        raise ValueError(
+            f"{null_month_weeks} fiscal week(s) in the report window have a null Fiscal_Month "
+            "(missing/unparseable 'Month' value in the fiscal calendar upload for that week). "
+            "Extend fiscal_cal's Month column through the report window before running — "
+            "otherwise those weeks silently drop out of the monthly rollup."
+        )
+
+    ctx.available_fiscal_quarters = _compute_available_fiscal_quarters(ctx)
+    print("available (fully elapsed) fiscal quarters for YTD:", ctx.available_fiscal_quarters)
 
     products_raw = ctx.spark.read.format("delta").load(s["PATH_PRODUCTS"])
     slice_dims = s["SLICE_DIMENSIONS"]

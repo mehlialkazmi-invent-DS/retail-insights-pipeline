@@ -4,7 +4,7 @@
 
 # Retail Insights Pipeline
 
-PySpark toolkit for weekly, monthly, quarterly, and annual retail KPIs with configurable scope (defined-only or hybrid with score backfill), optional manual scope adjustments, comparable (like-for-like) pair analysis, and incremental Delta output saves.
+PySpark toolkit for weekly, monthly, quarterly, annual, and YTD retail KPIs with configurable scope (defined-only or hybrid with score backfill), optional manual scope adjustments, comparable (like-for-like) pair analysis, and incremental Delta output saves.
 
 Designed to run on **Databricks** against the customer Delta datastore (`/mnt/invent-{customer}-datastore`).
 
@@ -13,8 +13,8 @@ Designed to run on **Databricks** against the customer Delta datastore (`/mnt/in
 
 | Output                                  | Description                                                                                                                                            |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `kpi_long`                              | One tidy table: `period_type`, `period`, `dimension`, `dimension_value`, plus all configured metrics. Filter this to reproduce any slice/period panel. |
-| `comparison_yoy / qoq / mom / wow`      | Prior vs current period with formatted display columns (overall + each active slice dimension). YoY/QoQ/MoM/WoW are recomputed from the full merged kpi_long history on incremental saves. |
+| `kpi_long`                              | One tidy table: `period_type` (annual / **ytd** / quarter / monthly / weekly), `period`, `dimension`, `dimension_value`, plus all configured metrics. Filter this to reproduce any slice/period panel. |
+| `comparison_yoy / qoq / mom / wow / ytd` | Prior vs current period with formatted display columns (overall + each active slice dimension). YoY/WoW are the last two sequential periods; QoQ/MoM/YTD compare the **same** quarter/month/elapsed-window **across years**, chained across every consecutive year pair present (see [Selecting which comparisons to run](#selecting-which-comparisons-to-run)). All are recomputed from the full merged kpi_long history on incremental saves. |
 | `scope_diff`                            | Side-by-side annual KPIs for **defined-only** vs **score-only** scope (optional sanity check). Only computed when `scope.run_scope_diff=True`. Compares scope **before** manual adjustments — intentional diagnostic of defined vs score coverage. |
 | `comparable_kpi_long` / `comparable_comparison_*` | Like-for-like metrics over only the pairs present in both compared periods. Gated on `comparable_pairs.enabled=True`. |
 | **HTML report**                         | Standalone offline HTML with tabbed layout, Metric Details, and client/period info panel (see [HTML report](#html-report) section below).              |
@@ -44,7 +44,7 @@ retail-insights-pipeline/
     ├── pipeline.py     # Scoped daily, lost sales, instock input frames per scope
     ├── metrics.py      # KPI aggregation (sales, WOS, instock, lost sales %, …)
     ├── kpi_long.py     # Long-format output across periods and slices
-    ├── comparisons.py  # YoY / QoQ / WoW + defined vs score diff
+    ├── comparisons.py  # YoY / QoQ / MoM / WoW / YTD + defined vs score diff
     ├── io.py           # Incremental Delta saves + save plan preview
     ├── html_report.py  # Standalone HTML renderer (offline, tabbed report)
     └── context.py      # Shared runtime state (KPIContext)
@@ -320,7 +320,7 @@ The `nfg` breakdown then covers the going-forward (COMP) universe only, while Ov
 
 ## Comparable pairs (like-for-like)
 
-**Gated, opt-in** (default off). When enabled, for each comparison (YoY / QoQ / MoM / WoW) the metrics are recomputed over **only the `(product_id, store_id)` pairs present in both compared periods**, then compared. This isolates like-for-like movement (same pairs in both periods) from mix shifts caused by newly listed or closed pairs.
+**Gated, opt-in** (default off). When enabled, for each comparison (YoY / QoQ / MoM / WoW / YTD) the metrics are recomputed over **only the `(product_id, store_id)` pairs present across the periods that comparison touches**, then compared. This isolates like-for-like movement from mix shifts caused by newly listed or closed pairs.
 
 ```python
 "comparable_pairs": {
@@ -330,21 +330,22 @@ The `nfg` breakdown then covers the going-forward (COMP) universe only, while Ov
 
 Or set `KPI_COMPARABLE_PAIRS=true`.
 
-**How it works**
-1. For each comparison kind, the two most recent periods present in the run window are the compared pair (prior, current).
-2. The comparable universe = pairs that appear in **both** periods (`scoped_daily` presence in each), intersected.
-3. All metric frames (sales/inventory, service metrics, lost sales) are restricted to that pair set, and metrics are recomputed for both periods — for **Overall and every slice**. Because each slice dimension is a product attribute, the single overall intersection grouped by slice equals a per-slice intersection.
-4. The standard comparison logic diffs the two periods on that fixed universe.
+**How it works — depends on the comparison kind**
+
+- **YoY / WoW** (unchanged): the two most recent periods present in the run window are the compared pair (prior, current). The comparable universe = pairs present in **both** of those two periods, intersected.
+- **QoQ / MoM / YTD** (same-period-across-years — see [Selecting which comparisons to run](#selecting-which-comparisons-to-run)): the comparable universe is the intersection of pairs present in **every year** that has that quarter number / month number / YTD window — not just the two years being compared in one chain link. This keeps the pair universe fixed across every consecutive-year link within a kind (the reference implementation's "same pairs across all the years specified" — a.k.a. `sameytd`). A quarter/month number present in fewer than 2 years, or a run window with a single year, contributes no comparable comparison for that slice.
+
+In every case, all metric frames (sales/inventory, service metrics, lost sales) are restricted to the resulting pair set, and metrics are recomputed for **Overall and every slice**. Because each slice dimension is a product attribute, the single overall intersection grouped by slice equals a per-slice intersection. The standard comparison logic then diffs on that fixed universe, chaining consecutive year pairs the same way the non-comparable QoQ/MoM/YTD comparisons do.
 
 **Outputs**
-- `comparable_kpi_long` — per-period comparable metrics, tagged with `comparison_type` and `comparable_pair_count` (universe size).
-- `comparable_comparison_{yoy,qoq,mom,wow}` — comparison rows (same schema as the regular `comparison_*` tables).
-- HTML report — a second **"Comparable YoY/QoQ/MoM/WoW"** comparison table beneath the standard one in every value panel.
+- `comparable_kpi_long` — per-period comparable metrics, tagged with `comparison_type` and `comparable_pair_count` (universe size — varies per quarter/month number for QoQ/MoM).
+- `comparable_comparison_{yoy,qoq,mom,wow,ytd}` — comparison rows (same schema as the regular `comparison_*` tables).
+- HTML report — a second **"Comparable YoY/QoQ/MoM/WoW/YTD"** comparison table beneath the standard one in every value panel, stacked one mini-table per period pair for kinds with multiple pills (same as the standard comparison — see [Selecting which comparisons to run](#selecting-which-comparisons-to-run)).
 - Notebook — a "Comparable pairs (like-for-like)" cell.
 
 **Important**
-- A comparable comparison is produced only when the **run window spans both compared periods** (e.g. a multi-year window for comparable YoY). When the run window is narrow (single-week refresh), comparable metrics for that kind will be skipped for that run — but any previously saved comparable_kpi_long history is preserved and comparisons are recomputed from it on the next full-window run.
-- `comparable_kpi_long` is merged incrementally across runs (same as `kpi_long`), and comparable comparison tables are recomputed from the merged history — so a single-week refresh can still produce comparable YoY/QoQ/MoM/WoW relative to prior saved history (as long as comparable_kpi_long has data for both compared periods across runs).
+- A comparable comparison is produced only when the run window has enough periods (e.g. a multi-year window for comparable YoY/YTD, or a quarter/month number present in >=2 years for comparable QoQ/MoM). When the run window is narrow (single-week refresh), comparable metrics for that kind will be skipped for that run — but any previously saved comparable_kpi_long history is preserved and comparisons are recomputed from it on the next full-window run.
+- `comparable_kpi_long` is merged incrementally across runs (same as `kpi_long`), and comparable comparison tables are recomputed from the merged history — so a single-week refresh can still produce comparable YoY/QoQ/MoM/WoW/YTD relative to prior saved history (as long as comparable_kpi_long has data for the periods each kind needs across runs).
 - Each `run_date` partition of `comparable_kpi_long` is a self-contained snapshot of the full merged history for comparable pairs as of that run.
 
 ## Input previews and filters
@@ -382,6 +383,12 @@ Resolved automatically:
 - **End**: **Last completed Saturday** on or before `as_of_date` (excludes the in-progress fiscal week)
 - **Scope weeks**: any fiscal week whose Sun–Sat range **overlaps** the effective window is a window week; scope pairs are applied across all of them (and, under hybrid, covered vs missing weeks are split within this set)
 
+**Input date ranges printed at read time**: to make it obvious what a run actually consumed (and catch stale/incomplete source data early), the two main time-series inputs always print the date span present in the source, independent of the usual verbose/quiet read logging:
+- `daily_data` — min/max of its date column, printed once (the read is cached per run).
+- `lost_sales` — min/max of `week_start_date`, printed once per source read (twice when `lost_sales_ensemble.enabled=True`: once for the fast/120-day source, once for the slow/365-day source).
+
+These reflect what's actually in the source table (before the report-window filter is applied), so a max date short of the expected `REPORT_END_DATE` is a sign the source data is behind.
+
 ### Fiscal calendar vs native time grain
 
 Controlled by `fiscal_calendar.use_fiscal_calendar`:
@@ -407,18 +414,21 @@ Default: `/mnt/invent-{customer}-datastore/analysis/kpi_reports/outputs/kpi_long
 
 Set `output.save_outputs: True` in `config.py` (default is `False`). The notebook runs with `save=False` by default — Cell 4 previews the save plan, Cell 5 writes.
 
+**`kpi_long` is saved in full, never trimmed.** The HTML report's period-display limits (`weekly_display_weeks`, `monthly_display_months`, etc. — see [HTML report](#html-report)) only narrow a separate in-memory `ctx.kpi_long_display` copy used for rendering; `ctx.kpi_long` itself — and therefore what Cell 5 / `save_outputs()` persists to Delta — always holds every period actually computed for the run window, regardless of the display limits. (Fixed: an earlier version trimmed `ctx.kpi_long` itself before the save step, so the notebook's Cell 3 → Cell 5 workflow — `runner.run(save=False)` then a separate `save_outputs()` call — silently persisted only the most recent ~5 weeks/months/quarters instead of the full computed window.)
+
 ### Tables written
 
 | Table | Contents | Merge keys (incremental mode) |
 | ----- | -------- | ----------------------------- |
-| `kpi_long` | All metrics × periods × slices (annual / quarter / monthly / weekly) | `period_type`, `period`, `dimension`, `dimension_value` |
+| `kpi_long` | All metrics × periods × slices (annual / ytd / quarter / monthly / weekly) | `period_type`, `period`, `dimension`, `dimension_value` |
 | `comparison_yoy` | YoY comparison rows | `comparison_type`, `dimension`, `dimension_value`, `metric_key`, `current_period` |
-| `comparison_qoq` | QoQ comparison rows | same as YoY |
-| `comparison_mom` | MoM comparison rows | same as YoY |
+| `comparison_qoq` | QoQ comparison rows (one row set per fiscal-quarter number × consecutive-year pair) | same as YoY |
+| `comparison_mom` | MoM comparison rows (one row set per fiscal-month number × consecutive-year pair) | same as YoY |
 | `comparison_wow` | WoW comparison rows | same as YoY |
+| `comparison_ytd` | YTD comparison rows (one row set per consecutive-year pair, elapsed-window sums) | same as YoY |
 | `scope_diff` | Defined vs score annual diff (when `run_scope_diff=True`) | `Year`, `metric` |
 | `comparable_kpi_long` | Comparable (like-for-like) per-period metrics + `comparable_pair_count` (when `comparable_pairs.enabled=True`) | `comparison_type`, `period_type`, `period`, `dimension`, `dimension_value` |
-| `comparable_comparison_{yoy,qoq,mom,wow}` | Comparable comparison rows (when `comparable_pairs.enabled=True`) | recomputed from merged `comparable_kpi_long` — overwrites the partition |
+| `comparable_comparison_{yoy,qoq,mom,wow,ytd}` | Comparable comparison rows (when `comparable_pairs.enabled=True`) | recomputed from merged `comparable_kpi_long` — overwrites the partition |
 
 Merge keys are defined in `kpi_pipeline/io.py` (`TABLE_ROW_KEYS`). Incremental mode uses these keys to decide append vs skip vs overwrite. `comparison_*` tables are recomputed from the merged `kpi_long` and overwritten wholesale; `comparable_kpi_long` is merged incrementally like `kpi_long` and `comparable_comparison_*` tables are then recomputed from the merged `comparable_kpi_long` (see [Comparable pairs](#comparable-pairs-like-for-like)).
 
@@ -510,13 +520,13 @@ Review Cell 4 output before Cell 5. If `skipped_rows > 0` and you intended to re
 ### Important caveats
 
 - **Incremental accumulates onto the latest partition:** under `incremental`, `kpi_long` is merged onto the **latest existing `run_date` partition on or before** the current run (not the partition being written), so weekly runs whose `run_date` advances with `as_of_date` build up history instead of writing isolated single-week snapshots. Each `run_date` partition is a self-contained snapshot of the full merged history as of that run.
-- **Comparisons recomputed from merged history (incremental):** after merging `kpi_long`, the toolkit re-reads the merged partition and recomputes YoY/QoQ/MoM/WoW from the **full saved history**, then overwrites the comparison tables in that partition. A single-week refresh can therefore still produce a YoY vs last year. The same applies to comparable (like-for-like) tables: `comparable_kpi_long` is merged incrementally and comparable comparison tables are recomputed from it. `ctx.comparison_*` / `ctx.comparable_comparison_*` and the notebook/HTML displays reflect the merged history after save. Disable with `output.recompute_comparisons_from_history=False` (or `KPI_RECOMPUTE_COMPARISONS=false`) to keep comparisons scoped to the current run.
+- **Comparisons recomputed from merged history (incremental):** after merging `kpi_long`, the toolkit re-reads the merged partition and recomputes YoY/QoQ/MoM/WoW/YTD from the **full saved history**, then overwrites the comparison tables in that partition. A single-week refresh can therefore still produce a YoY vs last year. The same applies to comparable (like-for-like) tables: `comparable_kpi_long` is merged incrementally and comparable comparison tables are recomputed from it. `ctx.comparison_*` / `ctx.comparable_comparison_*` and the notebook/HTML displays reflect the merged history after save. Disable with `output.recompute_comparisons_from_history=False` (or `KPI_RECOMPUTE_COMPARISONS=false`) to keep comparisons scoped to the current run.
 - **Notebook vs saved Delta on overlapping period values:** under `allow_overwrite_existing=False`, overlapping `kpi_long` keys keep the prior saved values (e.g. a stale partial-year annual total is not replaced by a narrower re-run). Enable overwrite or use `full_refresh` to replace them.
 - **Empty outputs skipped:** If a table is empty for this run (e.g. comparisons on a very narrow window), the write for that table is skipped and prior Delta data is left unchanged — even under `full_refresh`.
 
 ### Selecting which comparisons to run
 
-`comparisons.enabled` chooses which period-over-period comparisons are **computed, printed, saved, and rendered**. Pick any subset of `"yoy"` (year-over-year), `"qoq"` (quarter-over-quarter), `"mom"` (month-over-month), `"wow"` (week-over-week):
+`comparisons.enabled` chooses which period-over-period comparisons are **computed, printed, saved, and rendered**. Pick any subset of `"yoy"`, `"qoq"`, `"mom"`, `"wow"`, `"ytd"`:
 
 ```python
 "comparisons": {
@@ -524,8 +534,15 @@ Review Cell 4 output before Cell 5. If `skipped_rows > 0` and you intended to re
 },
 ```
 
+- **`yoy`** — full calendar/fiscal year vs the prior full year (unchanged, last two annual periods).
+- **`qoq`** — the **same fiscal quarter across years** (e.g. `2026-Q1` vs `2025-Q1`), **not** the prior sequential quarter. One mini-table per fiscal-quarter number present in the run window, chained across every consecutive pair of years present for that quarter number — e.g. with 2024/2025/2026 all present, Q1 produces both `2025-Q1 -> 2026-Q1` and `2024-Q1 -> 2025-Q1`. A quarter number present in fewer than 2 years is simply skipped (no comparison for it, no error).
+- **`mom`** — the same pattern as `qoq`, but by fiscal-month number (e.g. `2026-06` vs `2025-06`).
+- **`ytd`** — each year's **elapsed window** (only the fiscal quarters fully closed as of `as_of_date` for the latest year — see below) vs the prior year's same window, chained across consecutive years the same way as `qoq`/`mom` (e.g. `2026 YTD` vs `2025 YTD`, and `2025 YTD` vs `2024 YTD`). Use this instead of `yoy` once the current year is only partially reported — `yoy` would otherwise compare a partial current year against a full prior year, which reads as a much bigger drop/gain than what actually happened.
+- **`wow`** — the prior sequential week (unchanged).
 - Only the selected kinds produce `comparison_{kind}` (and, when `comparable_pairs.enabled=True`, `comparable_comparison_{kind}`) Delta tables and HTML comparison columns. Unselected kinds are never computed or written.
-- `kpi_long` (the raw per-period metrics) is **always** produced in full — this setting only gates the *comparison* tables, not the underlying period data.
+- `kpi_long` (the raw per-period metrics) is **always** produced in full, including a `"ytd"` `period_type` — this setting only gates the *comparison* tables, not the underlying period data.
+- **YTD's elapsed window**: computed once per run from the **latest year present** — a fiscal quarter counts as "closed" only if every one of its weeks ends on or before `REPORT_END_DATE`. That same set of quarter numbers (e.g. just Q1, or Q1+Q2) is then summed for **every** year, so the comparison stays apples-to-apples even mid-year. A single-quarter or single-year window degrades gracefully: YTD still sums whatever quarters exist, and the comparison itself is simply absent if only one year is present.
+- **HTML rendering**: `qoq`/`mom` (and `ytd`, if more than one consecutive-year pair exists) render as several stacked mini comparison tables in one panel — one per quarter/month number or per year-pair, each labeled with its own period pair — rather than a single table.
 - **Reading a comparison from saved history:** a single latest-week run can still produce e.g. YoY. With `save_mode="incremental"` and `recompute_comparisons_from_history=True`, the selected comparisons are rebuilt from the **full merged `kpi_long`** (this run's window unioned onto prior saved runs) — so `["yoy"]` on a one-week run compares the current (partial) year against last year's saved annual total. Requires prior saved history at an earlier `run_date` partition.
 - Invalid or empty selections fail loudly at config `materialize()`. Environment override: `KPI_COMPARISONS="yoy,mom"` (comma-separated).
 
@@ -538,7 +555,7 @@ Review Cell 4 output before Cell 5. If `skipped_rows > 0` and you intended to re
     "run_date": None,               # null = use reporting_window.as_of_date for run_date= partition
     "save_mode": "incremental",     # initial | incremental | full_refresh
     "allow_overwrite_existing": False,
-    "recompute_comparisons_from_history": True,  # incremental: recompute YoY/QoQ/MoM/WoW from merged kpi_long
+    "recompute_comparisons_from_history": True,  # incremental: recompute YoY/QoQ/MoM/WoW/YTD from merged kpi_long
 }
 ```
 
@@ -614,7 +631,9 @@ Used when `use_hybrid_scope=True` or `run_scope_diff=True`. Applies to the **mis
     "enabled": False,
     "slow_path_segments": ["noob", "lost-sales", "model_id=top_down_excluding_ecom_365days"],
     "speed_cluster_path_segments": ["noob", "product-cluster-attributes-snapshot"],
-    "speed_cluster_attribute_name": "sales_speed",
+    "speed_cluster_format": "long",                      # "long" (default) | "wide"
+    "speed_cluster_attribute_name": "sales_speed",        # used when speed_cluster_format="long"
+    "speed_cluster_value_col": "product_speed_cluster",   # used when speed_cluster_format="wide"
     "fast_mover_clusters": [1, 2, 3],
 }
 ```
@@ -626,7 +645,48 @@ When `enabled=True`, the pipeline blends **two** lost-sales models by product sa
 - The three lost-sales aggregate fields (`lost_sales`, `in_stock_days`, `total_days`) for a given `(product_id, store_id, week_start_date)` always come from **one** model — never mixed — so downstream in-stock-rate and lost-sales-% math stays internally consistent.
 - A pair-week is kept only if the **chosen** model has a row for it (same as the legacy single-model behaviour); if the chosen side is missing from the full-outer join, the row is dropped rather than coalesced to zero.
 
-`materialize()` fails loudly when `enabled=True` and `fast_mover_clusters` is empty/non-list/non-integer, or `speed_cluster_attribute_name` is blank.
+**Speed-cluster source shape** (`speed_cluster_format`) — the cluster table can be either shape, so any client can point at whichever one it actually has:
+- `"long"` (default) — a long-format attributes table with one row per `(product_id, attribute_name)`; filtered to `speed_cluster_attribute_name`, `attribute_value` is the cluster (1=fastest .. 5=slowest). This is the platform's `noob/product-cluster-attributes-snapshot` shape.
+- `"wide"` — the cluster is already its own column (`speed_cluster_value_col`) on a table with one row per `product_id` — e.g. an ad-hoc `product_speed_cluster` table with a `product_speed_cluster` column.
+
+`materialize()` fails loudly when `enabled=True` and: `fast_mover_clusters` is empty/non-list/non-integer; `speed_cluster_format` is not `"long"`/`"wide"`; `speed_cluster_attribute_name` is blank under `"long"`; or `speed_cluster_value_col` is blank under `"wide"`.
+
+### `lost_sales_source`
+
+Maps raw lost-sales table columns to canonical names. Allows customers whose lost-sales source uses different column names (e.g. `week_date` instead of `week_start_date`, or `stock_days` instead of `in_stock`) to point the pipeline at their native schema without code changes.
+
+```python
+"lost_sales_source": {
+    "week_col": "week_start_date",        # default; maps to canonical week_start_date
+    "product_col": "product_id",          # default
+    "store_col": "store_id",              # default
+    "lost_sales_col": "lost_sales",       # default
+    "in_stock_col": "in_stock",           # default
+    "total_days_col": "details.total_days",  # default; supports dotted nested-struct paths
+}
+```
+
+**Behaviour.** Downstream code always sees canonical column names (`week_start_date`, `product_id`, `store_id`, `lost_sales`, `in_stock`, `total_days`) regardless of the mapping. `week_col`/`product_col`/`store_col` are renamed to their canonical join-key names at read time in `kpi_pipeline/inputs.py`; `lost_sales_col`/`in_stock_col`/`total_days_col` are read under their configured names and aliased to the canonical output names during aggregation in `kpi_pipeline/pipeline.py` (`_aggregate_lost_sales_pairweek`). Defaults reproduce tbretail's current schema exactly, so enabling this block with all defaults produces no behaviour change for existing customers.
+
+### `instock_source`
+
+**Optional.** Reads in-stock rate and total-days from a separate table (e.g. because your in-stock rate is calculated from a different data pipeline than your lost-sales model), then left-joins onto the lost-sales pair-weeks to override the in-stock and total-days values.
+
+```python
+"instock_source": {
+    "enabled": False,                     # default; set True to read from separate table
+    "path_segments": None,                # required when enabled; path to the instock table under datastore bucket
+    "week_col": "week_start_date",        # column name; default "week_start_date"
+    "product_col": "product_id",          # column name; default "product_id"
+    "store_col": "store_id",              # column name; default "store_id"
+    "in_stock_col": "in_stock",           # column name; default "in_stock"
+    "total_days_col": "total_days",       # column name; default "total_days"; supports dotted nested-struct paths
+}
+```
+
+**Behaviour.** When `enabled=False` (default), `in_stock`/`total_days` are aggregated from `lost_sales_source`'s table exactly as before — no change to existing pipelines. When `enabled=True`, `_aggregate_lost_sales_pairweek` stops aggregating `in_stock`/`total_days` from the lost-sales table entirely (only `lost_sales` is aggregated from it); the pipeline instead reads and aggregates the separate `instock_source` table and left-joins it onto the lost-sales weekly frame by `(product_col, store_col, week_col)`. A pair-week present in lost-sales with no matching row in `instock_source` gets `NULL` for `in_stock`/`total_days` — there is no fallback to a lost-sales-side value, since none is computed in this mode. Downstream metrics (`in_stock_rate`, `weighted_instock_rate`, `lost_sales_pct`) use whatever the join produces.
+
+**Mutually exclusive with `lost_sales_ensemble.enabled=True`.** When `lost_sales_ensemble.enabled=True`, the ensemble blends two lost-sales models and picks in-stock/total-days per row from whichever model was selected — this does not compose with `instock_source`'s separate-table override, which assumes a single lost-sales source. Only one of the two may be active; `materialize()` raises a `ValueError` if both are `True`.
 
 ### `output`
 
@@ -672,8 +732,23 @@ See [HTML report](#html-report) section.
 | `KPI_LOST_SALES_ENSEMBLE`         | `true`/`false` — blend fast (120d) + slow (365d) lost-sales models by speed cluster |
 | `KPI_LOST_SALES_SLOW_PATH`        | Comma-separated path segments for the 365-day model          |
 | `KPI_SPEED_CLUSTER_PATH`          | Comma-separated path segments for the product speed-cluster attributes table |
-| `KPI_SPEED_CLUSTER_ATTRIBUTE`     | `attribute_name` value selecting the speed cluster (default `sales_speed`) |
+| `KPI_SPEED_CLUSTER_FORMAT`        | `long` (default) or `wide` — speed-cluster source table shape |
+| `KPI_SPEED_CLUSTER_ATTRIBUTE`     | `attribute_name` value selecting the speed cluster (default `sales_speed`, format=`long`) |
+| `KPI_SPEED_CLUSTER_VALUE_COL`     | Column already holding the numeric cluster (default `product_speed_cluster`, format=`wide`) |
 | `KPI_FAST_MOVER_CLUSTERS`         | Comma-separated cluster ints taking the fast model (default `1,2,3`) |
+| `KPI_LOST_SALES_WEEK_COL`         | Overrides `lost_sales_source.week_col` (default `week_start_date`) |
+| `KPI_LOST_SALES_PRODUCT_COL`      | Overrides `lost_sales_source.product_col` (default `product_id`) |
+| `KPI_LOST_SALES_STORE_COL`        | Overrides `lost_sales_source.store_col` (default `store_id`) |
+| `KPI_LOST_SALES_COL`              | Overrides `lost_sales_source.lost_sales_col` (default `lost_sales`) |
+| `KPI_LOST_SALES_IN_STOCK_COL`     | Overrides `lost_sales_source.in_stock_col` (default `in_stock`) |
+| `KPI_LOST_SALES_TOTAL_DAYS_COL`   | Overrides `lost_sales_source.total_days_col` (default `details.total_days`) |
+| `KPI_INSTOCK_SOURCE_ENABLED`      | `true`/`false` — enable separate instock source |
+| `KPI_INSTOCK_SOURCE_PATH`         | Comma-separated path segments for `instock_source.path_segments` |
+| `KPI_INSTOCK_WEEK_COL`            | Overrides `instock_source.week_col` (default `week_start_date`) |
+| `KPI_INSTOCK_PRODUCT_COL`         | Overrides `instock_source.product_col` (default `product_id`) |
+| `KPI_INSTOCK_STORE_COL`           | Overrides `instock_source.store_col` (default `store_id`) |
+| `KPI_INSTOCK_IN_STOCK_COL`        | Overrides `instock_source.in_stock_col` (default `in_stock`) |
+| `KPI_INSTOCK_TOTAL_DAYS_COL`      | Overrides `instock_source.total_days_col` (default `total_days`) |
 | `KPI_USE_FISCAL_CALENDAR`         | `true`/`false`                                               |
 | `KPI_SCOPE_MIN_PERCENTILE`        | e.g. `20` or `0.2`                                           |
 | `KPI_SCOPE_MIN_WEEKS_FOR_FILTER`  | Integer                                                      |
@@ -753,6 +828,7 @@ If you see slow runs, check: (1) scope table path is correct so defined scope is
 - **`defined_scope.grain = "product"`**: the scope universe is `distinct(product_id)` and applies to every store selling the in-scope products across the window; instock/lost-sales pairs are inferred from lost-sales weekly data.
 - **Incremental skip vs notebook output**: Saved Delta can retain old values for overlapping period keys while the notebook shows fresh `kpi_long` — set `allow_overwrite_existing=True` to replace.
 - **WoW with sparse weeks**: Week-over-week compares the last two weeks **present in `kpi_long`**, not necessarily consecutive fiscal weeks when weekly coverage is sparse (e.g. after a narrow `run_min_date` or partial backfill).
+- **QoQ/MoM/YTD with a single year (or a single quarter/month number)**: degrades gracefully to "no comparison for that quarter/month number or year" rather than erroring — the KPI value table for that period type still shows whatever data is present.
 
 ## Troubleshooting
 
@@ -762,7 +838,8 @@ If you see slow runs, check: (1) scope table path is correct so defined scope is
 | `initial save blocked`      | Output tables already exist — switch to `incremental` or `full_refresh` (see [Output saves](#output-saves)) |
 | Overlapping periods skipped | Expected with `incremental` + `allow_overwrite_existing=False` — set `True` to replace |
 | Saved Delta stale vs notebook | Incremental skip kept old rows on disk while notebook shows fresh `kpi_long` — enable overwrite or use `full_refresh` |
-| Comparisons skipped         | Need ≥2 years (YoY), ≥2 quarters (QoQ), or ≥2 fiscal weeks (WoW) in window  |
+| Saved `kpi_long` had far fewer periods than the run actually computed (e.g. only the last 5 weeks/months) | Fixed — `ctx.kpi_long` was previously trimmed to the HTML display window *before* the save step; now only a separate `ctx.kpi_long_display` copy is trimmed, and `ctx.kpi_long`/the Delta save always hold the full computed window. Re-run and re-save if you saved under the old behavior. |
+| Comparisons skipped         | Need ≥2 years (YoY/YTD), ≥2 years present for a given fiscal-quarter/month number (QoQ/MoM), or ≥2 fiscal weeks (WoW) in window |
 | Empty slice dimension       | Column missing from `master-data/products` or derived SQL failed validation — if it lives on another table, add a [dimension source](#dimension-sources-extra-slices-from-other-tables) |
 | Dimension source errors on read | An **enabled** dimension source fails loudly on bad path / missing column / bad expression (by design) — fix the source or set `enabled: False` |
 | Slice value count looks doubled | A `dimension_source` table has multiple rows per `join_key` — pre-aggregate to one row per product (toolkit keeps an arbitrary row, see [Dimension sources](#dimension-sources-extra-slices-from-other-tables)) |
@@ -771,8 +848,11 @@ If you see slow runs, check: (1) scope table path is correct so defined scope is
 | Scope debug counts don't match `kpi_long` per slice | The debug cell recomputes scope independently — re-run it after any `config.py` change (scope mode, adjustments, `value_filters`) so it reflects the same scope Cell 3 builds. NULL slice values show as `"NULL"` here but as blank/None in `kpi_long` |
 | Lost-sales / in-stock numbers change only for slower products after enabling ensemble | Expected — clusters not in `fast_mover_clusters` (and products with no/NULL cluster) now use the 365-day model |
 | Slice/pair counts for the speed cluster look doubled | `product-cluster-attributes-snapshot` has >1 `sales_speed` row per product — reader dedupes on `product_id`; verify upstream data |
-| Ensemble run fails loudly on read | An enabled ensemble source path (`slow_path_segments` / `speed_cluster_path_segments`) is wrong, or the attributes table lacks the `attribute_name` value — fix path/attribute or set `enabled: False` |
+| Ensemble run fails loudly on read | An enabled ensemble source path (`slow_path_segments` / `speed_cluster_path_segments`) is wrong, or the attributes table lacks the `attribute_name` value — fix path/attribute or set `enabled: False`. If the speed-cluster table is **wide**-shaped (the cluster is already its own column, no `attribute_name`/`attribute_value` columns), set `speed_cluster_format: "wide"` and `speed_cluster_value_col` to that column name instead |
 | Some fast-mover pair-weeks missing under ensemble | Expected — a pair-week is kept only if the *chosen* model has a row; the 120-day model simply had no record for it (same as legacy single-model behaviour) |
+| HTML report header shows wrong reporting-window start date | Header was reading `REPORT_START_DATE` (raw Jan-1-anchored) instead of `EFFECTIVE_REPORT_START_DATE` (incorporating `run_min_date`) — now fixed in `kpi_pipeline/html_report.py`. If you set `run_min_date` to narrow the window, the header now correctly reflects the effective start. |
+| Monthly tab empty or stops at an earlier date than Quarterly/Annual | One or more fiscal weeks in the reporting window have a null `Fiscal_Month` in the `one_time_uploads/fiscal_cal` table, while `Fiscal_Quarter` and `Fiscal_Year` are complete — now raises a validation error in `kpi_pipeline/fiscal.py` listing the affected weeks. Previously these weeks silently dropped from the Monthly rollup, making the tab truncated. Fix the fiscal calendar upload or run the report with a narrower window inside the covered months. |
+| Unexpected extra year appears in Annual/YTD view but only sometimes | When `use_fiscal_calendar=True`, `Year` comes directly from the fiscal calendar's own `Year` column, not recalculated from date. If the customer's fiscal year rolls over in late January/early February (not Jan 1), a `run_min_date` early in a calendar year can legitimately fall in the tail of the prior fiscal year per their calendar — so the report window spans parts of two fiscal years even though it's a single calendar year. This is correct; it reflects the actual fiscal calendar. |
 
 
 ## HTML report
@@ -798,12 +878,12 @@ Environment override: `KPI_RUN_MODE=html_only`
 | Section | Description |
 | ------- | ----------- |
 | **Executive header** | Client, reporting window, as-of date, scope mode, slice dimensions, generated timestamp |
-| **Period tabs** | Annual / Quarter / **Monthly** / Weekly (horizontal) |
+| **Period tabs** | Annual / **YTD** / Quarter / Monthly / Weekly (horizontal) |
 | **Slice dimension tabs** | Overall + every slice column in `kpi_long` (inferred automatically from data and config) |
 | **Value tabs** | Vertical sidebar within each slice dimension — one panel per value (e.g. each brand) |
-| **KPI tables** | Metrics as rows (colour-coded), periods as columns; inventory turnover is labelled **Annual** / **Quarterly** / **Monthly** / **Weekly** per tab |
-| **Comparison** | YoY / QoQ / MoM / WoW per value panel |
-| **Comparable comparison** | Second comparison table per panel (when `comparable_pairs.enabled=True`) |
+| **KPI tables** | Metrics as rows (colour-coded), periods as columns; inventory turnover is labelled **Annual** / **YTD** / **Quarterly** / **Monthly** / **Weekly** per tab |
+| **Comparison** | YoY / QoQ / MoM / WoW / YTD per value panel — QoQ/MoM/YTD render as one stacked mini-table per quarter/month number or consecutive-year pair, each with its own period labels, when more than one is present |
+| **Comparable comparison** | Second comparison table per panel (when `comparable_pairs.enabled=True`), same stacking behavior |
 | **Metric Details tab** | Definition, store scope, and formula for every active metric |
 
 Slice dimensions and values are **inferred from `kpi_long`** — if you configure `category` instead of `brand`, or add multiple slice columns, the report adapts without code changes.

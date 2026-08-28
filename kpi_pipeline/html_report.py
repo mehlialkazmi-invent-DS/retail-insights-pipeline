@@ -784,6 +784,13 @@ def _comparison_html(
     labels: Optional[Dict[str, str]] = None,
     period_type: Optional[str] = None,
 ) -> str:
+    """Render one comparison mini-table per distinct (prior_period, current_period) pair present.
+
+    YoY/WoW always have exactly one pair, so this renders identically to before. QoQ/MoM/YTD can
+    carry multiple pairs (one per quarter/month number, or one per consecutive year-pair) — each
+    gets its own stacked mini-table, labeled with its own period pair, in the order they appear in
+    ``comp_df`` (ascending by year, then by quarter/month number).
+    """
     if comp_df is None or comp_df.empty:
         return ""
     sub = comp_df[
@@ -793,45 +800,48 @@ def _comparison_html(
     if sub.empty:
         return ""
 
-    first = sub.iloc[0]
-    prior_col = str(first.get("prior_period", "Prior"))
-    current_col = str(first.get("current_period", "Current"))
-
-    head = (
-        f"<thead><tr>"
-        f"<th>Metric</th>"
-        f"<th>{_esc(prior_col)}</th>"
-        f"<th>{_esc(current_col)}</th>"
-        f"<th>Change</th>"
-        f"</tr></thead>"
-    )
-
-    rows: List[str] = []
     labels = labels or {}
-    for _, row in sub.iterrows():
-        chg = str(row.get("change_display", "—"))
-        metric_key = row.get("metric_key")
-        if metric_key and period_type:
-            kpi_label = _metric_display_label(str(metric_key), labels, period_type)
-        else:
-            kpi_label = str(row.get("KPI", "—"))
-        rows.append(
-            f"<tr>"
-            f"<td>{_esc(kpi_label)}</td>"
-            f"<td>{_esc(str(row.get('prior_display', '—')))}</td>"
-            f"<td>{_esc(str(row.get('current_display', '—')))}</td>"
-            f"<td class='{_esc(_chg_class(chg))}'>{_esc(chg)}</td>"
-            f"</tr>"
+    multi_pairs = sub["current_period"].nunique() > 1 if "current_period" in sub.columns else False
+    sections: List[str] = []
+    for (prior_col, current_col), grp in sub.groupby(["prior_period", "current_period"], sort=False):
+        prior_col, current_col = str(prior_col), str(current_col)
+        head = (
+            f"<thead><tr>"
+            f"<th>Metric</th>"
+            f"<th>{_esc(prior_col)}</th>"
+            f"<th>{_esc(current_col)}</th>"
+            f"<th>Change</th>"
+            f"</tr></thead>"
         )
 
-    return (
-        "<div class='cmp-section'>"
-        f"<p class='cmp-label'>{_esc(comp_label)} Comparison</p>"
-        "<div class='table-wrap'>"
-        f"<table class='cmp-table'>{head}<tbody>{''.join(rows)}</tbody></table>"
-        "</div>"
-        "</div>"
-    )
+        rows: List[str] = []
+        for _, row in grp.iterrows():
+            chg = str(row.get("change_display", "—"))
+            metric_key = row.get("metric_key")
+            if metric_key and period_type:
+                kpi_label = _metric_display_label(str(metric_key), labels, period_type)
+            else:
+                kpi_label = str(row.get("KPI", "—"))
+            rows.append(
+                f"<tr>"
+                f"<td>{_esc(kpi_label)}</td>"
+                f"<td>{_esc(str(row.get('prior_display', '—')))}</td>"
+                f"<td>{_esc(str(row.get('current_display', '—')))}</td>"
+                f"<td class='{_esc(_chg_class(chg))}'>{_esc(chg)}</td>"
+                f"</tr>"
+            )
+
+        section_label = f"{comp_label} Comparison — {current_col}" if multi_pairs else f"{comp_label} Comparison"
+        sections.append(
+            "<div class='cmp-section'>"
+            f"<p class='cmp-label'>{_esc(section_label)}</p>"
+            "<div class='table-wrap'>"
+            f"<table class='cmp-table'>{head}<tbody>{''.join(rows)}</tbody></table>"
+            "</div>"
+            "</div>"
+        )
+
+    return "".join(sections)
 
 
 def _value_panel_content(
@@ -1002,7 +1012,7 @@ def _report_info_html(
 ) -> str:
     customer = settings.get("CUSTOMER", "—")
     as_of = settings.get("AS_OF_DATE", "—")
-    report_start = settings.get("REPORT_START_DATE", "—")
+    report_start = settings.get("EFFECTIVE_REPORT_START_DATE", "—")
     report_end = settings.get("REPORT_END_DATE", "—")
     scope_mode = (
         "Hybrid"
@@ -1047,12 +1057,13 @@ def _report_info_html(
     </div>"""
 
 
-_PERIOD_ORDER = ["annual", "quarter", "monthly", "weekly"]
-_PERIOD_LABELS = {"annual": "Annual", "quarter": "Quarter", "monthly": "Monthly", "weekly": "Weekly"}
-_PERIOD_COMP_LABEL = {"annual": "YoY", "quarter": "QoQ", "monthly": "MoM", "weekly": "WoW"}
+_PERIOD_ORDER = ["annual", "ytd", "quarter", "monthly", "weekly"]
+_PERIOD_LABELS = {"annual": "Annual", "ytd": "YTD", "quarter": "Quarter", "monthly": "Monthly", "weekly": "Weekly"}
+_PERIOD_COMP_LABEL = {"annual": "YoY", "ytd": "YTD", "quarter": "QoQ", "monthly": "MoM", "weekly": "WoW"}
 
 _TURNOVER_PERIOD_LABELS = {
     "annual": "Annual Inventory Turnover Rate",
+    "ytd": "YTD Inventory Turnover Rate",
     "quarter": "Quarterly Inventory Turnover Rate",
     "monthly": "Monthly Inventory Turnover Rate",
     "weekly": "Weekly Inventory Turnover Rate",
@@ -1085,7 +1096,10 @@ def render_kpi_html(
 
     Slice dimensions and values are inferred from ``ctx.kpi_long`` automatically.
     """
-    kpi_long = ctx.kpi_long
+    # Prefer the trimmed-for-display copy (see KPIContext.kpi_long_display); ctx.kpi_long
+    # itself stays full so it always reflects exactly what was saved to Delta. Falls back to
+    # ctx.kpi_long for callers that build a KPIContext directly without going through KPIRunner.
+    kpi_long = ctx.kpi_long_display if ctx.kpi_long_display is not None else ctx.kpi_long
     settings = ctx.settings
 
     if kpi_long is None or kpi_long.empty:
@@ -1120,6 +1134,7 @@ def render_kpi_html(
 
     comp_map: Dict[str, Optional[pd.DataFrame]] = {
         "annual": ctx.comparison_yoy,
+        "ytd": getattr(ctx, "comparison_ytd", None),
         "quarter": ctx.comparison_qoq,
         "monthly": getattr(ctx, "comparison_mom", None),
         "weekly": ctx.comparison_wow,
@@ -1130,11 +1145,12 @@ def render_kpi_html(
     # no-op on the empty/None frame).
     comparable_comp_map: Dict[str, Optional[pd.DataFrame]] = {
         "annual": getattr(ctx, "comparable_comparison_yoy", None),
+        "ytd": getattr(ctx, "comparable_comparison_ytd", None),
         "quarter": getattr(ctx, "comparable_comparison_qoq", None),
         "monthly": getattr(ctx, "comparable_comparison_mom", None),
         "weekly": getattr(ctx, "comparable_comparison_wow", None),
     }
-    _COMPARABLE_LABELS = {"annual": "Comparable YoY", "quarter": "Comparable QoQ",
+    _COMPARABLE_LABELS = {"annual": "Comparable YoY", "ytd": "Comparable YTD", "quarter": "Comparable QoQ",
                           "monthly": "Comparable MoM", "weekly": "Comparable WoW"}
 
     week_start_by_period: Dict[str, Any] = {}

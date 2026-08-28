@@ -19,6 +19,7 @@ PERIODS: List[Tuple[str, str]] = [
     ("quarter", "period_key"),
     ("monthly", "month_key"),
     ("weekly", "Year_Week"),
+    ("ytd", "Year"),
 ]
 
 
@@ -33,7 +34,11 @@ def _with_month_key(df: DataFrame) -> DataFrame:
     )
 
 
-def _period_frames(frames: Dict[str, DataFrame], period_name: str) -> Dict[str, DataFrame]:
+def _with_ytd_filter(df: DataFrame, available_quarters: List[int]) -> DataFrame:
+    return df.filter(F.col("Fiscal_Quarter").isin(available_quarters))
+
+
+def _period_frames(ctx: KPIContext, frames: Dict[str, DataFrame], period_name: str) -> Dict[str, DataFrame]:
     if period_name == "quarter":
         out = dict(frames)
         out["scoped_daily"] = _with_period_key(frames["scoped_daily"])
@@ -46,6 +51,16 @@ def _period_frames(frames: Dict[str, DataFrame], period_name: str) -> Dict[str, 
         out["inst_data"] = _with_month_key(frames["inst_data"])
         out["lost_base"] = _with_month_key(frames["lost_base"])
         return out
+    if period_name == "ytd":
+        # Only the fiscal quarters that have fully elapsed for the latest year (see
+        # fiscal._compute_available_fiscal_quarters), applied identically to every year, so
+        # summing by "Year" alone below gives an apples-to-apples YTD window across years.
+        available_quarters = ctx.available_fiscal_quarters or []
+        out = dict(frames)
+        out["scoped_daily"] = _with_ytd_filter(frames["scoped_daily"], available_quarters)
+        out["inst_data"] = _with_ytd_filter(frames["inst_data"], available_quarters)
+        out["lost_base"] = _with_ytd_filter(frames["lost_base"], available_quarters)
+        return out
     return frames
 
 
@@ -57,6 +72,8 @@ def _period_label(period_name: str, row: pd.Series) -> str:
         return f"{int(y)}-Q{int(q)}"
     if period_name == "monthly":
         return str(row["month_key"])
+    if period_name == "ytd":
+        return f"YTD-{int(row['Year'])}"
     return str(row["Year_Week"])
 
 
@@ -211,7 +228,7 @@ def _filter_frames_for_dimension(
 
 
 def build_kpi_long(ctx: KPIContext, frames: Dict[str, DataFrame]) -> pd.DataFrame:
-    """Build kpi_long for overall + each active slice dimension across annual/quarter/monthly/weekly periods."""
+    """Build kpi_long for overall + each active slice dimension across annual/quarter/monthly/weekly/ytd periods."""
     metric_cols = ctx.settings["METRIC_COLS"]
     slices: List[Tuple[str, List[str]]] = [("overall", [])] + [
         (dim, [dim]) for dim in ctx.active_slice_dimensions
@@ -219,7 +236,7 @@ def build_kpi_long(ctx: KPIContext, frames: Dict[str, DataFrame]) -> pd.DataFram
     value_filters = ctx.settings.get("SLICE_VALUE_FILTERS", {}) or {}
     rows: List[dict] = []
     for period_name, period_col in PERIODS:
-        pf = _period_frames(frames, period_name)
+        pf = _period_frames(ctx, frames, period_name)
         for slice_name, gk in slices:
             sf = _filter_frames_for_dimension(pf, gk[0], value_filters) if gk else pf
             tbl = build_kpi_table(ctx, sf, period_col, gk)

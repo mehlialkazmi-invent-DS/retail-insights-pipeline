@@ -9,7 +9,14 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import broadcast
 
 from kpi_pipeline.context import KPIContext
-from kpi_pipeline.inputs import get_daily_data_raw, read_lost_sales_source, read_speed_cluster_source
+from kpi_pipeline.inputs import (
+    DEFAULT_INSTOCK_SOURCE_COLUMN_MAP,
+    DEFAULT_LOST_SALES_COLUMN_MAP,
+    get_daily_data_raw,
+    read_instock_source,
+    read_lost_sales_source,
+    read_speed_cluster_source,
+)
 
 
 def is_service_store(ctx: KPIContext) -> F.Column:
@@ -37,22 +44,42 @@ def _enrich_lost_sales_with_time_grain(ctx: KPIContext, lost_sales_pair: DataFra
 
 
 def _aggregate_lost_sales_pairweek(ctx: KPIContext, raw: DataFrame, start, end) -> DataFrame:
-    """Aggregate ONE raw lost-sales model to (product_id, store_id, week_start_date) grain."""
+    """Aggregate ONE raw lost-sales model to (product_id, store_id, week_start_date) grain.
+
+    lost_sales/in_stock/total_days source column names come from LOST_SALES_COLUMN_MAP
+    (see config.py's lost_sales_source). in_stock/total_days are skipped here entirely
+    when INSTOCK_SOURCE_ENABLED — they come from the separate instock_source table
+    instead (see read_lost_sales_weekly).
+    """
+    col_map = ctx.settings.get("LOST_SALES_COLUMN_MAP") or DEFAULT_LOST_SALES_COLUMN_MAP
     filtered = (
         raw.withColumn("week_start_date", F.to_date("week_start_date"))
         .filter(F.col("week_start_date").between(F.lit(start), F.lit(end)))
     )
-    agg_exprs = [
-        F.sum(F.col("lost_sales").cast("double")).alias("lost_sales"),
-        F.sum(F.col("in_stock").cast("double")).alias("in_stock_days"),
-        F.sum(F.col("details.total_days").cast("double")).alias("total_days"),
-    ]
+    agg_exprs = [F.sum(F.col(col_map["lost_sales_col"]).cast("double")).alias("lost_sales")]
+    if not ctx.settings.get("INSTOCK_SOURCE_ENABLED", False):
+        agg_exprs.append(F.sum(F.col(col_map["in_stock_col"]).cast("double")).alias("in_stock_days"))
+        agg_exprs.append(F.sum(F.col(col_map["total_days_col"]).cast("double")).alias("total_days"))
     ls_native_week = not ctx.settings["USE_FISCAL_CALENDAR"] and "week" in raw.columns
     if ls_native_week:
         # Keep the native fiscal week number, but derive Year from week_start_date
         # (calendar year) rather than the source 'year' column, which can carry the ISO
         # week-year (late-December weeks labelled as the next year). See fiscal.py.
         agg_exprs.append(F.first(F.col("week").cast("int"), ignorenulls=True).alias("_ls_week"))
+    return filtered.groupBy("product_id", "store_id", "week_start_date").agg(*agg_exprs)
+
+
+def _aggregate_instock_pairweek(ctx: KPIContext, raw: DataFrame, start, end) -> DataFrame:
+    """Aggregate the standalone instock_source table to (product_id, store_id, week_start_date)."""
+    col_map = ctx.settings.get("INSTOCK_SOURCE_COLUMN_MAP") or DEFAULT_INSTOCK_SOURCE_COLUMN_MAP
+    filtered = (
+        raw.withColumn("week_start_date", F.to_date("week_start_date"))
+        .filter(F.col("week_start_date").between(F.lit(start), F.lit(end)))
+    )
+    agg_exprs = [
+        F.sum(F.col(col_map["in_stock_col"]).cast("double")).alias("in_stock_days"),
+        F.sum(F.col(col_map["total_days_col"]).cast("double")).alias("total_days"),
+    ]
     return filtered.groupBy("product_id", "store_id", "week_start_date").agg(*agg_exprs)
 
 
@@ -67,7 +94,12 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
     FAST_MOVER_CLUSTERS take the fast model; everyone else (other clusters AND
     products with no/NULL cluster row) takes the slow model. A single boolean drives
     all three aggregate fields (lost_sales, in_stock_days, total_days) for a given
-    pair-week, so they always come from the SAME chosen model.
+    pair-week, so they always come from the SAME chosen model. Mutually exclusive with
+    instock_source (see config.py's validation).
+
+    instock_source.enabled=True (mutually exclusive with the ensemble above): in_stock_days
+    and total_days are read from a separate table instead of PATH_LOST_SALES, left-joined
+    onto the lost-sales pair-weeks by (product_id, store_id, week_start_date).
     """
     if ctx.lost_sales_weekly_base is not None:
         return ctx.lost_sales_weekly_base
@@ -138,6 +170,11 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
         deduped = merged.select(*select_cols)
         if native_week:
             deduped = deduped.withColumn("_ls_year", F.year("week_start_date"))
+
+    if s.get("INSTOCK_SOURCE_ENABLED", False):
+        instock_raw = read_instock_source(ctx.spark, s, quiet=True)
+        instock_agg = _aggregate_instock_pairweek(ctx, instock_raw, start, end)
+        deduped = deduped.join(instock_agg, on=["product_id", "store_id", "week_start_date"], how="left")
 
     ctx.lost_sales_weekly_base = _enrich_lost_sales_with_time_grain(ctx, deduped).withColumn(
         "fiscal_week_days",

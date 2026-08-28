@@ -95,7 +95,7 @@ class KPIRunner:
             )
         print("DEFINED_SCOPE path:", s["DEFINED_SCOPE"]["path"])
         print("SLICE_DIMENSIONS:", s["SLICE_DIMENSIONS"])
-        print("COMPARISONS:", s.get("COMPARISON_KINDS", ["yoy", "qoq", "mom", "wow"]))
+        print("COMPARISONS:", s.get("COMPARISON_KINDS", ["yoy", "qoq", "mom", "wow", "ytd"]))
         if s["SAVE_OUTPUTS"]:
             print(
                 "SAVE_OUTPUTS: True | mode:",
@@ -143,7 +143,7 @@ class KPIRunner:
         load_saved_outputs(self.ctx, fund_paste)
         self._infer_active_slices_from_kpi_long()
         build_fiscal_week_only(self.ctx)
-        self.ctx.kpi_long = trim_periods_to_recent(self.ctx.kpi_long, self.ctx)
+        self.ctx.kpi_long_display = trim_periods_to_recent(self.ctx.kpi_long, self.ctx)
         print("html_only: skipped pipeline — loaded saved outputs for HTML report.")
         return self.ctx
 
@@ -188,7 +188,11 @@ class KPIRunner:
 
     def build_comparisons(self) -> None:
         build_comparisons(self.ctx)
-        self.ctx.kpi_long = trim_periods_to_recent(self.ctx.kpi_long, self.ctx)
+        # Trimmed copy for HTML display only — ctx.kpi_long itself must stay FULL through the
+        # save step (main.ipynb calls runner.run(save=False) then save_outputs(ctx, ...)
+        # separately in a later cell, so trimming ctx.kpi_long here would have truncated
+        # exactly what gets persisted to Delta).
+        self.ctx.kpi_long_display = trim_periods_to_recent(self.ctx.kpi_long, self.ctx)
 
     def build_comparable_pairs(self) -> None:
         build_comparable_pairs(self.ctx)

@@ -7,6 +7,25 @@ from typing import Any, Dict, List, Optional
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
+# Fallback defaults when a settings dict predates lost_sales_source/instock_source (e.g. a
+# customer config that duplicates config.py's schema instead of importing it) and so lacks
+# these resolved keys entirely — reproduces the schema every pipeline read has always assumed.
+DEFAULT_LOST_SALES_COLUMN_MAP: Dict[str, str] = {
+    "week_col": "week_start_date",
+    "product_col": "product_id",
+    "store_col": "store_id",
+    "lost_sales_col": "lost_sales",
+    "in_stock_col": "in_stock",
+    "total_days_col": "details.total_days",
+}
+DEFAULT_INSTOCK_SOURCE_COLUMN_MAP: Dict[str, str] = {
+    "week_col": "week_start_date",
+    "product_col": "product_id",
+    "store_col": "store_id",
+    "in_stock_col": "in_stock",
+    "total_days_col": "total_days",
+}
+
 
 def resolve_csv_path(path: str, location: str = "datastore") -> str:
     """Resolve a CSV path for Spark based on where the file physically lives.
@@ -79,6 +98,31 @@ def read_defined_scope_source(
     return apply_input_filters(raw, filters, "defined_scope", quiet=quiet)
 
 
+def _print_date_range(df: DataFrame, date_col: str, label: str) -> None:
+    """Always printed (independent of the read's own ``quiet`` logging flag) — the date span
+    actually present in a main input source is worth surfacing on every run, not just verbose ones."""
+    if date_col not in df.columns:
+        return
+    parsed = F.to_date(F.col(date_col))
+    bounds = df.agg(F.min(parsed).alias("min"), F.max(parsed).alias("max")).collect()[0]
+    print(f"  {label} date range in source ({date_col}): {bounds['min']} to {bounds['max']}")
+
+
+def _rename_join_keys_to_canonical(df: DataFrame, col_map: Dict[str, str]) -> DataFrame:
+    """Rename a source's own product/store/week columns to the pipeline's canonical
+    names (product_id, store_id, week_start_date) so every downstream reader can keep
+    assuming those names regardless of what a client's raw table calls them."""
+    renames = {
+        col_map["product_col"]: "product_id",
+        col_map["store_col"]: "store_id",
+        col_map["week_col"]: "week_start_date",
+    }
+    for source_col, canonical in renames.items():
+        if source_col != canonical:
+            df = df.withColumnRenamed(source_col, canonical)
+    return df
+
+
 def read_lost_sales_source(
     spark: SparkSession, settings: Dict[str, Any], path: Optional[str] = None, quiet: bool = False
 ) -> DataFrame:
@@ -87,18 +131,54 @@ def read_lost_sales_source(
     if not quiet:
         print(f"reading lost_sales: {path}")
     raw = spark.read.format("delta").load(path)
+    raw = _rename_join_keys_to_canonical(
+        raw, settings.get("LOST_SALES_COLUMN_MAP") or DEFAULT_LOST_SALES_COLUMN_MAP
+    )
     if filters and not quiet:
         print(f"lost_sales filters ({len(filters)}):")
-    return apply_input_filters(raw, filters, "lost_sales", quiet=quiet)
+    out = apply_input_filters(raw, filters, "lost_sales", quiet=quiet)
+    _print_date_range(out, "week_start_date", "lost_sales")
+    return out
+
+
+def read_instock_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
+    """Raw in-stock table for the instock_source override (only read when enabled).
+
+    Renamed to canonical product_id/store_id/week_start_date join keys; in_stock_col and
+    total_days_col are left under their configured names for the caller to aggregate.
+    """
+    path = settings["PATH_INSTOCK_SOURCE"]
+    col_map = settings.get("INSTOCK_SOURCE_COLUMN_MAP") or DEFAULT_INSTOCK_SOURCE_COLUMN_MAP
+    if not quiet:
+        print(f"reading instock_source: {path}")
+    raw = spark.read.format("delta").load(path)
+    return _rename_join_keys_to_canonical(raw, col_map)
 
 
 def read_speed_cluster_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
-    """One row per product_id with its numeric sales-speed cluster (long-format attrs table)."""
+    """One row per product_id with its numeric sales-speed cluster.
+
+    Supports two source table shapes via SPEED_CLUSTER_FORMAT:
+      "long" (default) - a long-format attributes table (one row per product_id x
+          attribute_name); filtered to SPEED_CLUSTER_ATTRIBUTE_NAME, attribute_value is
+          the cluster. This is the platform's noob/product-cluster-attributes-snapshot shape.
+      "wide" - the cluster is already its own column (SPEED_CLUSTER_VALUE_COL) on a
+          table with one row per product_id.
+    """
     path = settings["PATH_SPEED_CLUSTER"]
+    fmt = settings.get("SPEED_CLUSTER_FORMAT", "long")
+    raw = spark.read.format("delta").load(path)
+    if fmt == "wide":
+        value_col = settings["SPEED_CLUSTER_VALUE_COL"]
+        if not quiet:
+            print(f"reading speed_cluster: {path} (wide, value_col == {value_col!r})")
+        return (
+            raw.select("product_id", F.col(value_col).cast("int").alias("sales_speed_cluster"))
+            .dropDuplicates(["product_id"])
+        )
     attr = settings["SPEED_CLUSTER_ATTRIBUTE_NAME"]
     if not quiet:
-        print(f"reading speed_cluster: {path} (attribute_name == {attr!r})")
-    raw = spark.read.format("delta").load(path)
+        print(f"reading speed_cluster: {path} (long, attribute_name == {attr!r})")
     return (
         raw.filter(F.col("attribute_name") == attr)
         .select("product_id", F.col("attribute_value").cast("int").alias("sales_speed_cluster"))
@@ -114,7 +194,9 @@ def read_daily_data_source(spark: SparkSession, settings: Dict[str, Any], quiet:
     raw = spark.read.format("delta").load(path)
     if filters and not quiet:
         print(f"daily_data filters ({len(filters)}):")
-    return apply_input_filters(raw, filters, "daily_data", quiet=quiet)
+    out = apply_input_filters(raw, filters, "daily_data", quiet=quiet)
+    _print_date_range(out, settings["DAILY_TIME_COLUMNS"]["date"], "daily_data")
+    return out
 
 
 def get_daily_data_raw(ctx) -> DataFrame:

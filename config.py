@@ -6,7 +6,7 @@ import os
 from typing import Any, Callable, Dict, Optional
 
 # Period-over-period comparison kinds the pipeline can produce, in canonical order.
-COMPARISON_KINDS_ALL = ("yoy", "qoq", "mom", "wow")
+COMPARISON_KINDS_ALL = ("yoy", "qoq", "mom", "wow", "ytd")
 
 CONFIG: Dict[str, Any] = {
     "customer": "your_client",
@@ -59,27 +59,44 @@ CONFIG: Dict[str, Any] = {
         "run_scope_diff": False,
     },
     "comparable_pairs": {
-        # GATED, opt-in like-for-like view. When enabled, for each
-        # comparison (YoY/QoQ/MoM/WoW) the metrics are recomputed over ONLY the (product_id,
-        # store_id) pairs present in BOTH compared periods, then compared — isolating like-for-like
-        # change from mix shifts (new/closed pairs). Pair-level data exists only for the current run
-        # window, so a comparable comparison appears only when the run window SPANS both compared
-        # periods (e.g. a multi-year window for comparable YoY). Output:
+        # GATED, opt-in like-for-like view. When enabled, the metrics are recomputed over ONLY
+        # the (product_id, store_id) pairs present across the periods a comparison touches, then
+        # compared — isolating like-for-like change from mix shifts (new/closed pairs):
+        #   * YoY / WoW: pairs present in BOTH of the last two compared periods.
+        #   * QoQ / MoM: same fiscal quarter/month across years (see "comparisons" below) — the
+        #       pair universe is pairs present in EVERY year that has that quarter/month number,
+        #       not just the two years in one chain link, so the universe stays fixed across links.
+        #   * YTD: pairs present in EVERY year's elapsed (fully-closed-quarters) window, same idea.
+        # Pair-level data exists only for the current run window, so a comparable comparison
+        # appears only when the run window SPANS enough periods (e.g. a multi-year window for
+        # comparable YoY/YTD, or a quarter/month number present in >=2 years for comparable QoQ/MoM).
+        # Output:
         #   * comparable_kpi_long Delta table (per-period comparable metrics + comparable_pair_count)
-        #   * comparable_comparison_{yoy,qoq,mom,wow} Delta tables
+        #   * comparable_comparison_{yoy,qoq,mom,wow,ytd} Delta tables
         #   * a second "Comparable pairs" comparison table per panel in the HTML report
         "enabled": False,
     },
     "comparisons": {
         # Which period-over-period comparisons to compute, print, save, and render.
         # Choose any subset of:
-        #   "yoy" (year-over-year, from annual periods)
-        #   "qoq" (quarter-over-quarter)
-        #   "mom" (month-over-month)
-        #   "wow" (week-over-week)
+        #   "yoy" (year-over-year, full calendar/fiscal year vs the prior full year)
+        #   "qoq" (same fiscal quarter across years, e.g. Q1-2026 vs Q1-2025 — NOT the prior
+        #       sequential quarter. One pill per quarter number present, chained across every
+        #       consecutive pair of years present for that quarter number, e.g. also emits
+        #       2025-Q1 vs 2024-Q1 if a third year exists.)
+        #   "mom" (same fiscal month across years, e.g. Jun-2026 vs Jun-2025 — NOT the prior
+        #       sequential month. Same one-pill-per-month-number, chained-consecutive-years pattern.)
+        #   "ytd" (each year's elapsed window — only the fiscal quarters fully closed as of
+        #       as_of_date for the latest year, that SAME quarter-set applied to every year —
+        #       vs the prior year's same window, chained across consecutive years, e.g. 2026 YTD
+        #       vs 2025 YTD and 2025 YTD vs 2024 YTD. Use this instead of "yoy" once the current
+        #       year is only partially reported — "yoy" would otherwise compare a partial current
+        #       year against a full prior year.)
+        #   "wow" (week-over-week, the prior sequential week)
         # Only the selected kinds are computed, saved as comparison_{kind} Delta tables,
         # and shown in the HTML report; the others are skipped entirely. kpi_long (the raw
-        # per-period metrics) is always produced in full regardless of this setting.
+        # per-period metrics, including the "ytd" period type) is always produced in full
+        # regardless of this setting.
         #
         # Reading a comparison from saved history: a single latest-week run can still
         # produce e.g. YoY. With output.save_mode="incremental" and
@@ -87,7 +104,7 @@ CONFIG: Dict[str, Any] = {
         # rebuilt from the FULL merged kpi_long (this run's window unioned onto prior saved
         # runs), so prior years/quarters come from the saved data — no need to recompute
         # them this run. (Same applies to comparable_pairs comparisons.)
-        "enabled": ["yoy", "qoq", "mom", "wow"],
+        "enabled": ["yoy", "qoq", "mom", "wow", "ytd"],
     },
     "scope_adjustments": {
         # Optional manual adds/removes applied after hybrid/defined scope is built.
@@ -260,6 +277,44 @@ CONFIG: Dict[str, Any] = {
         "daily_data": [],
     },
     # ---------------------------------------------------------------------------
+    # LOST-SALES SOURCE — column mapping for the raw lost-sales table
+    # ---------------------------------------------------------------------------
+    # Only the COLUMN NAMES on path_segments.lost_sales (and, when
+    # lost_sales_ensemble.enabled=True, the same-schema slow_path_segments table) are
+    # configurable here — downstream code always sees the canonical names
+    # (week_start_date, lost_sales, in_stock, total_days) regardless of what's set below.
+    # Change these ONLY if a client's lost-sales table uses different column names than
+    # tbretail's; the defaults below reproduce tbretail's current schema exactly, so
+    # other customers are unaffected.
+    # total_days_col supports a dotted nested-struct path (e.g. "details.total_days").
+    # in_stock_col / total_days_col are ignored when instock_source.enabled=True below.
+    "lost_sales_source": {
+        "week_col": "week_start_date",
+        "product_col": "product_id",
+        "store_col": "store_id",
+        "lost_sales_col": "lost_sales",
+        "in_stock_col": "in_stock",
+        "total_days_col": "details.total_days",
+    },
+    # ---------------------------------------------------------------------------
+    # INSTOCK SOURCE — optional override to read in-stock days from a DIFFERENT table
+    # ---------------------------------------------------------------------------
+    # OFF by default: in-stock days / total days come from lost_sales_source above (the
+    # SAME table/row as lost_sales), exactly as before. Set enabled=True when a client
+    # calculates in-stock rate from a table other than its lost-sales model — the
+    # pipeline then reads THIS table instead and joins it onto the lost-sales pair-weeks
+    # by (product_col, store_col, week_col), overriding in_stock/total_days there.
+    # Applies uniformly regardless of lost_sales_ensemble (fast/slow) selection.
+    "instock_source": {
+        "enabled": False,
+        "path_segments": None,  # required when enabled=True, e.g. ["some", "instock", "table"]
+        "week_col": "week_start_date",
+        "product_col": "product_id",
+        "store_col": "store_id",
+        "in_stock_col": "in_stock",
+        "total_days_col": "total_days",
+    },
+    # ---------------------------------------------------------------------------
     # LOST-SALES ENSEMBLE — blend two lost-sales models by product sales speed
     # ---------------------------------------------------------------------------
     # OFF by default: the pipeline reads the SINGLE fast-mover model at
@@ -276,11 +331,19 @@ CONFIG: Dict[str, Any] = {
         # (path_segments.lost_sales), different model_id partition. Read only when
         # enabled=True.
         "slow_path_segments": ["noob", "lost-sales", "model_id=top_down_excluding_ecom_365days"],
-        # Product sales-speed source: long-format attributes table. Filter to
-        # attribute_name below; the numeric attribute_value (1=fastest .. 5=slowest)
-        # per product_id is the cluster. Read only when enabled=True.
+        # Product sales-speed source. Read only when enabled=True. Two table shapes
+        # are supported via speed_cluster_format:
+        #   "long" (default) - a long-format attributes table with one row per
+        #       (product_id, attribute_name); filter to speed_cluster_attribute_name,
+        #       the numeric attribute_value (1=fastest .. 5=slowest) is the cluster.
+        #       This is the platform's noob/product-cluster-attributes-snapshot shape.
+        #   "wide" - the cluster is already its own column (speed_cluster_value_col)
+        #       on a table with one row per product_id. speed_cluster_attribute_name
+        #       is ignored in this mode.
         "speed_cluster_path_segments": ["noob", "product-cluster-attributes-snapshot"],
+        "speed_cluster_format": "long",
         "speed_cluster_attribute_name": "sales_speed",
+        "speed_cluster_value_col": "product_speed_cluster",
         # Clusters whose products use the FAST (120-day) model. Everything else
         # (other clusters AND products with no/NULL cluster row) uses the SLOW model.
         "fast_mover_clusters": [1, 2, 3],
@@ -380,7 +443,7 @@ CONFIG: Dict[str, Any] = {
         "save_mode": "incremental",
         "allow_overwrite_existing": False,
         # Incremental only: after merging kpi_long onto the latest prior run_date partition,
-        # recompute YoY/QoQ/MoM/WoW from the full merged history (not just this run's window)
+        # recompute YoY/QoQ/MoM/WoW/YTD from the full merged history (not just this run's window)
         # and overwrite the comparison tables in this partition. Lets a single-week refresh still
         # produce a YoY vs last year. Set False to keep comparisons scoped to the current run.
         "recompute_comparisons_from_history": True,
@@ -505,12 +568,48 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
         lse["speed_cluster_path_segments"] = [
             s.strip() for s in os.environ["KPI_SPEED_CLUSTER_PATH"].split(",") if s.strip()
         ]
+    if "KPI_SPEED_CLUSTER_FORMAT" in os.environ:
+        lse["speed_cluster_format"] = os.environ["KPI_SPEED_CLUSTER_FORMAT"].strip().lower()
     if "KPI_SPEED_CLUSTER_ATTRIBUTE" in os.environ:
         lse["speed_cluster_attribute_name"] = os.environ["KPI_SPEED_CLUSTER_ATTRIBUTE"].strip()
+    if "KPI_SPEED_CLUSTER_VALUE_COL" in os.environ:
+        lse["speed_cluster_value_col"] = os.environ["KPI_SPEED_CLUSTER_VALUE_COL"].strip()
     if "KPI_FAST_MOVER_CLUSTERS" in os.environ:
         lse["fast_mover_clusters"] = [
             int(c.strip()) for c in os.environ["KPI_FAST_MOVER_CLUSTERS"].split(",") if c.strip()
         ]
+
+    lss = out.setdefault("lost_sales_source", {})
+    if "KPI_LOST_SALES_WEEK_COL" in os.environ:
+        lss["week_col"] = os.environ["KPI_LOST_SALES_WEEK_COL"].strip()
+    if "KPI_LOST_SALES_PRODUCT_COL" in os.environ:
+        lss["product_col"] = os.environ["KPI_LOST_SALES_PRODUCT_COL"].strip()
+    if "KPI_LOST_SALES_STORE_COL" in os.environ:
+        lss["store_col"] = os.environ["KPI_LOST_SALES_STORE_COL"].strip()
+    if "KPI_LOST_SALES_COL" in os.environ:
+        lss["lost_sales_col"] = os.environ["KPI_LOST_SALES_COL"].strip()
+    if "KPI_LOST_SALES_IN_STOCK_COL" in os.environ:
+        lss["in_stock_col"] = os.environ["KPI_LOST_SALES_IN_STOCK_COL"].strip()
+    if "KPI_LOST_SALES_TOTAL_DAYS_COL" in os.environ:
+        lss["total_days_col"] = os.environ["KPI_LOST_SALES_TOTAL_DAYS_COL"].strip()
+
+    ins = out.setdefault("instock_source", {})
+    if "KPI_INSTOCK_SOURCE_ENABLED" in os.environ:
+        ins["enabled"] = _parse_bool(os.environ["KPI_INSTOCK_SOURCE_ENABLED"])
+    if "KPI_INSTOCK_SOURCE_PATH" in os.environ:
+        ins["path_segments"] = [
+            s.strip() for s in os.environ["KPI_INSTOCK_SOURCE_PATH"].split(",") if s.strip()
+        ]
+    if "KPI_INSTOCK_WEEK_COL" in os.environ:
+        ins["week_col"] = os.environ["KPI_INSTOCK_WEEK_COL"].strip()
+    if "KPI_INSTOCK_PRODUCT_COL" in os.environ:
+        ins["product_col"] = os.environ["KPI_INSTOCK_PRODUCT_COL"].strip()
+    if "KPI_INSTOCK_STORE_COL" in os.environ:
+        ins["store_col"] = os.environ["KPI_INSTOCK_STORE_COL"].strip()
+    if "KPI_INSTOCK_IN_STOCK_COL" in os.environ:
+        ins["in_stock_col"] = os.environ["KPI_INSTOCK_IN_STOCK_COL"].strip()
+    if "KPI_INSTOCK_TOTAL_DAYS_COL" in os.environ:
+        ins["total_days_col"] = os.environ["KPI_INSTOCK_TOTAL_DAYS_COL"].strip()
 
     op = out.setdefault("output", {})
     if "KPI_SAVE_OUTPUTS" in os.environ:
@@ -625,6 +724,31 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "PATH_SPEED_CLUSTER": fund_paste(bucket, *cfg["lost_sales_ensemble"]["speed_cluster_path_segments"]),
     }
 
+    lost_sales_source_cfg = cfg.get("lost_sales_source", {}) or {}
+    lost_sales_column_map = {
+        "week_col": lost_sales_source_cfg.get("week_col", "week_start_date"),
+        "product_col": lost_sales_source_cfg.get("product_col", "product_id"),
+        "store_col": lost_sales_source_cfg.get("store_col", "store_id"),
+        "lost_sales_col": lost_sales_source_cfg.get("lost_sales_col", "lost_sales"),
+        "in_stock_col": lost_sales_source_cfg.get("in_stock_col", "in_stock"),
+        "total_days_col": lost_sales_source_cfg.get("total_days_col", "details.total_days"),
+    }
+
+    instock_source_cfg = cfg.get("instock_source", {}) or {}
+    instock_source_enabled = bool(instock_source_cfg.get("enabled", False))
+    if instock_source_enabled and not instock_source_cfg.get("path_segments"):
+        raise ValueError("instock_source.path_segments is required when instock_source.enabled=True")
+    paths["PATH_INSTOCK_SOURCE"] = (
+        fund_paste(bucket, *instock_source_cfg["path_segments"]) if instock_source_enabled else None
+    )
+    instock_source_column_map = {
+        "week_col": instock_source_cfg.get("week_col", "week_start_date"),
+        "product_col": instock_source_cfg.get("product_col", "product_id"),
+        "store_col": instock_source_cfg.get("store_col", "store_id"),
+        "in_stock_col": instock_source_cfg.get("in_stock_col", "in_stock"),
+        "total_days_col": instock_source_cfg.get("total_days_col", "total_days"),
+    }
+
     window = _resolve_report_window(
         datetime.date.fromisoformat(rw["as_of_date"]),
         run_min,
@@ -647,14 +771,35 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     defined_scope["grain"] = grain
 
     lse = cfg["lost_sales_ensemble"]
+    if lse.get("enabled") and instock_source_enabled:
+        raise ValueError(
+            "lost_sales_ensemble.enabled and instock_source.enabled cannot both be True: "
+            "the fast/slow blend picks in_stock/total_days per-row from whichever model was "
+            "chosen, which instock_source's separate-table override does not compose with. "
+            "Use at most one of the two."
+        )
     if lse.get("enabled"):
         fast_clusters = lse.get("fast_mover_clusters")
         if not isinstance(fast_clusters, (list, tuple)) or not fast_clusters:
             raise ValueError("lost_sales_ensemble.fast_mover_clusters must be a non-empty list when enabled")
         if not all(isinstance(c, int) for c in fast_clusters):
             raise ValueError("lost_sales_ensemble.fast_mover_clusters must be integers (e.g. [1, 2, 3])")
-        if not lse.get("speed_cluster_attribute_name"):
-            raise ValueError("lost_sales_ensemble.speed_cluster_attribute_name is required when enabled")
+        speed_cluster_format = str(lse.get("speed_cluster_format", "long")).strip().lower()
+        if speed_cluster_format not in ("long", "wide"):
+            raise ValueError(
+                f"lost_sales_ensemble.speed_cluster_format={speed_cluster_format!r} must be 'long' or 'wide'"
+            )
+        lse["speed_cluster_format"] = speed_cluster_format
+        if speed_cluster_format == "long" and not lse.get("speed_cluster_attribute_name"):
+            raise ValueError(
+                "lost_sales_ensemble.speed_cluster_attribute_name is required when "
+                "speed_cluster_format='long' (default) and enabled=True"
+            )
+        if speed_cluster_format == "wide" and not lse.get("speed_cluster_value_col"):
+            raise ValueError(
+                "lost_sales_ensemble.speed_cluster_value_col is required when "
+                "speed_cluster_format='wide' and enabled=True"
+            )
 
     # Resolve optional dimension-source paths up front (same pattern as PATH_* above) so
     # fiscal.py reads absolute paths without needing fund_paste. path_segments are joined
@@ -746,7 +891,12 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "SCOPE_ADJUSTMENTS": cfg.get("scope_adjustments", {}),
         "LOST_SALES_ENSEMBLE_ENABLED": lse["enabled"],
         "FAST_MOVER_CLUSTERS": list(lse["fast_mover_clusters"]),
+        "SPEED_CLUSTER_FORMAT": lse.get("speed_cluster_format", "long"),
         "SPEED_CLUSTER_ATTRIBUTE_NAME": lse["speed_cluster_attribute_name"],
+        "SPEED_CLUSTER_VALUE_COL": lse.get("speed_cluster_value_col", "product_speed_cluster"),
+        "LOST_SALES_COLUMN_MAP": lost_sales_column_map,
+        "INSTOCK_SOURCE_ENABLED": instock_source_enabled,
+        "INSTOCK_SOURCE_COLUMN_MAP": instock_source_column_map,
         **paths,
         "DEFINED_SCOPE": defined_scope,
         "INPUT_FILTERS": cfg.get("input_filters", {}),
