@@ -32,7 +32,7 @@ def _format_metric_value(metric: str, value) -> str:
         return f"{value / 1e6:.2f}M"
     if metric in ("mean_stock_retail", "mean_stock_cost"):
         return f"${value / 1e6:.1f}M"
-    if metric == "AUR":
+    if metric in ("AUR", "AUC"):
         return f"${value:.2f}"
     if metric in _FRACTIONAL_RATE_METRICS:
         return f"{value * 100:.1f}%"

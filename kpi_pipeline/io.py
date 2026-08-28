@@ -100,7 +100,6 @@ COMPARABLE_COMPARISON_TABLES: Tuple[str, ...] = (
     "comparable_comparison_wow",
     "comparable_comparison_ytd",
 )
-COMPARABLE_TABLES: Tuple[str, ...] = ("comparable_kpi_long",) + COMPARABLE_COMPARISON_TABLES
 
 
 def _selected_comparison_kinds(ctx: KPIContext) -> List[str]:

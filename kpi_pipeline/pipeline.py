@@ -243,6 +243,17 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
         scope_pair_weeks = lost_sales_weekly.select("product_id", "store_id", "Year", "Week").distinct().cache()
         scope_pairs = lost_sales_weekly.select("product_id", "store_id").distinct().cache()
 
+    # Fall back to the fiscal week's day-count only when total_days can legitimately be missing
+    # for reasons unrelated to instock_source (e.g. a null in the lost-sales table itself). Under
+    # instock_source.enabled=True, a null total_days specifically means "no matching row in the
+    # separate instock table" -- coalescing it to a full week would silently pad available_days
+    # for an unmatched pair-week instead of excluding it via the filter below, deflating
+    # in_stock_rate/weighted_instock_rate for exactly the coverage gaps instock_source expects.
+    available_days_expr = (
+        F.col("total_days")
+        if ctx.settings.get("INSTOCK_SOURCE_ENABLED", False)
+        else F.coalesce(F.col("total_days"), F.col("fiscal_week_days"))
+    )
     inst_data = (
         lost_sales_weekly.filter(is_service_store(ctx))
         .select(
@@ -254,7 +265,7 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
             "Fiscal_Quarter",
             "Fiscal_Month",
             F.col("in_stock_days").alias("stocked_pairs"),
-            F.coalesce(F.col("total_days"), F.col("fiscal_week_days")).alias("available_days"),
+            available_days_expr.alias("available_days"),
         )
         .filter(F.col("available_days") > 0)
         .join(ctx.product_dims, on="product_id", how="left")

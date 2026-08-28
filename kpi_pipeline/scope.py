@@ -440,13 +440,22 @@ def apply_scope_adjustments(ctx: KPIContext, fund_paste: Optional[Callable[..., 
         path = _resolve_adjustment_path(ctx, adj, fund_paste)
         source = _adjustment_source(adj, path)
         action = adj["action"]
-        before_count = scope.distinct().count()
+        # Counted on scope_keys only (not the full row incl. scope_origin) — a key already in
+        # scope under one origin must not read as "new coverage" just because a later step
+        # claims it under a different origin label.
+        before_count = scope.select(*ctx.scope_keys).distinct().count()
 
         if action == "addition":
             label = adj.get("label", "manual_add")
             add_keys = _read_adjustment_keys(ctx, adj, path, scope_pairs).withColumn("scope_origin", F.lit(label))
-            scope = scope.unionByName(add_keys.select(*scope.columns)).distinct()
-            after_count = scope.count()
+            # Keep the FIRST origin a key was claimed under — anti-join out keys already in
+            # scope before unioning, so a key present under e.g. "defined" doesn't also get a
+            # second physical row under this addition's label (scope.distinct() dedupes whole
+            # rows, so two different scope_origin values for the same key would otherwise both
+            # survive, double-counting that key in scope_summary_by_origin and in rows_delta).
+            new_keys = add_keys.join(scope.select(*ctx.scope_keys).distinct(), on=ctx.scope_keys, how="left_anti")
+            scope = scope.unionByName(new_keys.select(*scope.columns)).distinct()
+            after_count = scope.select(*ctx.scope_keys).distinct().count()
             step = {
                 "action": action,
                 "label": label,
@@ -463,7 +472,7 @@ def apply_scope_adjustments(ctx: KPIContext, fund_paste: Optional[Callable[..., 
         else:
             removal_keys = _read_adjustment_keys(ctx, adj, path, scope_pairs)
             scope = _anti_join_by_keys(scope, removal_keys, adj["join_keys"]).distinct()
-            after_count = scope.count()
+            after_count = scope.select(*ctx.scope_keys).distinct().count()
             step = {
                 "action": action,
                 "source": source,

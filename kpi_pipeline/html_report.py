@@ -160,9 +160,8 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "label": "Inventory Turnover Rate",
         "definition": (
             "Rate at which inventory is sold and replaced over the reporting period in each tab — "
-            "annual turnover in the Annual tab, quarterly turnover in the Quarter tab, and weekly "
-            "turnover in the Weekly tab. Higher values indicate faster sell-through relative to "
-            "the stock held during that period."
+            "labelled per-tab (Annual / YTD / Quarterly / Monthly / Weekly Inventory Turnover Rate). "
+            "Higher values indicate faster sell-through relative to the stock held during that period."
         ),
         "store_scope": "Service stores only (e-com excluded)",
         "formula": "Sales Units ÷ Mean Stock (for the same period grain)",

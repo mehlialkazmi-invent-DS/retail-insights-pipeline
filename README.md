@@ -728,6 +728,7 @@ See [HTML report](#html-report) section.
 | `KPI_USE_HYBRID_SCOPE`            | `true`/`false`                                               |
 | `KPI_RUN_SCOPE_DIFF`              | `true`/`false` — enable defined-vs-score scope diff          |
 | `KPI_COMPARABLE_PAIRS`            | `true`/`false` — enable comparable (like-for-like) pairs     |
+| `KPI_COMPARISONS`                 | Comma-separated subset of `yoy,qoq,mom,wow,ytd` — selects which comparisons to compute |
 | `KPI_RECOMPUTE_COMPARISONS`       | `true`/`false` — recompute comparisons from merged history (default `true` under incremental) |
 | `KPI_LOST_SALES_ENSEMBLE`         | `true`/`false` — blend fast (120d) + slow (365d) lost-sales models by speed cluster |
 | `KPI_LOST_SALES_SLOW_PATH`        | Comma-separated path segments for the 365-day model          |
@@ -785,7 +786,7 @@ Default metrics (configurable in `CONFIG["metrics"]`):
 
 **WOS** = per-product per-fiscal-week WOS after summing daily inventory/sales across service stores at product×date (`avg_daily_inventory / weekly_sales`), then rolled up to the reporting period using a sales-weighted average. Not computed at product×store×week grain.
 
-**Inventory Turnover Rate** = Sales Units ÷ Mean Stock for the same period grain (service stores only). The HTML report labels it **Annual**, **Quarterly**, or **Weekly** Inventory Turnover Rate in the matching period tab.
+**Inventory Turnover Rate** = Sales Units ÷ Mean Stock for the same period grain (service stores only). The HTML report labels it per-tab: **Annual**, **YTD**, **Quarterly**, **Monthly**, or **Weekly** Inventory Turnover Rate.
 
 ## Programmatic use
 
