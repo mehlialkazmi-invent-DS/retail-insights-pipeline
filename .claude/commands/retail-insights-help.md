@@ -3,8 +3,10 @@ name: retail-insights-help
 description: >-
   Operate, configure, extend, troubleshoot, and answer questions about the
   retail-insights-pipeline — a PySpark retail KPI pipeline for Databricks.
-  Covers onboarding, config editing, scope modes, metric computation, HTML
-  report, output saves, comparable pairs, dimension sources, performance
+  Covers onboarding, config editing, scope modes, metric computation, the
+  roots/cuts report structure (dimension_sources as named population tabs
+  like NVROUT/COMP, slices as breakdowns within every root), fiscal calendar
+  column mapping, HTML report, output saves, comparable pairs, performance
   patterns, and how to add/change anything.
   Use when a user asks to: set up, modify, run, debug, explain, or extend this
   KPI pipeline; configure it with AI; onboard to it quickly; or understand what
@@ -55,28 +57,47 @@ kpi_pipeline/
                               build_comparisons → build_comparable_pairs →
                               build_scope_comparison → build_html_report
                    run.mode=html_only → load_saved_outputs + build_fiscal_week_only
-  fiscal.py        fiscal_cal + fiscal_week frames; product attributes + slice dims;
-                   dimension_sources left-join; Month column extraction;
+                   (html_only also re-infers cut_dimensions/root_definitions from the
+                   loaded kpi_long's own columns, since fiscal.py never runs)
+  fiscal.py        fiscal_cal + fiscal_week frames; product attributes + cut dimensions;
+                   dimension_sources left-join → ROOT columns (not cuts, see §3.4);
+                   _resolve_root_definitions: root_values (named) or auto-discovery
+                   (one root per distinct value) from real data;
+                   fiscal_calendar.column_map (quarter_col/month_col/month_name_col) —
+                   each optional/auto-detected, derived when a client's fiscal_cal lacks it;
                    available_fiscal_quarters (elapsed-quarter set for YTD, from the latest year)
   inputs.py        cached Delta reads (daily_data_raw, lost_sales_weekly_base) + input_filters;
                    prints the source date range for daily_data/lost_sales on every read
   scope.py         defined scope, score scope (hybrid), manual adjustments
   scope_debug.py   scope_universe_counts: pre-flight distinct product/store counts per slice
+                   (all active_slice_dimensions, root-defining columns included — this is a
+                   raw diagnostic, unaware of the root/cut split the KPI step applies)
   pipeline.py      build_pipeline_frames: scoped_daily, inst_data, lost_base per scope
   metrics.py       compute_kpis: sales, WOS, mean_stock, instock, weighted_instock_rate
-  kpi_long.py      build_kpi_long: loops annual/ytd/quarter/monthly/weekly × slices → pandas
+  kpi_long.py      build_kpi_long: loops root × cut × annual/ytd/quarter/monthly/weekly →
+                   pandas. Roots = "overall" + ctx.root_definitions; cuts = "overall" +
+                   ctx.cut_dimensions, applied identically within every root. Reuses
+                   _filter_frames_for_dimension for BOTH root population restriction and a
+                   cut's own value_filters. kpi_long gains a "root" column (see §3.4c).
                    trim_periods_to_recent: trims each period type to N most recent
-  comparisons.py   YoY / YTD + build_scope_diff. YTD compares the SAME elapsed-window across
-                   years (not sequential), chained across every consecutive year pair present —
-                   see _consecutive_year_pairs. No QoQ/MoM/WoW comparison table exists — the
+  comparisons.py   YoY / YTD + build_scope_diff, root × cut aware throughout (comparison_yoy/ytd
+                   carry a "root" column). YTD compares the SAME elapsed-window across years
+                   (not sequential), chained across every consecutive year pair present — see
+                   _consecutive_year_pairs. No QoQ/MoM/WoW comparison table exists — the
                    Quarter/Monthly/Weekly period tabs show value trends only.
-  comparable.py    build_comparable_pairs: like-for-like YTD metrics only. Each consecutive-year
-                   link gets its OWN pair universe (intersection of just that link's two years),
-                   not a universe fixed across the whole window — see rebuild_comparable_ytd_from_saved_rows
+  comparable.py    build_comparable_pairs: like-for-like YTD metrics only, root × cut aware.
+                   Each consecutive-year link gets its OWN pair universe (intersection of just
+                   that link's two years, NOT restricted per root — computed once against the
+                   overall population), not a universe fixed across the whole window — see
+                   rebuild_comparable_ytd_from_saved_rows
   io.py            incremental Delta saves, save plan, load_saved_outputs (html_only),
-                   recompute comparisons from merged kpi_long history
-  html_report.py   standalone HTML renderer — period → dimension → value tabs;
-                   slices inferred from kpi_long; Annual/Quarter/Monthly/Weekly tabs
+                   recompute comparisons from merged kpi_long history. TABLE_ROW_KEYS now
+                   includes "root" everywhere dimension/dimension_value appears.
+  html_report.py   standalone HTML renderer — root → period → dimension → value tabs when
+                   more than one root exists (Metric Details becomes a peer of the root tabs);
+                   a single root (no root-producing dimension_sources) renders exactly as
+                   before, period → dimension → value, Metric Details a peer of period tabs.
+                   Dimensions inferred from kpi_long via ctx.cut_dimensions.
 ```
 
 ---
@@ -100,8 +121,17 @@ When a user wants to configure the toolkit, ask them (or read from their message
 - Multi-year backfill: `run_min_date` = Jan 1 of earliest year
 
 **Fiscal calendar vs native time grain** (`fiscal_calendar.use_fiscal_calendar`):
-- `True` (default): Year/Week/Quarter/Month come from `one_time_uploads/fiscal_cal`.
-- `False`: derived from `noob/daily-data` (`fiscal_calendar.daily_time_columns`). **Year is the calendar year of `date`** (`F.year(date)`); **Week is the native fiscal week column**. The source `daily_time_columns.year` column is **not** used for Year — it can carry the ISO week-year, mislabeling late-December weeks as the next year (e.g. Dec 2025 shown as `2026`), which previously mismatched the Quarter/Month derived from `date` (Dec 2025 → "Q4 2026"). Caveat: a fiscal week straddling Jan 1 now appears as two partial weeks (one per calendar year) in the Weekly view; quarter/month/annual rollups stay correct.
+- `True` (default): Year/Week/Quarter/Month come from `one_time_uploads/fiscal_cal`, via `fiscal_calendar.column_map`:
+  ```python
+  "column_map": {
+      "quarter_col": "Quarter",       # "Q1" -> Fiscal_Quarter. Absent -> ceil(Fiscal_Month/3).
+      "month_col": "Month",           # "M01" -> Fiscal_Month. Absent -> calendar month of week start.
+      "month_name_col": "month_name", # display label e.g. "August", shown verbatim on Monthly tab.
+                                       # Absent -> derived (see below).
+  }
+  ```
+  Each entry is independently optional/auto-detected: read when the column exists on `fiscal_cal`, derived when absent or set to `None`. This matters because **a client's fiscal month/quarter number does not necessarily match the real calendar month/quarter** — e.g. tbretail's fiscal year runs Feb–Jan, so fiscal month 07 has been observed spanning real 8/2–8/29. Feeding that number straight into a month-name lookup (`calendar.month_abbr[7]` → "Jul") would be **wrong** whenever a client's fiscal calendar is offset like this. So when `month_name_col` is absent, the Monthly tab instead derives its display label from the **majority real calendar month by day count** across each fiscal month's actual dates (`html_report._build_month_display_labels` / `fiscal._build_fiscal_week_frame`) — correct regardless of the offset, and a no-op (reduces to the trivial case) on a calendar-aligned fiscal year.
+- `False`: derived from `noob/daily-data` (`fiscal_calendar.daily_time_columns` — only `date`/`week` are actually read; `year` is dead config, kept as documented intent). **Year is the calendar year of `date`** (`F.year(date)`); **Week is the native fiscal week column**; Quarter/Month are both derived from the real calendar month the same way as the fiscal-calendar fallback above (they ARE the real calendar values here, so this is exact, not approximate). The source `daily_time_columns.year` column is **not** used for Year — it can carry the ISO week-year, mislabeling late-December weeks as the next year (e.g. Dec 2025 shown as `2026`), which previously mismatched the Quarter/Month derived from `date` (Dec 2025 → "Q4 2026"). Caveat: a fiscal week straddling Jan 1 now appears as two partial weeks (one per calendar year) in the Weekly view; quarter/month/annual rollups stay correct.
 
 ### 3.2 Scope mode
 
@@ -151,13 +181,13 @@ display(runner.scope_debug_summary())
 
 `scope_debug_summary()` → `kpi_pipeline.scope_debug.scope_universe_counts(ctx)` returns distinct `product_id`, `store_id`, and pair counts for the **final scope** (after hybrid backfill + adjustments): one `overall` row plus one row per active slice dimension value (`slices`, `derived_dimensions`, enabled `dimension_sources`). It applies the same `value_filters` as the KPI step, so counts match `kpi_long` per slice. Product-week scope (no `store_col`) shows only `distinct_product_count`. NULL slice values show as `"NULL"` here vs blank/None in `kpi_long`. `build_dimensions`/`build_scopes` are idempotent; Cell 3 rebuilds the same scope. Skipped in `html_only` mode (no scope is built).
 
-### 3.4 Slice dimensions
+### 3.4 Slice dimensions → roots and cuts
 
-There are two ways to add breakdown dimensions to the report. Pick based on **where the column lives**:
+Every report row belongs to a **root** (which population) and a **cut** (how that population is broken down). There are two config surfaces, and which one you use depends on **where the column lives**, not on whether you want a root or a cut — `slices` is always cuts, `dimension_sources` is always roots:
 
-#### 3.4a — `slices` (columns from master-data/products)
+#### 3.4a — `slices` (columns from master-data/products) → CUTS
 
-Use this when the column already exists on (or is derivable from) the products table. Simpler, no join overhead.
+Use this when the column already exists on (or is derivable from) the products table. Applied identically **within every root**, including the always-present `"overall"` root.
 
 ```python
 "slices": {
@@ -166,20 +196,20 @@ Use this when the column already exists on (or is derivable from) the products t
     "derived_dimensions": {           # Spark SQL expressions against the products schema
         "price_tier": "CASE WHEN price_without_tax < 50 THEN 'budget' ELSE 'premium' END"
     },
-    "value_filters": {},              # restrict which values of a dimension appear in its own breakdown
+    "value_filters": {},              # restrict which values of a cut appear in its own breakdown
 }
 ```
 
 - Derived expressions are validated at runtime; failures are **skipped with a warning** (unlike dimension sources, which fail loudly).
-- `value_filters` (also available on `dimension_sources`, see 3.4b): applied only to that dimension's own slice breakdown — Overall and other slices are unaffected. Accepts a LIST (include-only: `[]` = non-null, `["A"]` = only A) or a DICT (`{"include": [...]}`, `{"exclude": [...]}` keeps the rest incl NULL, optional `keep_null`).
+- `value_filters`: applied only to that cut's own breakdown — Overall and other cuts are unaffected. Accepts a LIST (include-only: `[]` = non-null, `["A"]` = only A) or a DICT (`{"include": [...]}`, `{"exclude": [...]}` keeps the rest incl NULL, optional `keep_null`).
   - dim omitted → keep all values, including `NULL` (default)
   - `[]` → keep all non-null values (drops only the `NULL` bucket)
   - `["A", "B"]` → keep only those values (drops `NULL` and unlisted values)
   - Example: `{"brand": ["NIKE", "ADIDAS"]}` or `{"brand": []}` to drop a `NULL` brand bucket.
 
-#### 3.4b — `dimension_sources` (columns from other tables)
+#### 3.4b — `dimension_sources` (columns from other tables) → ROOTS
 
-Use this **only** when a breakdown column does **not** live on the products table (e.g. NVROUT from `operation/extended_product`). Each enabled source is left-joined onto the product attribute projection.
+Use this when a breakdown column does **not** live on the products table (e.g. NVROUT from `operation/extended_product`). Each enabled source is left-joined onto the product attribute projection, and **every one of its columns becomes a root** — a fully-broken-out population, like kpi-skill-toolkit's NVROUT/COMP major tabs — not a flat cut.
 
 ```python
 "dimension_sources": [
@@ -191,10 +221,10 @@ Use this **only** when a breakdown column does **not** live on the products tabl
         "join_key": "product_id",             # must be a column on products
         "columns": [],                        # raw source columns to carry over
         "derived": {
-            # Spark SQL over the SOURCE table's columns → new slice dimension(s)
+            # Spark SQL over the SOURCE table's columns → new ROOT dimension(s)
             "is_nvrout": "CASE WHEN program LIKE '%NVROUT%' THEN 'yes' ELSE 'no' END",
         },
-        "value_filters": {"is_nvrout": ["yes"]},  # numbers only for the NVROUT universe
+        "root_values": {"is_nvrout": {"yes": "nvrout"}},  # root "nvrout" = is_nvrout=='yes' only
     },
     # Add more sources as needed — one dict per external table
     {
@@ -209,20 +239,34 @@ Use this **only** when a breakdown column does **not** live on the products tabl
 ]
 ```
 
+**`root_values`: `{dim_col: {raw_value: root_name}}`**
+- Omit a `dim_col` (or omit `root_values` entirely) → **auto-discovery**: one root per distinct value actually found in the data, named after the value itself (resolved at runtime in `fiscal._resolve_root_definitions`, since it needs real data — not something `materialize()` alone can determine).
+- `{"yes": "nvrout"}` → exactly one root, named `"nvrout"`, restricted to rows where `is_nvrout=='yes'`. `'no'` and `NULL` are **not** their own root and only appear under `"overall"`.
+- `{"yes": "a", "no": "b"}` → two named roots, one per listed value.
+- A misconfigured column (not among that source's own `columns`/`derived`) fails loudly in `materialize()`.
+
 **Key rules:**
-- Do NOT also list a `dimension_sources` column in `slices.dimensions` — it becomes a slice automatically.
+- Do NOT also list a `dimension_sources` column in `slices.dimensions` — it becomes a root automatically, and roots and cuts are mutually exclusive by design.
 - The source is deduplicated to **one row per join_key** before the join — pre-aggregate your source if the raw table has multiple rows per product.
 - **Enabled sources fail loudly** on bad path / missing column / bad expression (by design — a silently dropped segment would misreport).
-- **NULL behaviour**: products absent from the source get `NULL` (left join). For a clean yes/no split, ensure the source covers the full product universe, or use `ELSE 'no'` only works for rows that exist.
-- **Overlapping segments** (e.g. COMP includes NVROUT): use independent boolean dimensions (`is_nvrout`, `is_comp`) — one product can be `yes` for both.
-- **`value_filters`** (same semantics as `slices.value_filters`, see 3.4a): restricts that dimension's own breakdown only. LIST form (include-only): omit the dim for all values incl `NULL`, `[]` for all non-null, `["yes"]` for only that value. DICT form (NULL-aware): `{"include": ["yes"]}` keep only yes; `{"exclude": ["nfg"]}` keep everything except nfg **including NULL** (the way to drop an exclusion list and keep the remainder); optional `"keep_null": True/False`. `{"is_nvrout": ["yes"]}` gives numbers only for the NVROUT universe.
+- **NULL behaviour**: products absent from the source get `NULL` (left join). For a clean yes/no split, ensure the source covers the full product universe, use `fillna`, or accept that `NULL` products never get their own root value regardless.
+- **Overlapping segments** (e.g. COMP includes NVROUT): model as independent dimension columns (`is_nvrout`, `is_comp`), each with its own `root_values` entry — a product can belong to both roots.
+- **`value_filters` on `dimension_sources` no longer exists** — it was superseded by `root_values`. A dimension_source column is never a cut, so a value_filter on it could never fire.
 - CSV sources honour the same `location` (`datastore` / `workspace`) and `csv_options` as scope adjustments.
 
-**Scope vs slices — two different machines:**
+#### 3.4c — Roots and cuts: the full model
+
+- **Roots** = `"overall"` (always, unrestricted) + one per configured `root_values` entry (e.g. `"nvrout"`, `"comp"`). A client with no root-producing `dimension_sources` gets a single `"overall"` root — the report looks exactly as it did before roots existed.
+- **Cuts** = `"overall"` (the root's own total, no further breakdown) + each `slices.dimensions`/`derived_dimensions` entry (e.g. `brand`, `SMW`) — applied identically within every root.
+
+With `root_values: {"is_nvrout": {"yes": "nvrout"}}` and `slices.dimensions: ["brand"]`, `kpi_long` has: `overall`×`overall` (grand total), `overall`×`brand` (brand across everything), `nvrout`×`overall` (NVROUT total), `nvrout`×`brand` (brand within NVROUT only) — mirroring kpi-skill-toolkit's `overall_annual_segment` / `nvr_all_annual_brand` outputs. `kpi_long`, comparisons (`comparison_yoy`/`comparison_ytd`/`comparable_comparison_ytd` all carry a `"root"` column), and the HTML report (root becomes an outer tab when more than one root exists) are all root × cut aware. See §7 for the exact loop and §9 for `ctx.cut_dimensions`/`ctx.root_definitions`.
+
+**Scope vs. roots vs. cuts — three different knobs:**
 | Need | Use | Effect |
 |------|-----|--------|
-| Include/exclude which (product, store, week) rows enter KPIs | `scope_adjustments` | Changes scope membership; `scope_origin` is for reporting only |
-| Break the report out by a segment | `slices` + `dimension_sources` | Adds a grouping dimension everywhere downstream |
+| Include/exclude which (product, store, week) rows enter KPIs at all | `scope_adjustments` | Changes scope **membership** |
+| A named, fully-broken-out population tab (NVROUT vs COMP) | `dimension_sources[].root_values` | Adds a **root** |
+| Break any root's population out by a dimension (brand, SMW) | `slices` | Adds a **cut**, applied within every root |
 
 ### 3.5 Service store exclusions
 
@@ -255,23 +299,23 @@ All-store sales totals include these stores; only service-specific metrics exclu
 
 | Table | Contents |
 |-------|----------|
-| `kpi_long` | All metrics × periods (annual/ytd/quarter/monthly/weekly) × slices |
-| `comparison_yoy` | YoY comparison rows |
-| `comparison_ytd` | YTD comparison rows (one row set per consecutive-year pair, elapsed-window sums) |
+| `kpi_long` | All metrics × periods (annual/ytd/quarter/monthly/weekly) × **root** × cut (see §3.4c) |
+| `comparison_yoy` | YoY comparison rows, per root × cut |
+| `comparison_ytd` | YTD comparison rows, per root × cut (one row set per consecutive-year pair, elapsed-window sums) |
 | `scope_diff` | Defined vs score annual diff (only when `scope.run_scope_diff=True`) |
-| `comparable_kpi_long` | Like-for-like per-link YTD metrics + `comparable_pair_count` + `link_prior_year`/`link_current_year` (only when `comparable_pairs.enabled=True`) |
-| `comparable_comparison_ytd` | Like-for-like YTD comparison rows (only when `comparable_pairs.enabled=True`) |
+| `comparable_kpi_long` | Like-for-like per-link YTD metrics + `comparable_pair_count` + `link_prior_year`/`link_current_year`, per root × cut (only when `comparable_pairs.enabled=True`) |
+| `comparable_comparison_ytd` | Like-for-like YTD comparison rows, per root × cut (only when `comparable_pairs.enabled=True`) |
 
 No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — comparable is YTD-only and there's no separate QoQ/MoM/WoW comparison at all.
 
-**Merge keys (incremental only)** — defined in `io.py` `TABLE_ROW_KEYS`:
+**Merge keys (incremental only)** — defined in `io.py` `TABLE_ROW_KEYS`. **`root` is now part of every key that has `dimension`/`dimension_value`** — without it, the same cut (e.g. `brand`="KNG") under two different roots would collide as if it were one row. Saved history from before this existed lacks the `root` column entirely; the merge fails loudly on that missing key column (by design) rather than silently corrupting old history — re-run and re-save if you hit this.
 
 | Table | Keys |
 |-------|------|
-| `kpi_long` | `period_type`, `period`, `dimension`, `dimension_value` |
-| `comparison_*` | `comparison_type`, `dimension`, `dimension_value`, `metric_key`, `current_period` |
+| `kpi_long` | `period_type`, `period`, `root`, `dimension`, `dimension_value` |
+| `comparison_*` | `comparison_type`, `root`, `dimension`, `dimension_value`, `metric_key`, `current_period` |
 | `scope_diff` | `Year`, `metric` |
-| `comparable_kpi_long` | `comparison_type`, `period_type`, `period`, `dimension`, `dimension_value`, `link_prior_year`, `link_current_year` (the link tag is required — the same year can carry a different value per link it's paired with) |
+| `comparable_kpi_long` | `comparison_type`, `period_type`, `period`, `root`, `dimension`, `dimension_value`, `link_prior_year`, `link_current_year` (the link tag is required — the same year can carry a different value per link it's paired with) |
 
 **Save modes:**
 
@@ -395,22 +439,24 @@ Environment override: `KPI_RUN_MODE=html_only`
 }
 ```
 
-The report has six top-level tabs:
+**Root tab (only rendered when more than one root exists — see §3.4c).** With a single root (`"overall"` only, the common case with no root-producing `dimension_sources`), the report renders exactly as it always has — no extra tab layer, period tabs are the outermost level. With more than one root, an outer tab bar appears (one tab per root, e.g. Overall / NVROUT / COMP), each containing its own complete period-tab set below; **Metric Details** moves to be a peer of the root tabs instead of the period tabs in this case (it's root-independent — just metric definitions — so it's never duplicated per root).
+
+Each root's period tabs (six top-level tabs when it's the only/outermost level; five plus the shared Metric Details when nested under a root tab):
 - **Annual** — KPI table by year + YoY comparison (no comparable YoY — comparable is YTD-only)
 - **YTD** — KPI table by year over each year's elapsed (fully-closed-quarters) window + YTD comparison, stacked one mini-table per consecutive-year pair (+ comparable YTD when enabled)
 - **Quarter** — KPI table by fiscal quarter, **value trend only** (most recent N quarters, default 5) — no comparison table
-- **Monthly** — KPI table by month (`YYYY-MM`), **value trend only** (most recent N months, default 5) — no comparison table
+- **Monthly** — KPI table by month, **value trend only** (most recent N months, default 5) — no comparison table. Column header text is the real calendar month (e.g. "2026-Aug"), which can differ from the fiscal month *number* underlying the grouping — see §3.1's fiscal-calendar note.
 - **Weekly** — KPI table for the **most recent N fiscal weeks** (default 5; sorted by `week_start_date`), **value trend only** — no comparison table
-- **Metric Details** — plain-English definition, store scope, and formula for every active metric
+- **Metric Details** — plain-English definition, store scope, and formula for every active metric (single root only; a peer of the root tabs, not the period tabs, when there's more than one root)
 
 Within each period tab, navigation is three levels:
 1. **Period** (horizontal) — Annual / YTD / Quarter / Monthly / Weekly
-2. **Slice dimension** (horizontal pills) — Overall + every slice column present in `kpi_long` (inferred automatically; not hard-coded to brand)
-3. **Dimension value** (vertical sidebar) — one clickable tab per value (e.g. each brand); Overall shows a single panel
+2. **Cut dimension** (horizontal pills) — Overall + every `ctx.cut_dimensions` column present in `kpi_long` for that root (inferred automatically; not hard-coded to brand) — root-defining columns never appear here, only `slices` columns
+3. **Cut value** (vertical sidebar) — one clickable tab per value (e.g. each brand); Overall shows a single panel
 
-The executive header shows client, reporting window, scope mode, slice dimensions, and generated timestamp.
+The executive header shows client, reporting window, scope mode, cut dimensions, and generated timestamp.
 
-Period display is trimmed **at the data level** before saves and HTML render. All `*_display_*` settings affect both the HTML and the saved Delta tables.
+`kpi_long` itself is never trimmed (see §12.14) — only `ctx.kpi_long_display`, used solely for HTML rendering, is trimmed per the `*_display_*` settings; the saved Delta `kpi_long` always holds the full computed window.
 
 Metric definitions can be customised per-client:
 ```python
@@ -459,11 +505,13 @@ Map raw lost-sales and instock table columns to canonical names, or read in-stoc
 | Change scope table path | `path_segments.defined_scope` |
 | Change scope column names | `defined_scope.*_col` |
 | Exclude e-com stores | `service_metrics.excluded_store_ids` |
-| Add a brand/category slice (products column) | `slices.dimensions` |
-| Add a derived slice (products SQL expression) | `slices.derived_dimensions` |
-| Add a slice from another table (e.g. NVROUT) | `dimension_sources` |
-| Add multiple external dimension sources | add another dict to `dimension_sources` list |
-| Restrict a slice's values / drop NULL bucket | `slices.value_filters` or `dimension_sources[].value_filters` |
+| Add a brand/category cut (products column) | `slices.dimensions` |
+| Add a derived cut (products SQL expression) | `slices.derived_dimensions` |
+| Add a named root population (e.g. NVROUT/COMP tab) from another table | `dimension_sources[].root_values` |
+| Add multiple external dimension sources / roots | add another dict to `dimension_sources` list |
+| Restrict a cut's values / drop NULL bucket | `slices.value_filters` |
+| Restrict/rename which values become their own root | `dimension_sources[].root_values` (omit for auto-discovery — see §3.4b) |
+| Change a client's fiscal_cal upload column names | `fiscal_calendar.column_map` (`quarter_col`/`month_col`/`month_name_col`) |
 | Filter inputs | `input_filters.{defined_scope,lost_sales,daily_data}` |
 | Blend fast/slow-mover lost-sales models by product velocity | `lost_sales_ensemble.enabled: True` (+ `slow_path_segments`, `speed_cluster_path_segments`, `speed_cluster_format`, `speed_cluster_attribute_name`/`speed_cluster_value_col`, `fast_mover_clusters`) |
 | Map lost-sales table columns to different names | `lost_sales_source` (week_col, product_col, store_col, lost_sales_col, in_stock_col, total_days_col) |
@@ -580,16 +628,18 @@ build_pipeline_frames(scope) → {scoped_daily, inst_data, lost_base, ...}
        └─ compute_kpis: sales | WOS (product×week, stores aggregated) | mean_stock | instock
        └─ sort in pandas (.sort_values), not Spark orderBy
 
-build_kpi_long → kpi_long (period_type|period|dimension|dimension_value|metrics)
-               → annual / ytd / quarter / monthly / weekly × overall × slices
+build_kpi_long → kpi_long (period_type|period|root|dimension|dimension_value|metrics)
+               → annual / ytd / quarter / monthly / weekly × root (overall + ctx.root_definitions)
+                 × cut (overall + ctx.cut_dimensions) — every root gets every cut (see §3.4c)
 trim_periods_to_recent → produces ctx.kpi_long_display (HTML rendering ONLY) trimmed to N most
                           recent per period_type; ctx.kpi_long itself is NEVER trimmed — it's
                           always the full computed window, which is what gets saved to Delta
                           (no trim setting for ytd — always shows every year present)
-build_comparisons → yoy/ytd pandas tables (ytd: one row set per year-pair, chained across
-                     consecutive years). No qoq/mom/wow comparison table exists.
-build_comparable_pairs → comparable_kpi_long + comparable_comparison_ytd (when enabled; YTD-only,
-                          per-link pair restriction — see §3.7)
+build_comparisons → yoy/ytd pandas tables, per root × cut (ytd: one row set per year-pair,
+                     chained across consecutive years). No qoq/mom/wow comparison table exists.
+build_comparable_pairs → comparable_kpi_long + comparable_comparison_ytd, per root × cut (when
+                          enabled; YTD-only, per-link pair restriction computed once against the
+                          overall population, not per root — see §3.7)
 build_scope_diff → scope_diff pandas table (defined vs score; only when run_scope_diff=True)
 save_outputs → kpi_long (incremental) → recompute comparisons from merged history → save all
 render_kpi_html → standalone HTML file
@@ -607,12 +657,15 @@ render_kpi_html → standalone HTML file
 | Comparisons skipped | Need ≥2 years present in the run window (both YoY and YTD) |
 | Ensemble read fails on `attribute_name` not found | Speed-cluster table is **wide**-shaped (cluster already its own column) but `speed_cluster_format` is still `"long"` (default) — set `speed_cluster_format: "wide"` + `speed_cluster_value_col` |
 | Comparisons only show current run period | `recompute_comparisons_from_history` may be False or no prior partition found; ensure incremental save ran first |
-| Empty slice dimension | Column missing from products table or derived SQL failed validation |
-| Slice from another table (NVROUT, etc.) missing | Use `dimension_sources` — not `slices.dimensions` — when the column lives on another table |
+| Empty cut dimension | Column missing from products table or derived SQL failed validation |
+| A NVROUT/COMP-style breakdown is missing, or shows as a flat cut instead of its own tab | Use `dimension_sources[].root_values` — it becomes a **root**, not a `slices.dimensions` cut, when the column lives on another table (see §3.4b/c) |
 | Dimension source errors on read | An **enabled** dimension source fails loudly on bad path / missing column / bad expression — fix the source or set `enabled: False` |
-| Slice value count looks doubled | A `dimension_source` table has multiple rows per `join_key` — pre-aggregate to one row per product (toolkit keeps arbitrary row) |
-| `is_nvrout` (or another slice) shows a NULL bucket, or you want only one value (e.g. only NVROUT products) | Set `value_filters` for that dimension in `slices` or the `dimension_source`: `["yes"]` keeps only `yes`; `[]` drops the NULL bucket; `{"exclude": ["nfg"]}` drops a set but keeps the rest incl NULL — see §3.4a/§3.4b |
-| Scope debug counts don't match `kpi_long` per slice | The debug cell recomputes scope independently — re-run it after any config change (scope mode, adjustments, `value_filters`) so it matches Cell 3. NULL values show as `"NULL"` here vs blank/None in `kpi_long` — see §3.3a |
+| Cut value count looks doubled | A `dimension_source` table has multiple rows per `join_key` — pre-aggregate to one row per product (toolkit keeps arbitrary row) |
+| Only want one root value (e.g. only NVROUT products), or an expected root is missing | Set `root_values` on that `dimension_sources` entry: `{"yes": "nvrout"}` makes exactly one root; omit it to auto-discover one root per distinct value instead. `NULL` never gets its own root. |
+| A cut dimension shows a NULL bucket, or you want only one value | `slices.value_filters`: `["yes"]` keeps only `yes`; `[]` drops the NULL bucket; `{"exclude": ["nfg"]}` drops a set but keeps the rest incl NULL — see §3.4a. (For a `dimension_sources` column's own NULL bucket, use `fillna` on that source instead — it's a root, not a cut.) |
+| Scope debug counts don't match `kpi_long` per cut | The debug cell recomputes scope independently — re-run it after any config change (scope mode, adjustments, `value_filters`) so it matches Cell 3. NULL values show as `"NULL"` here vs blank/None in `kpi_long` — see §3.3a. Note scope debug reports all `active_slice_dimensions` (root columns included), not root-restricted like `kpi_long`. |
+| A root you expect is missing from the HTML report, or the root tab layer doesn't appear at all | The root tab only renders when more than one root exists in `kpi_long`. With a single root (`"overall"`, no root-producing `dimension_sources` enabled), the report renders exactly as before — this is expected, not a bug. Check `ctx.root_definitions` (or the "ROOTS:" print in the fiscal log) to confirm what was actually resolved. |
+| A metric looks right for `"overall"` but wrong/missing within a specific root | Confirm the root's `dim_col` actually has non-null values matching its `root_values` for the products you expect — a product missing that dimension_source's join key entirely gets `NULL` and never appears in any named root, only `"overall"` |
 | Score backfills all weeks | Defined scope path wrong or defined scope table empty for the window |
 | WOS unexpectedly high/low | Check `excluded_store_ids` — missing e-com IDs inflate network inventory |
 | `kpi_long is empty — run pipeline first` | Called `build_html_report` before `runner.run()`, or saved outputs missing in `html_only` mode |
@@ -637,8 +690,10 @@ render_kpi_html → standalone HTML file
 | `fiscal_cal` | date → Year/Week lookup |
 | `fiscal_week` | Year/Week → week_start/end/Fiscal_Quarter/Fiscal_Month |
 | `available_fiscal_quarters` | fiscal-quarter numbers fully closed as of `REPORT_END_DATE` for the latest year — the YTD elapsed-window set, applied to every year |
-| `products_attr` | broadcast: product_id, cogs, price, slice dims |
-| `active_slice_dimensions` | validated slice column names (from slices + dimension_sources) |
+| `products_attr` | broadcast: product_id, cogs, price, ALL dimension columns (cuts + root-defining) |
+| `active_slice_dimensions` | every validated dimension column (slices + dimension_sources) — includes root-defining columns; used to build `products_attr`/`product_dims` and by `scope_debug.py`. NOT what the KPI step iterates for cuts — see `cut_dimensions`. |
+| `cut_dimensions` | `active_slice_dimensions` minus root-defining columns — what `kpi_long`/comparisons/HTML actually iterate as cuts within every root (§3.4c) |
+| `root_definitions` | resolved roots (excluding the implicit `"overall"`): `[{"root": name, "dim_col": ..., "value": ...}, ...]`, from `fiscal._resolve_root_definitions`. In `html_only` mode, `dim_col`/`value` are `None` (re-inferred from a loaded `kpi_long`'s own `root` column — only the name is needed to render) |
 | `defined_scope_keys` | product×[store×]Year×Week keys from defined scope |
 | `hybrid_scope_keys` | final scope (defined + adjustments + score backfill) |
 | `score_only_scope_keys` | score-filter scope (set when `use_hybrid_scope=True` or `run_scope_diff=True`) |
@@ -646,7 +701,7 @@ render_kpi_html → standalone HTML file
 | `lost_sales_weekly_base` | cached weekly lost-sales aggregates |
 | `kpi_long` | primary pandas output — FULL computed/loaded history, never trimmed; includes `period_type="ytd"` rows. This is what `save_outputs()` persists to Delta. |
 | `kpi_long_display` | trimmed-to-recent copy of `kpi_long` (per `html_report.*_display_*` settings), used ONLY by `render_kpi_html`. Set by `runner.build_comparisons()` / `run_html_only()` / `_recompute_comparisons_from_saved_history`; `render_kpi_html` falls back to `ctx.kpi_long` if this is `None`. |
-| `comparison_yoy/ytd` | full comparison long-format DataFrames (ytd can carry multiple year-pair rows per metric). No qoq/mom/wow — not comparison kinds. |
+| `comparison_yoy/ytd` | full comparison long-format DataFrames, per root × cut (ytd can carry multiple year-pair rows per metric). No qoq/mom/wow — not comparison kinds. |
 | `yoy_display/ytd_display` | display-format DataFrames (overall); for ytd this is just the **latest** consecutive-year pair — see `comparison_ytd` for the full multi-pair detail |
 | `scope_diff` | defined vs score annual diff (when `run_scope_diff=True`) |
 | `comparable_kpi_long` | like-for-like per-link YTD rows, tagged with `link_prior_year`/`link_current_year` (when `comparable_pairs.enabled=True`) |
@@ -743,4 +798,6 @@ For a quick distinct product/store count of the final scope (overall + per slice
 13. **Comparisons recomputed from merged history** — under incremental, `comparison_*` tables reflect the full saved `kpi_long` history, not just the current run window.
 14. **`ctx.kpi_long` is never trimmed; only `ctx.kpi_long_display` is** — the HTML display trim (`*_display_*` settings) must only ever write to `kpi_long_display`. Trimming `ctx.kpi_long` itself would silently truncate what `save_outputs()` persists, since `main.ipynb` calls `runner.run(save=False)` then `save_outputs(ctx, ...)` separately in a later cell — this was a real, previously-shipped bug.
 15. **Comparable-pairs (YTD-only) restriction is per consecutive-year link, not fixed across the whole window** — each link's pair universe comes from just that link's two years; a pair need not be present in every year in the run window to count for a link it's genuinely common to. This means the same year's metric value can legitimately differ across the two links it participates in — `comparable_kpi_long` rows carry `link_prior_year`/`link_current_year` specifically so incremental merge doesn't collide two links' rows for the same year under one key.
-11. **Dimension sources fail loudly** — unlike `slices.derived_dimensions` (skipped on error), an enabled `dimension_sources` entry always raises on bad path/column/expression.
+16. **Dimension sources fail loudly** — unlike `slices.derived_dimensions` (skipped on error), an enabled `dimension_sources` entry always raises on bad path/column/expression.
+17. **`dimension_sources` columns are ALWAYS roots, never cuts** — mutually exclusive with `slices` by design. A dimension_source column is unconditionally excluded from `ctx.cut_dimensions` even if nothing lists it as a root explicitly (auto-discovery still applies); do not expect it to show up as a flat breakdown alongside brand/SMW.
+18. **A fiscal calendar's month/quarter NUMBER is not assumed to equal the real calendar month/quarter** — `fiscal_calendar.column_map` reads a client's own quarter/month columns when present, but the Monthly tab's *display label* is never derived by feeding a fiscal month number into a month-name table (a client's fiscal year can be offset from the civil calendar, e.g. tbretail's Feb–Jan year, so fiscal month 07 can span real August). The label is instead derived from the majority real calendar month by day count across each fiscal month's actual dates when `month_name_col` isn't configured — see §3.1.
