@@ -109,14 +109,12 @@ CONFIG: Dict[str, Any] = {
     },
     "fiscal_calendar": {
         "use_fiscal_calendar": True,
-        # Column on the fiscal_cal upload carrying a display month label per week (e.g. "August").
-        # Read as-is (verbatim) when the column exists on fiscal_cal -- trusts the client's own
-        # fiscal calendar instead of re-deriving a name. Only relevant when use_fiscal_calendar is
-        # True; ignored (no such column exists) on the civil-calendar path, where the Monthly tab's
-        # month number is already the real calendar month.
-        # Set to None if this client's fiscal_cal has no such column, or you don't want it used --
-        # the Monthly tab then falls back to deriving the display month from the majority real
-        # calendar month across each fiscal month's actual dates (see html_report._build_month_display_labels).
+        # tbretail's fiscal_cal upload carries its own display month label per week (e.g.
+        # "August") in this column -- read verbatim and used directly on the Monthly tab instead
+        # of deriving one, since tbretail's fiscal year runs Feb-Jan and the fiscal month number
+        # doesn't line up with the real calendar month (fiscal month 07 has been observed
+        # spanning real 8/2-8/29). Falls back to the derived majority-real-calendar-month label
+        # for any period this column doesn't cover.
         "month_name_col": "month_name",
         "daily_time_columns": {
             "date": "date",
