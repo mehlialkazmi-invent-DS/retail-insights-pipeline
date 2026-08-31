@@ -714,20 +714,65 @@ def _display_period_labels(
     return _sort_period_labels(periods, period_type, week_start_by_period)
 
 
-def _period_th_label(period: str, period_type: Optional[str]) -> str:
+def _build_month_display_labels(ctx: Any) -> Dict[str, str]:
+    """Map each "YYYY-MM" fiscal-month period key to its real calendar-month display label.
+
+    The fiscal month NUMBER (Fiscal_Month, from fiscal_cal) does not line up with the real
+    calendar month on tbretail's fiscal calendar -- e.g. fiscal month 07 has been observed
+    spanning 8/2-8/29 (real August), and a 5-week fiscal month can span parts of three real
+    calendar months. So the display name is the majority (by day count) real calendar month
+    across each fiscal month's actual dates, not a lookup on the fiscal month number itself.
+
+    ctx.fiscal_cal is date-grain (date, Year, Week[, Month]); ctx.fiscal_week carries the
+    resolved Fiscal_Month per (Year, Week). Both are already-cached small reference frames
+    (one row per date / per week for the report window), so pulling them to pandas here is
+    the same pattern already used for week_start_by_period above.
+    """
+    fw_pd = ctx.fiscal_week.select("Year", "Week", "Fiscal_Month").distinct().toPandas()
+    fc_pd = ctx.fiscal_cal.select("Year", "Week", "date").toPandas()
+    fc_pd["calendar_month"] = pd.to_datetime(fc_pd["date"]).dt.month
+    merged = fc_pd.merge(fw_pd, on=["Year", "Week"], how="inner")
+    if merged.empty:
+        return {}
+    day_counts = (
+        merged.groupby(["Year", "Fiscal_Month", "calendar_month"]).size().reset_index(name="n_days")
+    )
+    majority = day_counts.sort_values("n_days", ascending=False).drop_duplicates(
+        subset=["Year", "Fiscal_Month"]
+    )
+    out: Dict[str, str] = {}
+    for row in majority.itertuples(index=False):
+        key = f"{int(row.Year)}-{int(row.Fiscal_Month):02d}"
+        out[key] = f"{int(row.Year)}-{calendar.month_abbr[int(row.calendar_month)]}"
+    return out
+
+
+def _period_th_label(
+    period: str,
+    period_type: Optional[str],
+    month_display_by_period: Optional[Dict[str, str]] = None,
+) -> str:
     """Column-header text for one period value.
 
     Display-only: the underlying `period` string (e.g. "2026-08" for monthly) stays as-is
     everywhere else -- kpi_long storage, incremental-save merge keys, and both the trimming
     sort in kpi_long.trim_periods_to_recent and _sort_period_labels above depend on it being
-    lexically sortable ("YYYY-MM"), which a month name is not. Only this header text swaps the
-    zero-padded month number for its abbreviated name.
+    lexically sortable ("YYYY-MM"), which a month name is not. Only this header text swaps to
+    a real calendar-month name.
+
+    "2026-08" is the FISCAL month key (Year + Fiscal_Month from fiscal_cal), which does NOT
+    line up with calendar month numbers on tbretail's (and possibly other clients') fiscal
+    calendar -- e.g. fiscal month 07 has been observed spanning 8/2-8/29 (real August), and a
+    5-week fiscal month can span parts of three real calendar months. So the display name is
+    looked up in month_display_by_period (built from the actual dates in fiscal_cal/fiscal_week
+    -- see render_kpi_html), never derived by feeding the fiscal month NUMBER into a month-name
+    table. If a period is missing from that map (should not normally happen), the raw fiscal
+    key is shown rather than guessing a name.
     """
     if period_type == "monthly":
-        match = re.match(r"^(\d{4})-(\d{2})$", str(period))
-        if match:
-            year, month = match.group(1), int(match.group(2))
-            return f"{year}-{calendar.month_abbr[month]}"
+        mapped = (month_display_by_period or {}).get(str(period))
+        if mapped:
+            return mapped
     return period
 
 
@@ -762,12 +807,15 @@ def _kpi_table_html(
     metric_cols: List[str],
     labels: Dict[str, str],
     period_type: Optional[str] = None,
+    month_display_by_period: Optional[Dict[str, str]] = None,
 ) -> str:
     if sub.empty or not periods:
         return '<p style="color:#64748b;font-size:.875rem">No data for this selection.</p>'
 
     grp = sub.drop_duplicates(subset=["period"]).set_index("period")
-    per_ths = "".join(f"<th>{_esc(_period_th_label(p, period_type))}</th>" for p in periods)
+    per_ths = "".join(
+        f"<th>{_esc(_period_th_label(p, period_type, month_display_by_period))}</th>" for p in periods
+    )
     head = f"<thead><tr><th class='cell-kpi'>Metric</th>{per_ths}</tr></thead>"
 
     rows: List[str] = []
@@ -873,12 +921,13 @@ def _value_panel_content(
     week_start_by_period: Optional[Dict[str, Any]] = None,
     comparable_comp_df: Optional[pd.DataFrame] = None,
     comparable_label: str = "",
+    month_display_by_period: Optional[Dict[str, str]] = None,
 ) -> str:
     sub, periods = _pivot_single_value(
         kpi_long, period_type, dimension, dimension_value, metric_cols,
         week_start_by_period,
     )
-    table = _kpi_table_html(sub, periods, metric_cols, labels, period_type)
+    table = _kpi_table_html(sub, periods, metric_cols, labels, period_type, month_display_by_period)
     cmp = _comparison_html(comp_df, dimension, dimension_value, comp_label, labels, period_type)
     comparable_cmp = _comparison_html(
         comparable_comp_df, dimension, dimension_value, comparable_label, labels, period_type
@@ -897,6 +946,7 @@ def _value_tabs_html(
     week_start_by_period: Optional[Dict[str, Any]] = None,
     comparable_comp_df: Optional[pd.DataFrame] = None,
     comparable_label: str = "",
+    month_display_by_period: Optional[Dict[str, str]] = None,
 ) -> str:
     values = _dimension_values(kpi_long, period_type, dimension)
     if not values:
@@ -905,7 +955,7 @@ def _value_tabs_html(
         return _value_panel_content(
             kpi_long, period_type, dimension, values[0],
             metric_cols, labels, comp_df, comp_label, week_start_by_period,
-            comparable_comp_df, comparable_label,
+            comparable_comp_df, comparable_label, month_display_by_period,
         )
 
     radios = "".join(
@@ -922,7 +972,7 @@ def _value_tabs_html(
 
     panels = "".join(
         f"<div class='value-panel value-panel-{_safe_id(period_type, dimension, str(i))}'>"
-        f"{_value_panel_content(kpi_long, period_type, dimension, v, metric_cols, labels, comp_df, comp_label, week_start_by_period, comparable_comp_df, comparable_label)}"
+        f"{_value_panel_content(kpi_long, period_type, dimension, v, metric_cols, labels, comp_df, comp_label, week_start_by_period, comparable_comp_df, comparable_label, month_display_by_period)}"
         f"</div>"
         for i, v in enumerate(values)
     )
@@ -949,6 +999,7 @@ def _period_tab_html(
     week_start_by_period: Optional[Dict[str, Any]] = None,
     comparable_comp_df: Optional[pd.DataFrame] = None,
     comparable_label: str = "",
+    month_display_by_period: Optional[Dict[str, str]] = None,
 ) -> str:
     pt_id = _safe_id(period_type)
 
@@ -974,13 +1025,13 @@ def _period_tab_html(
             content = _value_panel_content(
                 kpi_long, period_type, "overall", dval,
                 metric_cols, labels, comp_df, comp_label, week_start_by_period,
-                comparable_comp_df, comparable_label,
+                comparable_comp_df, comparable_label, month_display_by_period,
             )
         else:
             content = _value_tabs_html(
                 kpi_long, period_type, dim, metric_cols, labels,
                 comp_df, comp_label, week_start_by_period,
-                comparable_comp_df, comparable_label,
+                comparable_comp_df, comparable_label, month_display_by_period,
             )
         panels.append(f"<div class='kpi-dim-panel dim-panel-{dim_id}'>{content}</div>")
 
@@ -1176,6 +1227,10 @@ def render_kpi_html(
         fw = ctx.fiscal_week.select("Year_Week", "week_start_date").distinct().toPandas()
         week_start_by_period = dict(zip(fw["Year_Week"], fw["week_start_date"].astype(str)))
 
+    month_display_by_period: Dict[str, str] = {}
+    if "monthly" in period_types and getattr(ctx, "fiscal_cal", None) is not None and getattr(ctx, "fiscal_week", None) is not None:
+        month_display_by_period = _build_month_display_labels(ctx)
+
     dims_by_period = {pt: dims for pt in period_types}
     values_by_dim: Dict[str, List[str]] = {}
     for pt in period_types:
@@ -1201,7 +1256,7 @@ def render_kpi_html(
 
     period_panels = "".join(
         f"<div class='top-panel top-panel-{_safe_id(pt)}'>"
-        f"{_period_tab_html(kpi_long, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period, comparable_comp_map.get(pt), _COMPARABLE_LABELS.get(pt, ''))}"
+        f"{_period_tab_html(kpi_long, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period, comparable_comp_map.get(pt), _COMPARABLE_LABELS.get(pt, ''), month_display_by_period)}"
         f"</div>"
         for pt in period_types
     )
