@@ -120,6 +120,24 @@ CONFIG: Dict[str, Any] = {
             "month_col": "Month",
             "month_name_col": "month_name",
         },
+        # A column-name map for the RAW noob/daily-data table (PATH_DAILY_DATA) -- a different
+        # source table from column_map above, which is about the fiscal_cal upload. Same idea as
+        # LOST_SALES_COLUMN_MAP/INSTOCK_SOURCE_COLUMN_MAP elsewhere in this config: lets a client
+        # whose daily_data calls its date/week columns something else point the pipeline at them,
+        # without renaming the actual table.
+        #
+        # Only actually consulted on the CIVIL-calendar path (use_fiscal_calendar=False) --
+        # build_time_grain_from_daily_data() (fiscal.py) reads daily_data's own date/week columns
+        # directly to build Year/Week there, instead of joining a fiscal_cal upload. When
+        # use_fiscal_calendar=True, daily_data's date/week columns aren't read through this map at
+        # all -- Year/Week always come from the fiscal_cal join instead.
+        #
+        # "date" and "week" are the only keys actually read anywhere in the pipeline (grep
+        # DAILY_TIME_COLUMNS/time_cols in kpi_pipeline/*.py to confirm). "year" is unused dead
+        # config -- kept as documented intent, not because anything reads it: Year is always
+        # derived from `date` (F.year(date)), deliberately, never from a raw 'year' column, because
+        # that raw column can carry the ISO week-year and mislabel late-December dates into the
+        # following year (see fiscal.py's module docstring).
         "daily_time_columns": {
             "date": "date",
             "year": "year",
