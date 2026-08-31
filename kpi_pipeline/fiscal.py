@@ -12,7 +12,7 @@ month and annual rollups remain correct.
 from __future__ import annotations
 
 import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
@@ -22,8 +22,9 @@ from kpi_pipeline.context import KPIContext
 from kpi_pipeline.inputs import read_csv_source
 
 
-def _build_fiscal_week_frame(daily_grain: DataFrame) -> DataFrame:
+def _build_fiscal_week_frame(daily_grain: DataFrame, month_name_col: Optional[str] = None) -> DataFrame:
     has_month = "Month" in daily_grain.columns
+    has_month_name = bool(month_name_col) and month_name_col in daily_grain.columns
     agg_exprs = [
         F.min("date").alias("week_start_date"),
         F.max("date").alias("week_end_date"),
@@ -31,6 +32,13 @@ def _build_fiscal_week_frame(daily_grain: DataFrame) -> DataFrame:
     ]
     if has_month:
         agg_exprs.append(F.first("Month", ignorenulls=True).alias("_raw_month"))
+    if has_month_name:
+        # Verbatim display month label from the fiscal_cal upload (e.g. "August") -- trusts the
+        # client's own fiscal calendar instead of deriving one. Consumed by html_report's Monthly
+        # tab when present; falls back to a derived label (majority real calendar month across the
+        # fiscal month's actual dates) when this column is absent or not configured. See
+        # config.py's fiscal_calendar.month_name_col.
+        agg_exprs.append(F.first(month_name_col, ignorenulls=True).alias("Fiscal_Month_Name"))
 
     frame = (
         daily_grain.groupBy("Year", "Week")
@@ -88,15 +96,18 @@ def build_fiscal_cal_and_week_from_upload(
     report_end_date: datetime.date,
 ) -> Tuple[DataFrame, DataFrame]:
     raw = ctx.spark.read.format("delta").load(path)
+    month_name_col = ctx.settings.get("FISCAL_MONTH_NAME_COL")
     select_cols = ["date", "Year", "Week", "Quarter"]
     if "Month" in raw.columns:
         select_cols.append("Month")
+    if month_name_col and month_name_col in raw.columns and month_name_col not in select_cols:
+        select_cols.append(month_name_col)
     fiscal_cal_out = (
         raw.select(*select_cols)
         .withColumn("date", F.to_date("date"))
         .filter(F.col("date").between(F.lit(report_start_date), F.lit(report_end_date)))
     )
-    return fiscal_cal_out, _build_fiscal_week_frame(fiscal_cal_out)
+    return fiscal_cal_out, _build_fiscal_week_frame(fiscal_cal_out, month_name_col)
 
 
 def build_time_grain_from_daily_data(
