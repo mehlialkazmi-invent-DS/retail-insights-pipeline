@@ -19,6 +19,7 @@ Slice dimensions and values are inferred from ``kpi_long`` — no hard-coded bra
 """
 from __future__ import annotations
 
+import calendar
 import datetime
 import html as _html
 import re
@@ -713,6 +714,23 @@ def _display_period_labels(
     return _sort_period_labels(periods, period_type, week_start_by_period)
 
 
+def _period_th_label(period: str, period_type: Optional[str]) -> str:
+    """Column-header text for one period value.
+
+    Display-only: the underlying `period` string (e.g. "2026-08" for monthly) stays as-is
+    everywhere else -- kpi_long storage, incremental-save merge keys, and both the trimming
+    sort in kpi_long.trim_periods_to_recent and _sort_period_labels above depend on it being
+    lexically sortable ("YYYY-MM"), which a month name is not. Only this header text swaps the
+    zero-padded month number for its abbreviated name.
+    """
+    if period_type == "monthly":
+        match = re.match(r"^(\d{4})-(\d{2})$", str(period))
+        if match:
+            year, month = match.group(1), int(match.group(2))
+            return f"{year}-{calendar.month_abbr[month]}"
+    return period
+
+
 def _pivot_single_value(
     kpi_long: pd.DataFrame,
     period_type: str,
@@ -749,7 +767,7 @@ def _kpi_table_html(
         return '<p style="color:#64748b;font-size:.875rem">No data for this selection.</p>'
 
     grp = sub.drop_duplicates(subset=["period"]).set_index("period")
-    per_ths = "".join(f"<th>{_esc(p)}</th>" for p in periods)
+    per_ths = "".join(f"<th>{_esc(_period_th_label(p, period_type))}</th>" for p in periods)
     head = f"<thead><tr><th class='cell-kpi'>Metric</th>{per_ths}</tr></thead>"
 
     rows: List[str] = []
