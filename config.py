@@ -3,7 +3,7 @@
 import copy
 import datetime
 import os
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 # Period-over-period comparison kinds the pipeline can produce, in canonical order.
 # QoQ/MoM/WoW comparison tables were dropped for simplicity — the Quarter/Monthly/Weekly period
@@ -32,44 +32,21 @@ CONFIG: Dict[str, Any] = {
     },
     "fiscal_calendar": {
         "use_fiscal_calendar": True,
-        # Column names to read from the fiscal_cal upload, only relevant when use_fiscal_calendar
-        # is True (ignored on the civil-calendar path -- there, Fiscal_Quarter/Fiscal_Month are
-        # always derived from `date` directly, which IS the real calendar quarter/month already).
-        #
-        # Each entry is independently optional and auto-detected: read/parsed when the named
-        # column exists on fiscal_cal; derived instead when it's absent OR set to None here. This
-        # lets every client's fiscal_cal provide as much or as little of this as it actually has --
-        # see fiscal.py's _build_fiscal_week_frame and html_report._build_month_display_labels for
-        # exactly how each one derives when missing.
+        # fiscal_cal upload column names (used only when use_fiscal_calendar=True). Each is
+        # optional and auto-detected: read when present, derived when absent or set to None.
+        # See fiscal._build_fiscal_week_frame / html_report._build_month_display_labels.
         "column_map": {
-            "quarter_col": "Quarter",  # raw quarter label (e.g. "Q1") -> Fiscal_Quarter number.
-                                        # Derived as ceil(Fiscal_Month / 3) if absent.
-            "month_col": "Month",  # raw month code (e.g. "M01") -> Fiscal_Month number. Derived
-                                    # as the real calendar month of the week's start date if absent.
-            "month_name_col": "month_name",  # display month label (e.g. "August"), shown verbatim
-                                              # on the Monthly tab. Derived (majority real calendar
-                                              # month across each fiscal month's actual dates) if
-                                              # absent -- see the note on fiscal calendars whose
-                                              # fiscal month number doesn't match the calendar month.
+            "quarter_col": "Quarter",  # "Q1" -> Fiscal_Quarter. Absent -> ceil(Fiscal_Month/3).
+            "month_col": "Month",  # "M01" -> Fiscal_Month. Absent -> calendar month of week start.
+            "month_name_col": "month_name",  # display label, e.g. "August", used verbatim on the
+                                              # Monthly tab. Absent -> derived from the majority
+                                              # real calendar month across the fiscal month's days.
         },
-        # A column-name map for the RAW noob/daily-data table (PATH_DAILY_DATA) -- a different
-        # source table from column_map above, which is about the fiscal_cal upload. Same idea as
-        # LOST_SALES_COLUMN_MAP/INSTOCK_SOURCE_COLUMN_MAP elsewhere in this config: lets a client
-        # whose daily_data calls its date/week columns something else point the pipeline at them,
-        # without renaming the actual table.
-        #
-        # Only actually consulted on the CIVIL-calendar path (use_fiscal_calendar=False) --
-        # build_time_grain_from_daily_data() (fiscal.py) reads daily_data's own date/week columns
-        # directly to build Year/Week there, instead of joining a fiscal_cal upload. When
-        # use_fiscal_calendar=True, daily_data's date/week columns aren't read through this map at
-        # all -- Year/Week always come from the fiscal_cal join instead.
-        #
-        # "date" and "week" are the only keys actually read anywhere in the pipeline (grep
-        # DAILY_TIME_COLUMNS/time_cols in kpi_pipeline/*.py to confirm). "year" is unused dead
-        # config -- kept as documented intent, not because anything reads it: Year is always
-        # derived from `date` (F.year(date)), deliberately, never from a raw 'year' column, because
-        # that raw column can carry the ISO week-year and mislabel late-December dates into the
-        # following year (see fiscal.py's module docstring).
+        # Column-name map for the RAW noob/daily-data table -- only consulted on the CIVIL path
+        # (use_fiscal_calendar=False), where Year/Week are read from daily_data directly instead
+        # of a fiscal_cal join. "year" is unused dead config: Year always comes from `date`
+        # (F.year(date)), never a raw 'year' column, since that can carry the ISO week-year and
+        # mislabel late-December dates into the next year.
         "daily_time_columns": {
             "date": "date",
             "year": "year",
@@ -227,41 +204,27 @@ CONFIG: Dict[str, Any] = {
             # "location": "workspace",  # "datastore" (default) or "workspace" (/Workspace/...)
             # "csv_options": {"header": True, "inferSchema": True},
             "join_key": "product_id",
-            "columns": [],  # raw source columns to carry over as slice dimensions
+            "columns": [],  # raw source columns to carry over as root dimensions
             "derived": {
-                # Spark SQL expressions evaluated against the SOURCE table's columns.
-                # Each key becomes a new slice dimension column.
+                # Spark SQL against the SOURCE table. Each key is a ROOT dimension (see
+                # root_values below), not a flat cut — use slices.dimensions/derived_dimensions
+                # for a breakdown (e.g. brand) that should apply WITHIN every root instead.
                 "is_nvrout": "CASE WHEN program LIKE '%NVROUT%' THEN 'yes' ELSE 'no' END",
-                # Add more dimensions from this source here, e.g.:
                 # "is_comp": "CASE WHEN program LIKE '%COMP%' THEN 'yes' ELSE 'no' END",
             },
-            # fillna: {dim_name: default_value} — coalesces NULLs left by the join to a
-            # literal, for products that have no row in this source at all. Keys must be
-            # among this source's own "columns"/"derived" dimensions. Example: a source
-            # listing only NON-COMP product_ids, with derived {"is_comp": "'no'"} — every
-            # other product would otherwise be NULL; fillna makes them read as 'yes':
+            # fillna: {dim_name: default} — coalesces NULLs from the join (products absent from
+            # this source) to a literal. Keys must be among this source's own dimensions.
             #   "fillna": {"is_comp": "yes"},
             #
-            # value_filters: restrict which values of a dimension appear in the report
-            # breakdown (applied to that dimension's OWN slice only — never to Overall or
-            # any other slice). Two shapes are accepted:
-            #
-            #   LIST form (include-only):
-            #     omit a dim        -> keep ALL values, including NULL (default)
-            #     [] (empty list)   -> keep all NON-NULL values (drop the NULL bucket)
-            #     ["yes"]           -> keep ONLY 'yes' (drops 'no' and NULL)
-            #
-            #   DICT form (include and/or exclude, NULL-aware):
-            #     {"include": ["yes"]}           -> keep ONLY 'yes'             (NULL dropped)
-            #     {"exclude": ["no"]}            -> keep EVERYTHING except 'no'  (NULL KEPT)
-            #     {"include": [...], "exclude": [...]} -> include set, then drop the excludes
-            #     add "keep_null": True/False    -> force-keep or force-drop the NULL bucket
-            #   Default NULL rule: include present -> NULL dropped; include absent -> NULL kept.
-            #
-            # Products missing from this source get NULL. ["yes"] restricts the breakdown to
-            # the NVROUT universe (nvrout=yes only). To EXCLUDE a set but keep the whole rest
-            # (including the NULL bucket), use exclude, e.g. {"exclude": ["nfg"]}.
-            "value_filters": {"is_nvrout": ["yes"]},
+            # root_values: {dim_col: {raw_value: root_name}} — makes a dimension_source column a
+            # ROOT (a fully-broken-out population, like kpi-skill-toolkit's NVROUT/COMP tabs):
+            #   omit / {}            -> one root per distinct value found, named after the value.
+            #   {"yes": "nvrout"}    -> one root "nvrout" (is_nvrout=='yes' only; 'no'/NULL aren't
+            #                          their own root, only appear in "overall").
+            #   {"yes": "a", "no": "b"} -> two named roots, one per listed value.
+            # Every root also gets each slices.dimensions/derived_dimensions cut (brand, SMW...)
+            # applied within it, plus its own total — see kpi_long.build_kpi_long.
+            "root_values": {"is_nvrout": {"yes": "nvrout"}},
         },
         # Add more external sources here if needed, e.g.:
         # {
@@ -847,12 +810,31 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             resolved["path"] = fund_paste(bucket, *resolved["path_segments"])
         dimension_sources.append(resolved)
 
-    # Per-dimension value filters, merged from slices + each dimension_source. Applied to
-    # a slice's own breakdown only (see kpi_pipeline/kpi_long._filter_frames_for_dimension).
-    slice_value_filters = dict(cfg["slices"].get("value_filters", {}) or {})
+    # Every enabled dimension_source's column(s) become ROOTS (see root_values docs above);
+    # slices.dimensions/derived_dimensions are always CUTS, applied within every root. Root
+    # values are resolved at runtime in fiscal.build_fiscal_and_products (auto-discovery needs
+    # real data); this just validates root_values and collects (dim_col, root_values) pairs.
+    root_specs: List[Dict[str, Any]] = []
     for src in dimension_sources:
-        for dim, allowed in (src.get("value_filters", {}) or {}).items():
-            slice_value_filters[dim] = allowed
+        if not src.get("enabled"):
+            continue
+        src_dims = list(src.get("columns", []) or []) + list((src.get("derived", {}) or {}).keys())
+        root_values_cfg = src.get("root_values") or {}
+        unknown_root_cols = set(root_values_cfg) - set(src_dims)
+        if unknown_root_cols:
+            raise ValueError(
+                f"dimension_source {src.get('label', '(unlabeled)')!r} root_values has column(s) "
+                f"{sorted(unknown_root_cols)} not among its own columns/derived {src_dims}"
+            )
+        for dim_col in src_dims:
+            root_specs.append({"dim_col": dim_col, "root_values": root_values_cfg.get(dim_col)})
+
+    # Per-dimension value filters for CUT dimensions only (slices.dimensions/derived_dimensions,
+    # e.g. brand/SMW) — applied to that cut's own breakdown, within every root, including
+    # "overall" (see kpi_pipeline/kpi_long._filter_frames_for_dimension). Dimension_sources no
+    # longer have their own value_filters here -- they're roots now; use root_values instead to
+    # restrict which of their values get a root at all.
+    slice_value_filters = dict(cfg["slices"].get("value_filters", {}) or {})
     _validate_value_filters(slice_value_filters)
 
     # Selected comparison kinds — validated and normalised to canonical order.
@@ -942,6 +924,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "SLICE_DIMENSIONS": cfg["slices"]["dimensions"],
         "DERIVED_SLICE_DIMENSIONS": cfg["slices"]["derived_dimensions"],
         "DIMENSION_SOURCES": dimension_sources,
+        "ROOT_SPECS": root_specs,
         "SLICE_VALUE_FILTERS": slice_value_filters,
         "METRIC_COLS": metrics["metric_cols"],
         "SCOPE_DIFF_METRICS": metrics["scope_diff_metrics"],

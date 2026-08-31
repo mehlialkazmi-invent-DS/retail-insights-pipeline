@@ -74,6 +74,7 @@ def build_comparison_long(
     current_values: Dict[str, object],
     metrics: Sequence[str],
     comparison_type: str,
+    root: str,
     dimension: str,
     dimension_value: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -87,6 +88,7 @@ def build_comparison_long(
         rows.append(
             {
                 "comparison_type": comparison_type,
+                "root": root,
                 "dimension": dimension,
                 "dimension_value": dimension_value,
                 "KPI": labels.get(metric, metric),
@@ -114,14 +116,19 @@ def build_comparison_long(
 
 
 def _comparison_dimensions(ctx: KPIContext) -> List[str]:
-    return ["overall"] + list(ctx.active_slice_dimensions)
+    return ["overall"] + list(ctx.cut_dimensions)
+
+
+def _comparison_roots(ctx: KPIContext) -> List[str]:
+    """Root names to compare, "overall" first (mirrors kpi_long.build_kpi_long's root loop)."""
+    return ["overall"] + [r["root"] for r in ctx.root_definitions]
 
 
 def _prepare_period_tables_for_slice(
-    ctx: KPIContext, dimension: str
+    ctx: KPIContext, root: str, dimension: str
 ) -> Dict[str, pd.DataFrame]:
     metric_cols = ctx.settings["METRIC_COLS"]
-    sub = ctx.kpi_long[ctx.kpi_long["dimension"] == dimension].copy()
+    sub = ctx.kpi_long[(ctx.kpi_long["root"] == root) & (ctx.kpi_long["dimension"] == dimension)].copy()
 
     annual = sub[sub["period_type"] == "annual"].copy()
     annual["Year"] = annual["period"].astype(int)
@@ -176,6 +183,7 @@ def yoy_comparison_long(
     ctx: KPIContext,
     annual: pd.DataFrame,
     metrics: Sequence[str],
+    root: str,
     dimension: str,
     dimension_value: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -193,6 +201,7 @@ def yoy_comparison_long(
         current.to_dict(),
         metrics,
         "yoy",
+        root,
         dimension,
         dimension_value,
     )
@@ -202,6 +211,7 @@ def ytd_comparison_long(
     ctx: KPIContext,
     ytd: pd.DataFrame,
     metrics: Sequence[str],
+    root: str,
     dimension: str,
     dimension_value: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -220,6 +230,7 @@ def ytd_comparison_long(
             current.to_dict(),
             metrics,
             "ytd",
+            root,
             dimension,
             dimension_value,
         )
@@ -230,11 +241,12 @@ def ytd_comparison_long(
 
 def _build_comparison_for_dimension(
     ctx: KPIContext,
+    root: str,
     dimension: str,
     comparison_kind: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     metric_cols = ctx.settings["METRIC_COLS"]
-    tables = _prepare_period_tables_for_slice(ctx, dimension)
+    tables = _prepare_period_tables_for_slice(ctx, root, dimension)
     save_parts: List[pd.DataFrame] = []
     display_overall: pd.DataFrame = pd.DataFrame()
 
@@ -247,10 +259,10 @@ def _build_comparison_for_dimension(
 
     for dval, grp in _series_groups(period_df, dimension):
         cols = key_cols + metric_cols
-        display, save = compare_fn(ctx, grp[cols], metric_cols, dimension, dval)
+        display, save = compare_fn(ctx, grp[cols], metric_cols, root, dimension, dval)
         if not save.empty:
             save_parts.append(save)
-        if dimension == "overall" and dval == "ALL" and not display.empty:
+        if root == "overall" and dimension == "overall" and dval == "ALL" and not display.empty:
             display_overall = display
 
     save_all = pd.concat(save_parts, ignore_index=True) if save_parts else pd.DataFrame()
@@ -280,13 +292,14 @@ def build_comparisons(ctx: KPIContext) -> None:
         setattr(ctx, display_attr, pd.DataFrame())
 
     saves: Dict[str, List[pd.DataFrame]] = {k: [] for k in kinds}
-    for dimension in _comparison_dimensions(ctx):
-        for kind in kinds:
-            disp, save = _build_comparison_for_dimension(ctx, dimension, kind)
-            if dimension == "overall":
-                setattr(ctx, _KIND_CTX_ATTRS[kind][1], disp)
-            if not save.empty:
-                saves[kind].append(save)
+    for root in _comparison_roots(ctx):
+        for dimension in _comparison_dimensions(ctx):
+            for kind in kinds:
+                disp, save = _build_comparison_for_dimension(ctx, root, dimension, kind)
+                if root == "overall" and dimension == "overall":
+                    setattr(ctx, _KIND_CTX_ATTRS[kind][1], disp)
+                if not save.empty:
+                    saves[kind].append(save)
 
     for kind in kinds:
         setattr(
@@ -295,22 +308,25 @@ def build_comparisons(ctx: KPIContext) -> None:
             pd.concat(saves[kind], ignore_index=True) if saves[kind] else pd.DataFrame(),
         )
 
-    slice_dims = ctx.active_slice_dimensions
     print(
         "comparisons:",
         f"kinds={kinds}",
         f"YoY rows={len(ctx.comparison_yoy)}",
         f"YTD rows={len(ctx.comparison_ytd)}",
-        "| slice dimensions:",
-        slice_dims or "(none)",
+        "| roots:",
+        _comparison_roots(ctx),
+        "| cut dimensions:",
+        ctx.cut_dimensions or "(none)",
     )
 
 
-def slice_comparison_view(comparison_df: pd.DataFrame, dimension: str) -> pd.DataFrame:
-    """Readable view of comparisons for one slice dimension."""
+def slice_comparison_view(comparison_df: pd.DataFrame, dimension: str, root: str = "overall") -> pd.DataFrame:
+    """Readable view of comparisons for one (root, dimension) combination -- root defaults to
+    "overall" (the grand total's own roots), e.g. root="nvrout", dimension="brand" for brand
+    inside the nvrout root specifically."""
     if comparison_df is None or comparison_df.empty:
         return pd.DataFrame()
-    sub = comparison_df[comparison_df["dimension"] == dimension].copy()
+    sub = comparison_df[(comparison_df["root"] == root) & (comparison_df["dimension"] == dimension)].copy()
     if sub.empty:
         return sub
     return sub[

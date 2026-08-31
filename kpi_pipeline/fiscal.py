@@ -293,6 +293,44 @@ def _join_dimension_sources(
     return products_proj, source_dims
 
 
+def _resolve_root_definitions(
+    ctx: KPIContext, products_proj: DataFrame, root_specs: List[Dict[str, Any]]
+) -> List[Dict[str, str]]:
+    """Resolve config.py's ROOT_SPECS (dim_col + optional explicit root_values) to concrete root
+    definitions: {"root": name, "dim_col": col, "value": raw_value}, one per root population.
+
+    "overall" (no restriction) is implicit everywhere else and never appears in this list. A
+    dim_col missing from products_proj (its source disabled, or nothing actually joined) is
+    skipped rather than erroring -- root_specs already validated dim_col names against each
+    source's own declared columns at config time; a still-missing column just means that source
+    contributed nothing this run.
+
+    root_values present (dict of raw_value -> root name) -> exactly those roots, restricted to
+    the listed values. root_values absent/empty -> AUTO: one root per distinct non-null value
+    actually found in products_proj, named after the raw value itself -- this needs real data,
+    which is why it's resolved here (runtime, Spark available) rather than in config.py
+    (pure-Python, no data access).
+    """
+    definitions: List[Dict[str, str]] = []
+    for spec in root_specs:
+        dim_col = spec["dim_col"]
+        if dim_col not in products_proj.columns:
+            continue
+        root_values = spec.get("root_values")
+        if root_values:
+            for raw_value, root_name in root_values.items():
+                definitions.append({"root": str(root_name), "dim_col": dim_col, "value": raw_value})
+        else:
+            distinct_values = [
+                row[dim_col]
+                for row in products_proj.select(dim_col).distinct().collect()
+                if row[dim_col] is not None
+            ]
+            for raw_value in distinct_values:
+                definitions.append({"root": str(raw_value), "dim_col": dim_col, "value": raw_value})
+    return definitions
+
+
 def build_fiscal_and_products(ctx: KPIContext) -> None:
     """Populate ctx.fiscal_cal, ctx.fiscal_week, ctx.products_attr, ctx.active_slice_dimensions."""
     s = ctx.settings
@@ -385,8 +423,19 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
     ctx.products_attr = broadcast(products_proj)
     ctx.product_dims = broadcast(products_proj.select("product_id", *ctx.active_slice_dimensions))
 
+    root_specs = s.get("ROOT_SPECS", []) or []
+    ctx.root_definitions = _resolve_root_definitions(ctx, products_proj, root_specs)
+    root_dim_cols = {spec["dim_col"] for spec in root_specs}
+    ctx.cut_dimensions = [d for d in ctx.active_slice_dimensions if d not in root_dim_cols]
+
     print("time grain:", grain_label)
     print("fiscal weeks:", ctx.fiscal_week.count())
+    print(
+        "ROOTS:",
+        ["overall"] + [r["root"] for r in ctx.root_definitions],
+        "| CUT_DIMENSIONS:",
+        ctx.cut_dimensions,
+    )
     print(
         "ACTIVE_SLICE_DIMENSIONS:",
         ctx.active_slice_dimensions,

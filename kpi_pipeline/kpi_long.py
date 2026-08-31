@@ -5,7 +5,7 @@ Each row: period_type | period | dimension | dimension_value | METRIC_COLS...
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 from pyspark.sql import DataFrame
@@ -228,26 +228,50 @@ def _filter_frames_for_dimension(
 
 
 def build_kpi_long(ctx: KPIContext, frames: Dict[str, DataFrame]) -> pd.DataFrame:
-    """Build kpi_long for overall + each active slice dimension across annual/quarter/monthly/weekly/ytd periods."""
+    """Build kpi_long for every (root, cut) combination across annual/quarter/monthly/weekly/ytd periods.
+
+    Roots: "overall" (no restriction, always first) plus one per ctx.root_definitions entry (e.g.
+    "nvrout", "comp") -- each restricts the population to rows where that dimension_source's
+    column equals the configured/discovered value (see fiscal._resolve_root_definitions). Cuts:
+    "overall" (the root's own total, no further breakdown) plus each of ctx.cut_dimensions (e.g.
+    "brand", "smw") -- applied identically within EVERY root, including "overall" itself, so
+    every root gets both its own aggregate total and a breakdown by each cut dimension (mirrors
+    kpi-skill-toolkit's segment x {none, brand, smw} cut_specs).
+
+    Root population restriction reuses _filter_frames_for_dimension (an include-only value_filter
+    of exactly one value) -- the same machinery that already restricts a cut's own breakdown.
+    """
     metric_cols = ctx.settings["METRIC_COLS"]
-    slices: List[Tuple[str, List[str]]] = [("overall", [])] + [
-        (dim, [dim]) for dim in ctx.active_slice_dimensions
+    cuts: List[Tuple[str, List[str]]] = [("overall", [])] + [
+        (dim, [dim]) for dim in ctx.cut_dimensions
     ]
+    roots: List[Optional[Dict[str, str]]] = [None] + list(ctx.root_definitions)
     value_filters = ctx.settings.get("SLICE_VALUE_FILTERS", {}) or {}
     rows: List[dict] = []
     for period_name, period_col in PERIODS:
         pf = _period_frames(ctx, frames, period_name)
-        for slice_name, gk in slices:
-            sf = _filter_frames_for_dimension(pf, gk[0], value_filters) if gk else pf
-            tbl = build_kpi_table(ctx, sf, period_col, gk)
-            for _, r in tbl.iterrows():
-                rec = {
-                    "period_type": period_name,
-                    "period": _period_label(period_name, r),
-                    "dimension": slice_name,
-                    "dimension_value": ("ALL" if not gk else r[gk[0]]),
-                }
-                for m in metric_cols:
-                    rec[m] = r.get(m)
-                rows.append(rec)
-    return pd.DataFrame(rows, columns=["period_type", "period", "dimension", "dimension_value"] + metric_cols)
+        for root_def in roots:
+            if root_def is None:
+                root_name, rf = "overall", pf
+            else:
+                root_name = root_def["root"]
+                rf = _filter_frames_for_dimension(
+                    pf, root_def["dim_col"], {root_def["dim_col"]: [root_def["value"]]}
+                )
+            for cut_name, gk in cuts:
+                sf = _filter_frames_for_dimension(rf, gk[0], value_filters) if gk else rf
+                tbl = build_kpi_table(ctx, sf, period_col, gk)
+                for _, r in tbl.iterrows():
+                    rec = {
+                        "period_type": period_name,
+                        "period": _period_label(period_name, r),
+                        "root": root_name,
+                        "dimension": cut_name,
+                        "dimension_value": ("ALL" if not gk else r[gk[0]]),
+                    }
+                    for m in metric_cols:
+                        rec[m] = r.get(m)
+                    rows.append(rec)
+    return pd.DataFrame(
+        rows, columns=["period_type", "period", "root", "dimension", "dimension_value"] + metric_cols
+    )

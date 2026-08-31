@@ -123,9 +123,19 @@ class KPIRunner:
         return plan
 
     def _infer_active_slices_from_kpi_long(self) -> None:
-        """Infer slice dimensions from kpi_long (configured order first, then any extras in data)."""
+        """Infer cut dimensions + roots from a LOADED kpi_long (html_only mode never re-runs
+        fiscal.build_fiscal_and_products, which is where these normally come from a fresh
+        Spark computation) -- configured cut order first, then any extras found in the data.
+
+        Only "root" (the name) is inferred for each root here, not "dim_col"/"value" -- html
+        rendering only ever reads the "root" key (see html_report.render_kpi_html), and
+        re-deriving which dimension_source column/value produced a saved root isn't needed to
+        render its already-computed rows.
+        """
         if self.ctx.kpi_long is None or self.ctx.kpi_long.empty:
             self.ctx.active_slice_dimensions = []
+            self.ctx.cut_dimensions = []
+            self.ctx.root_definitions = []
             return
         configured = list(self.settings.get("SLICE_DIMENSIONS") or [])
         data_dims = set(self.ctx.kpi_long["dimension"].unique()) - {"overall"}
@@ -134,7 +144,15 @@ class KPIRunner:
             if d not in active:
                 active.append(d)
         self.ctx.active_slice_dimensions = active
-        print("ACTIVE_SLICE_DIMENSIONS (inferred):", active)
+        self.ctx.cut_dimensions = active
+
+        if "root" in self.ctx.kpi_long.columns:
+            data_roots = set(self.ctx.kpi_long["root"].unique()) - {"overall"}
+            self.ctx.root_definitions = [{"root": r, "dim_col": None, "value": None} for r in sorted(data_roots)]
+        else:
+            self.ctx.root_definitions = []
+
+        print("CUT_DIMENSIONS (inferred):", active, "| ROOTS (inferred):", ["overall"] + [r["root"] for r in self.ctx.root_definitions])
 
     def run_html_only(self, fund_paste=None) -> KPIContext:
         """Load saved Delta outputs and prepare ctx for HTML report only (no pipeline compute)."""
