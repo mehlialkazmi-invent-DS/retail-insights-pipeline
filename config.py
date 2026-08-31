@@ -109,13 +109,17 @@ CONFIG: Dict[str, Any] = {
     },
     "fiscal_calendar": {
         "use_fiscal_calendar": True,
-        # tbretail's fiscal_cal upload carries its own display month label per week (e.g.
-        # "August") in this column -- read verbatim and used directly on the Monthly tab instead
-        # of deriving one, since tbretail's fiscal year runs Feb-Jan and the fiscal month number
-        # doesn't line up with the real calendar month (fiscal month 07 has been observed
-        # spanning real 8/2-8/29). Falls back to the derived majority-real-calendar-month label
-        # for any period this column doesn't cover.
-        "month_name_col": "month_name",
+        # tbretail's fiscal_cal upload columns. Each is auto-detected/optional -- read/parsed when
+        # present, derived otherwise (see retail-insights-pipeline's fiscal.py). tbretail's fiscal
+        # year runs Feb-Jan, so the fiscal month/quarter numbers don't line up with the real
+        # calendar month/quarter (fiscal month 07 has been observed spanning real 8/2-8/29) --
+        # month_name_col is read verbatim for the Monthly tab's display label for exactly that
+        # reason, rather than deriving one from the (fiscal, not calendar) month number.
+        "column_map": {
+            "quarter_col": "Quarter",
+            "month_col": "Month",
+            "month_name_col": "month_name",
+        },
         "daily_time_columns": {
             "date": "date",
             "year": "year",
@@ -866,7 +870,9 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         **window,
         "EXCLUDED_STORE_IDS_FOR_SERVICE_METRICS": cfg["service_metrics"]["excluded_store_ids"],
         "USE_FISCAL_CALENDAR": cfg["fiscal_calendar"]["use_fiscal_calendar"],
-        "FISCAL_MONTH_NAME_COL": cfg["fiscal_calendar"].get("month_name_col"),
+        "FISCAL_QUARTER_COL": cfg["fiscal_calendar"].get("column_map", {}).get("quarter_col"),
+        "FISCAL_MONTH_COL": cfg["fiscal_calendar"].get("column_map", {}).get("month_col"),
+        "FISCAL_MONTH_NAME_COL": cfg["fiscal_calendar"].get("column_map", {}).get("month_name_col"),
         "DAILY_TIME_COLUMNS": cfg["fiscal_calendar"]["daily_time_columns"],
         "SCOPE_MIN_PERCENTILE": min_pct,
         "SCOPE_MIN_WEEKS_FOR_FILTER": score_scope["min_weeks_for_filter"],

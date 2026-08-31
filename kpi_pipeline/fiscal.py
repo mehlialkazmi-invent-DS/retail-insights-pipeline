@@ -22,22 +22,46 @@ from kpi_pipeline.context import KPIContext
 from kpi_pipeline.inputs import read_csv_source
 
 
-def _build_fiscal_week_frame(daily_grain: DataFrame, month_name_col: Optional[str] = None) -> DataFrame:
-    has_month = "Month" in daily_grain.columns
+def _build_fiscal_week_frame(
+    daily_grain: DataFrame,
+    quarter_col: Optional[str] = None,
+    month_col: Optional[str] = None,
+    month_name_col: Optional[str] = None,
+) -> DataFrame:
+    """Aggregate day-level fiscal_cal rows to one row per (Year, Week).
+
+    Each of quarter_col/month_col/month_name_col is used when it names a column actually present
+    on daily_grain; otherwise that fiscal attribute is derived instead. This lets every client's
+    fiscal_cal upload -- with or without any of these columns -- resolve to the same output shape
+    (Fiscal_Quarter, Fiscal_Month[, Fiscal_Month_Name]). See config.py's fiscal_calendar.column_map.
+
+    Derivation fallbacks:
+      * Fiscal_Month: F.month(week_start_date) -- the real calendar month. This IS correct as-is
+        on the civil-calendar path (there is no separate fiscal month there); on a fiscal-calendar
+        upload missing a month column, it's the best available substitute.
+      * Fiscal_Quarter: ceil(Fiscal_Month / 3), computed from Fiscal_Month (whichever source
+        produced it above) rather than from `date` directly, so quarter and month stay internally
+        consistent with each other regardless of which one actually came from the upload.
+      * Fiscal_Month_Name: no derivation here -- see html_report._build_month_display_labels,
+        which derives a display name from the majority real calendar month across each fiscal
+        month's actual dates when this column is absent.
+    """
+    has_quarter = bool(quarter_col) and quarter_col in daily_grain.columns
+    has_month = bool(month_col) and month_col in daily_grain.columns
     has_month_name = bool(month_name_col) and month_name_col in daily_grain.columns
+
     agg_exprs = [
         F.min("date").alias("week_start_date"),
         F.max("date").alias("week_end_date"),
-        F.first("Quarter", ignorenulls=True).alias("Quarter"),
     ]
+    if has_quarter:
+        agg_exprs.append(F.first(quarter_col, ignorenulls=True).alias("_raw_quarter"))
     if has_month:
-        agg_exprs.append(F.first("Month", ignorenulls=True).alias("_raw_month"))
+        agg_exprs.append(F.first(month_col, ignorenulls=True).alias("_raw_month"))
     if has_month_name:
         # Verbatim display month label from the fiscal_cal upload (e.g. "August") -- trusts the
         # client's own fiscal calendar instead of deriving one. Consumed by html_report's Monthly
-        # tab when present; falls back to a derived label (majority real calendar month across the
-        # fiscal month's actual dates) when this column is absent or not configured. See
-        # config.py's fiscal_calendar.month_name_col.
+        # tab when present.
         agg_exprs.append(F.first(month_name_col, ignorenulls=True).alias("Fiscal_Month_Name"))
 
     frame = (
@@ -47,11 +71,10 @@ def _build_fiscal_week_frame(daily_grain: DataFrame, month_name_col: Optional[st
             "Year_Week",
             F.concat_ws("-W", F.col("Year").cast("string"), F.format_string("%02d", F.col("Week"))),
         )
-        .withColumn("Fiscal_Quarter", F.regexp_extract(F.col("Quarter"), r"Q(\d+)", 1).cast("int"))
     )
 
     if has_month:
-        # Extract numeric month from the fiscal calendar Month column (e.g. "M01" → 1, "1" → 1).
+        # Extract numeric month from the raw month column (e.g. "M01" → 1, "1" → 1).
         frame = (
             frame
             .withColumn("Fiscal_Month", F.regexp_extract(F.col("_raw_month"), r"(\d+)", 1).cast("int"))
@@ -59,6 +82,18 @@ def _build_fiscal_week_frame(daily_grain: DataFrame, month_name_col: Optional[st
         )
     else:
         frame = frame.withColumn("Fiscal_Month", F.month("week_start_date"))
+
+    if has_quarter:
+        # Extract numeric quarter from the raw quarter column (e.g. "Q1" → 1, "1" → 1).
+        frame = (
+            frame
+            .withColumn("Fiscal_Quarter", F.regexp_extract(F.col("_raw_quarter"), r"(\d+)", 1).cast("int"))
+            .drop("_raw_quarter")
+        )
+    else:
+        frame = frame.withColumn(
+            "Fiscal_Quarter", ((F.col("Fiscal_Month") - F.lit(1)) / F.lit(3)).cast("int") + F.lit(1)
+        )
 
     return frame
 
@@ -96,18 +131,21 @@ def build_fiscal_cal_and_week_from_upload(
     report_end_date: datetime.date,
 ) -> Tuple[DataFrame, DataFrame]:
     raw = ctx.spark.read.format("delta").load(path)
+    quarter_col = ctx.settings.get("FISCAL_QUARTER_COL")
+    month_col = ctx.settings.get("FISCAL_MONTH_COL")
     month_name_col = ctx.settings.get("FISCAL_MONTH_NAME_COL")
-    select_cols = ["date", "Year", "Week", "Quarter"]
-    if "Month" in raw.columns:
-        select_cols.append("Month")
-    if month_name_col and month_name_col in raw.columns and month_name_col not in select_cols:
-        select_cols.append(month_name_col)
+
+    select_cols = ["date", "Year", "Week"]
+    for col in (quarter_col, month_col, month_name_col):
+        if col and col in raw.columns and col not in select_cols:
+            select_cols.append(col)
+
     fiscal_cal_out = (
         raw.select(*select_cols)
         .withColumn("date", F.to_date("date"))
         .filter(F.col("date").between(F.lit(report_start_date), F.lit(report_end_date)))
     )
-    return fiscal_cal_out, _build_fiscal_week_frame(fiscal_cal_out, month_name_col)
+    return fiscal_cal_out, _build_fiscal_week_frame(fiscal_cal_out, quarter_col, month_col, month_name_col)
 
 
 def build_time_grain_from_daily_data(
@@ -134,11 +172,10 @@ def build_time_grain_from_daily_data(
         )
         .distinct()
     )
-    fiscal_cal_out = daily_time.withColumn(
-        "Quarter",
-        F.concat(F.lit("Q"), (((F.month("date") - 1) / 3 + 1).cast("int")).cast("string")),
-    )
-    return fiscal_cal_out, _build_fiscal_week_frame(fiscal_cal_out)
+    # No quarter_col/month_col here -- _build_fiscal_week_frame's derivation fallbacks (real
+    # calendar month of week_start_date, quarter = ceil(that month / 3)) are exactly the civil
+    # calendar's Quarter/Month, so there's nothing to source from this path's raw daily-data table.
+    return daily_time, _build_fiscal_week_frame(daily_time)
 
 
 def build_fiscal_week_only(ctx: KPIContext) -> None:
@@ -277,15 +314,17 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
     if null_quarter_weeks > 0:
         raise ValueError(
             f"{null_quarter_weeks} fiscal week(s) in the report window have a null Fiscal_Quarter "
-            "(unparseable 'Quarter' value). Fix the fiscal calendar / Quarter column before running."
+            f"(unparseable value in fiscal_calendar.column_map.quarter_col = {s.get('FISCAL_QUARTER_COL')!r}). "
+            "Fix that column in the fiscal_cal upload, or set quarter_col to None to derive from "
+            "Fiscal_Month instead."
         )
 
     null_month_weeks = ctx.fiscal_week.filter(F.col("Fiscal_Month").isNull()).count()
     if null_month_weeks > 0:
         raise ValueError(
             f"{null_month_weeks} fiscal week(s) in the report window have a null Fiscal_Month "
-            "(missing/unparseable 'Month' value in the fiscal calendar upload for that week). "
-            "Extend fiscal_cal's Month column through the report window before running — "
+            f"(missing/unparseable value in fiscal_calendar.column_map.month_col = {s.get('FISCAL_MONTH_COL')!r} "
+            "for that week). Extend that column through the report window before running -- "
             "otherwise those weeks silently drop out of the monthly rollup."
         )
 
