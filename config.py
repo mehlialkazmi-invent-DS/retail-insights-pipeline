@@ -32,6 +32,15 @@ CONFIG: Dict[str, Any] = {
     },
     "fiscal_calendar": {
         "use_fiscal_calendar": True,
+        # Column on the fiscal_cal upload carrying a display month label per week (e.g. "August").
+        # Read as-is (verbatim) when the column exists on fiscal_cal -- trusts the client's own
+        # fiscal calendar instead of re-deriving a name. Only relevant when use_fiscal_calendar is
+        # True; ignored (no such column exists) on the civil-calendar path, where the Monthly tab's
+        # month number is already the real calendar month.
+        # Set to None if this client's fiscal_cal has no such column, or you don't want it used --
+        # the Monthly tab then falls back to deriving the display month from the majority real
+        # calendar month across each fiscal month's actual dates (see html_report._build_month_display_labels).
+        "month_name_col": "month_name",
         "daily_time_columns": {
             "date": "date",
             "year": "year",
@@ -879,6 +888,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         **window,
         "EXCLUDED_STORE_IDS_FOR_SERVICE_METRICS": cfg["service_metrics"]["excluded_store_ids"],
         "USE_FISCAL_CALENDAR": cfg["fiscal_calendar"]["use_fiscal_calendar"],
+        "FISCAL_MONTH_NAME_COL": cfg["fiscal_calendar"].get("month_name_col"),
         "DAILY_TIME_COLUMNS": cfg["fiscal_calendar"]["daily_time_columns"],
         "SCOPE_MIN_PERCENTILE": min_pct,
         "SCOPE_MIN_WEEKS_FOR_FILTER": score_scope["min_weeks_for_filter"],

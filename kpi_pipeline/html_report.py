@@ -714,14 +714,42 @@ def _display_period_labels(
     return _sort_period_labels(periods, period_type, week_start_by_period)
 
 
-def _build_month_display_labels(ctx: Any) -> Dict[str, str]:
-    """Map each "YYYY-MM" fiscal-month period key to its real calendar-month display label.
+def _month_labels_from_fiscal_cal(ctx: Any) -> Dict[str, str]:
+    """Read the display month label straight off the fiscal_cal upload, verbatim, when available.
 
-    The fiscal month NUMBER (Fiscal_Month, from fiscal_cal) does not line up with the real
-    calendar month on tbretail's fiscal calendar -- e.g. fiscal month 07 has been observed
-    spanning 8/2-8/29 (real August), and a 5-week fiscal month can span parts of three real
-    calendar months. So the display name is the majority (by day count) real calendar month
-    across each fiscal month's actual dates, not a lookup on the fiscal month number itself.
+    Only produces entries for (Year, Fiscal_Month) periods where the client's fiscal_cal actually
+    carries a usable month-name column (config.py's fiscal_calendar.month_name_col -- e.g.
+    "month_name") -- trusts that source rather than re-deriving one. Whatever periods it doesn't
+    cover (column absent, or null for some weeks) are filled in by the derived fallback in
+    _build_month_display_labels below.
+    """
+    fw = ctx.fiscal_week
+    if "Fiscal_Month_Name" not in fw.columns:
+        return {}
+    fw_pd = fw.select("Year", "Fiscal_Month", "Fiscal_Month_Name").dropna(subset=["Fiscal_Month_Name"]).distinct().toPandas()
+    if fw_pd.empty:
+        return {}
+    # A (Year, Fiscal_Month) should carry one consistent name across its weeks; if the upload is
+    # inconsistent, keep the first (alphabetically-arbitrary but deterministic) rather than error.
+    fw_pd = fw_pd.drop_duplicates(subset=["Year", "Fiscal_Month"])
+    out: Dict[str, str] = {}
+    for row in fw_pd.itertuples(index=False):
+        key = f"{int(row.Year)}-{int(row.Fiscal_Month):02d}"
+        out[key] = f"{int(row.Year)}-{row.Fiscal_Month_Name}"
+    return out
+
+
+def _derive_month_display_labels(ctx: Any) -> Dict[str, str]:
+    """Map each "YYYY-MM" fiscal-month period key to a derived real-calendar-month display label.
+
+    Fallback used only for periods _month_labels_from_fiscal_cal didn't cover. The fiscal month
+    NUMBER (Fiscal_Month, from fiscal_cal) does not necessarily line up with the real calendar
+    month on a fiscal calendar -- e.g. tbretail's fiscal month 07 has been observed spanning
+    8/2-8/29 (real August), and a 5-week fiscal month can span parts of three real calendar
+    months. So the display name is the majority (by day count) real calendar month across each
+    fiscal month's actual dates, not a lookup on the fiscal month number itself. On the
+    civil-calendar path (USE_FISCAL_CALENDAR=False) Fiscal_Month already IS the real calendar
+    month, so this reduces to a no-op there.
 
     ctx.fiscal_cal is date-grain (date, Year, Week[, Month]); ctx.fiscal_week carries the
     resolved Fiscal_Month per (Year, Week). Both are already-cached small reference frames
@@ -745,6 +773,20 @@ def _build_month_display_labels(ctx: Any) -> Dict[str, str]:
         key = f"{int(row.Year)}-{int(row.Fiscal_Month):02d}"
         out[key] = f"{int(row.Year)}-{calendar.month_abbr[int(row.calendar_month)]}"
     return out
+
+
+def _build_month_display_labels(ctx: Any) -> Dict[str, str]:
+    """Map each "YYYY-MM" fiscal-month period key to its Monthly-tab display label.
+
+    Prefers the fiscal_cal upload's own month-name column, verbatim, when the client's fiscal_cal
+    has one (see _month_labels_from_fiscal_cal / config.py's fiscal_calendar.month_name_col);
+    derives the rest from actual dates (_derive_month_display_labels). Each client's fiscal_cal
+    may or may not carry a usable month-name column -- both paths are always attempted so a
+    partial upload (some periods labelled, some not) still resolves every period.
+    """
+    from_source = _month_labels_from_fiscal_cal(ctx)
+    derived = _derive_month_display_labels(ctx)
+    return {**derived, **from_source}
 
 
 def _period_th_label(
