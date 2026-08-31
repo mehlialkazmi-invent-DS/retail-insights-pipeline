@@ -291,14 +291,11 @@ CONFIG: Dict[str, Any] = {
         "fiscal": ["one_time_uploads", "fiscal_cal"],
         "daily_data": ["noob", "daily-data"],
         "products": ["master-data", "products"],
-        # TBretail lost sales path — verify this matches your actual path.
-        # The notebook uses reporting/future_visibility/reporting_inv_fc_dfu/report_dfu
-        # but the toolkit expects the standard noob lost-sales module output.
         "lost_sales": ["noob", "lost-sales", "model_id=top_down_excluding_ecom"],
         "defined_scope": ["analysis", "instock_rate", "instock_rate_scope"],
         # product_agg_level -> product_id map, used by lost_sales_source/instock_source's
-        # product_agg_level_col (see below) when a source is keyed by planning/DFU level instead
-        # of product_id -- same table kpi-skill-toolkit's notebook maps through.
+        # product_agg_level_col when a source is keyed by planning/DFU level (e.g. report_dfu,
+        # see instock_source below) instead of product_id.
         "product_planning_level": ["operation", "product_planning_level"],
     },
     "defined_scope": {
@@ -341,22 +338,12 @@ CONFIG: Dict[str, Any] = {
     "lost_sales_source": {
         "week_col": "week_start_date",
         "product_col": "product_id",
-        # store_col: set to None if this source has no per-store dimension (e.g. a table
-        # aggregated to product_agg_level x week only, like reporting_inv_fc_dfu/report_dfu's
-        # own lost_sales column). CAUTION: lost_sales is an absolute count, not a ratio -- a
-        # store-less value gets broadcast across every scoped store of that product, which
-        # OVER-COUNTS if later summed across stores. Safe for instock_source's in_stock_col/
-        # total_days_col (a ratio: sum/sum cancels the broadcast out), not safe here without
-        # an explicit per-store normalization. Prefer a genuinely per-store source when possible.
         "store_col": "store_id",
         "lost_sales_col": "lost_sales",
         "in_stock_col": "in_stock",
         "total_days_col": "details.total_days",
-        # product_agg_level_col: set when this source is keyed by product_agg_level (planning/DFU
-        # level) instead of product_id (e.g. reporting_inv_fc_dfu/report_dfu). Auto-detected: only
-        # consulted when product_col is NOT already a column on the source -- then left-joined to
-        # path_segments.product_planning_level (planning_level_id -> this column) to backfill
-        # product_id. Mirrors kpi-skill-toolkit's own product_agg_level fallback.
+        # Set when a source lacks product_id but has product_agg_level (e.g. report_dfu below) --
+        # auto-detected, no-op while the current path_segments.lost_sales table has product_id.
         "product_agg_level_col": None,
     },
     # ---------------------------------------------------------------------------
@@ -365,29 +352,30 @@ CONFIG: Dict[str, Any] = {
     # OFF for tbretail: in-stock days / total days come from lost_sales_source above
     # (the same table/row as lost_sales), same as always. Mutually exclusive with
     # lost_sales_ensemble below (which IS enabled for tbretail) — leave this off.
+    #
+    # Verified alternative if you want to switch (report_dfu, reporting_inv_fc_dfu grain):
+    # this table has NO per-store dimension for these columns (aggregated to product_agg_level x
+    # TY_week_start_date only) -- the pipeline broadcasts the value across every scoped store of
+    # a product, which is safe for a ratio like in_stock_days/total_days (see
+    # kpi_pipeline/pipeline.py's _aggregate_instock_pairweek), just without per-store variation.
+    # Uses TY_total_days_instock/TY_total_day (actual), NOT the raw sim_instock_days/
+    # sim_total_days columns (those are simulated/projected, not actual, for weeks on/after the
+    # simulation's own run week -- see 30_future_visibility_report_dfu.py).
+    #   "enabled": True,
+    #   "path_segments": ["reporting", "future_visibility", "reporting_inv_fc_dfu", "report_dfu"],
+    #   "week_col": "TY_week_start_date",
+    #   "in_stock_col": "TY_total_days_instock",
+    #   "total_days_col": "TY_total_day",
+    #   "product_agg_level_col": "product_agg_level",  # no-op if report_dfu already has product_id
+    #   "store_col": None,
     "instock_source": {
         "enabled": False,
         "path_segments": None,  # required when enabled=True, e.g. ["some", "instock", "table"]
         "week_col": "week_start_date",
         "product_col": "product_id",
-        # store_col: set to None if this source has no per-store dimension (e.g.
-        # reporting_inv_fc_dfu/report_dfu, aggregated to product_agg_level x week only). Safe to
-        # broadcast here -- in_stock_col/total_days_col form a ratio, so summing the same
-        # broadcast value across a product's stores and dividing still reproduces the original
-        # ratio (numerator and denominator scale identically). See lost_sales_source above for
-        # why this is NOT safe for an absolute count like lost_sales.
         "store_col": "store_id",
         "in_stock_col": "in_stock",
         "total_days_col": "total_days",
-        # product_agg_level_col: see lost_sales_source above -- same auto-detected fallback.
-        # Example for reporting_inv_fc_dfu/report_dfu (verified columns, not the raw sim_ ones --
-        # those are simulated/projected, not actual, for weeks >= the simulation's run week):
-        #   "path_segments": ["reporting", "future_visibility", "reporting_inv_fc_dfu", "report_dfu"],
-        #   "week_col": "TY_week_start_date",
-        #   "in_stock_col": "TY_total_days_instock",
-        #   "total_days_col": "TY_total_day",
-        #   "product_agg_level_col": "product_agg_level",
-        #   "store_col": None,  # this table has no per-store dimension for these columns
         "product_agg_level_col": None,
     },
     # ---------------------------------------------------------------------------
