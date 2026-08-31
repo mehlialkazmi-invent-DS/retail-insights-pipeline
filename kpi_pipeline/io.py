@@ -70,18 +70,24 @@ class SavePlan:
 
 
 TABLE_ROW_KEYS: Dict[str, Sequence[str]] = {
-    "kpi_long": ("period_type", "period", "dimension", "dimension_value"),
-    "comparison_yoy": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
-    "comparison_ytd": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
+    # "root" included everywhere dimension/dimension_value appears: a cut's own breakdown is
+    # computed independently within every root (e.g. "brand"="KNG" exists once under root=
+    # "overall" and again under root="nvrout", each a genuinely different row) -- without root in
+    # the key, those would collide as if they were the same row. See kpi_pipeline/kpi_long.py.
+    "kpi_long": ("period_type", "period", "root", "dimension", "dimension_value"),
+    "comparison_yoy": ("comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period"),
+    "comparison_ytd": ("comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period"),
     "scope_diff": ("Year", "metric"),
     # link_prior_year/link_current_year included: the same year's row can legitimately carry a
     # different metric value per link it participates in (each link has its own pair
     # restriction), so the link identifies which occurrence a given row is.
     "comparable_kpi_long": (
-        "comparison_type", "period_type", "period", "dimension", "dimension_value",
+        "comparison_type", "period_type", "period", "root", "dimension", "dimension_value",
         "link_prior_year", "link_current_year",
     ),
-    "comparable_comparison_ytd": ("comparison_type", "dimension", "dimension_value", "metric_key", "current_period"),
+    "comparable_comparison_ytd": (
+        "comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period",
+    ),
 }
 
 # Comparison tables are a deterministic function of the saved kpi_long snapshot. They are

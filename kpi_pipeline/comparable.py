@@ -19,13 +19,13 @@ period, dimension, dimension_value) would collide across links.
 
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
-from kpi_pipeline.comparisons import _comparison_dimensions, _series_groups, build_comparison_long
+from kpi_pipeline.comparisons import _comparison_dimensions, _comparison_roots, _series_groups, build_comparison_long
 from kpi_pipeline.context import KPIContext
 from kpi_pipeline.kpi_long import _filter_frames_for_dimension, _period_frames, _period_label
 from kpi_pipeline.metrics import build_kpi_table
@@ -48,25 +48,38 @@ def _comparable_period_rows(
     years: Sequence[int],
     metric_cols: List[str],
 ) -> pd.DataFrame:
-    """kpi_long-shaped YTD rows (overall + each active slice) for the given two years."""
+    """kpi_long-shaped YTD rows (every root x cut, mirrors kpi_long.build_kpi_long) for the given
+    two years."""
     period_filter = F.col("Year").isin(list(years))
     value_filters = ctx.settings.get("SLICE_VALUE_FILTERS", {}) or {}
-    slices: List[Tuple[str, List[str]]] = [("overall", [])] + [(d, [d]) for d in ctx.active_slice_dimensions]
+    cuts: List[Tuple[str, List[str]]] = [("overall", [])] + [(d, [d]) for d in ctx.cut_dimensions]
+    roots: List[Optional[Dict[str, str]]] = [None] + list(ctx.root_definitions)
     rows: List[dict] = []
-    for slice_name, gk in slices:
-        sf = _filter_frames_for_dimension(frames, gk[0], value_filters) if gk else frames
-        tbl = build_kpi_table(ctx, sf, "Year", gk, period_filter)
-        for _, r in tbl.iterrows():
-            rec = {
-                "period_type": "ytd",
-                "period": _period_label("ytd", r),
-                "dimension": slice_name,
-                "dimension_value": ("ALL" if not gk else r[gk[0]]),
-            }
-            for m in metric_cols:
-                rec[m] = r.get(m)
-            rows.append(rec)
-    return pd.DataFrame(rows, columns=["period_type", "period", "dimension", "dimension_value"] + metric_cols)
+    for root_def in roots:
+        if root_def is None:
+            root_name, rf = "overall", frames
+        else:
+            root_name = root_def["root"]
+            rf = _filter_frames_for_dimension(
+                frames, root_def["dim_col"], {root_def["dim_col"]: [root_def["value"]]}
+            )
+        for cut_name, gk in cuts:
+            sf = _filter_frames_for_dimension(rf, gk[0], value_filters) if gk else rf
+            tbl = build_kpi_table(ctx, sf, "Year", gk, period_filter)
+            for _, r in tbl.iterrows():
+                rec = {
+                    "period_type": "ytd",
+                    "period": _period_label("ytd", r),
+                    "root": root_name,
+                    "dimension": cut_name,
+                    "dimension_value": ("ALL" if not gk else r[gk[0]]),
+                }
+                for m in metric_cols:
+                    rec[m] = r.get(m)
+                rows.append(rec)
+    return pd.DataFrame(
+        rows, columns=["period_type", "period", "root", "dimension", "dimension_value"] + metric_cols
+    )
 
 
 def _comparisons_for_link(
@@ -76,34 +89,37 @@ def _comparisons_for_link(
     current_year: int,
     metric_cols: List[str],
 ) -> Tuple[pd.DataFrame, List[pd.DataFrame]]:
-    """Build (overall display, list of per-dimension save frames) for ONE consecutive-year link
-    from its already-computed kpi_long-shaped rows (overall + each active slice dimension)."""
+    """Build (overall display, list of per-root-per-dimension save frames) for ONE
+    consecutive-year link from its already-computed kpi_long-shaped rows (every root x cut)."""
     save_parts: List[pd.DataFrame] = []
     display = pd.DataFrame()
     prior_label, current_label = f"{prior_year} YTD", f"{current_year} YTD"
-    for dimension in _comparison_dimensions(ctx):
-        dim_rows = link_rows[link_rows["dimension"] == dimension]
-        for dval, grp in _series_groups(dim_rows, dimension):
-            prior_match = grp[grp["period"] == f"YTD-{prior_year}"]
-            current_match = grp[grp["period"] == f"YTD-{current_year}"]
-            if prior_match.empty or current_match.empty:
-                continue
-            disp, save = build_comparison_long(
-                ctx,
-                prior_label,
-                current_label,
-                f"YTD {current_year}",
-                prior_match.iloc[0].to_dict(),
-                current_match.iloc[0].to_dict(),
-                metric_cols,
-                "ytd",
-                dimension,
-                dval,
-            )
-            if not save.empty:
-                save_parts.append(save)
-            if dimension == "overall" and dval == "ALL" and not disp.empty:
-                display = disp
+    for root in _comparison_roots(ctx):
+        root_rows = link_rows[link_rows["root"] == root]
+        for dimension in _comparison_dimensions(ctx):
+            dim_rows = root_rows[root_rows["dimension"] == dimension]
+            for dval, grp in _series_groups(dim_rows, dimension):
+                prior_match = grp[grp["period"] == f"YTD-{prior_year}"]
+                current_match = grp[grp["period"] == f"YTD-{current_year}"]
+                if prior_match.empty or current_match.empty:
+                    continue
+                disp, save = build_comparison_long(
+                    ctx,
+                    prior_label,
+                    current_label,
+                    f"YTD {current_year}",
+                    prior_match.iloc[0].to_dict(),
+                    current_match.iloc[0].to_dict(),
+                    metric_cols,
+                    "ytd",
+                    root,
+                    dimension,
+                    dval,
+                )
+                if not save.empty:
+                    save_parts.append(save)
+                if root == "overall" and dimension == "overall" and dval == "ALL" and not disp.empty:
+                    display = disp
     return display, save_parts
 
 

@@ -101,7 +101,7 @@ CONFIG: Dict[str, Any] = {
         # Update as_of_date before each run. REPORT_END_DATE resolves to the last
         # completed Saturday on or before this date.
         "as_of_date": "2026-08-02",
-        "run_min_date": "2025-02-01",  # None = YTD from Jan 1; e.g. "2025-01-01" for multi-year
+        "run_min_date": "2025-02-08",  # None = YTD from Jan 1; e.g. "2025-01-01" for multi-year
     },
     "service_metrics": {
         # E-com / non-service stores excluded from instock, WOS, lost sales %, mean stock.
@@ -109,35 +109,20 @@ CONFIG: Dict[str, Any] = {
     },
     "fiscal_calendar": {
         "use_fiscal_calendar": True,
-        # tbretail's fiscal_cal upload columns. Each is auto-detected/optional -- read/parsed when
-        # present, derived otherwise (see retail-insights-pipeline's fiscal.py). tbretail's fiscal
-        # year runs Feb-Jan, so the fiscal month/quarter numbers don't line up with the real
-        # calendar month/quarter (fiscal month 07 has been observed spanning real 8/2-8/29) --
-        # month_name_col is read verbatim for the Monthly tab's display label for exactly that
-        # reason, rather than deriving one from the (fiscal, not calendar) month number.
+        # tbretail's fiscal_cal upload columns (used since use_fiscal_calendar=True above). Each
+        # is auto-detected/optional -- read when present, derived when absent. tbretail's fiscal
+        # year runs Feb-Jan, so fiscal month/quarter numbers don't match the real calendar (fiscal
+        # month 07 has been observed spanning real 8/2-8/29) -- month_name_col is read verbatim
+        # for the Monthly tab label for exactly that reason, instead of deriving one from the
+        # (fiscal, not calendar) month number.
         "column_map": {
             "quarter_col": "Quarter",
             "month_col": "Month",
             "month_name_col": "month_name",
         },
-        # A column-name map for the RAW noob/daily-data table (PATH_DAILY_DATA) -- a different
-        # source table from column_map above, which is about the fiscal_cal upload. Same idea as
-        # LOST_SALES_COLUMN_MAP/INSTOCK_SOURCE_COLUMN_MAP elsewhere in this config: lets a client
-        # whose daily_data calls its date/week columns something else point the pipeline at them,
-        # without renaming the actual table.
-        #
-        # Only actually consulted on the CIVIL-calendar path (use_fiscal_calendar=False) --
-        # build_time_grain_from_daily_data() (fiscal.py) reads daily_data's own date/week columns
-        # directly to build Year/Week there, instead of joining a fiscal_cal upload. On the
-        # fiscal-calendar path (tbretail's actual setting, above) daily_data's date/week columns
-        # aren't read through this map at all -- Year/Week always come from the fiscal_cal join.
-        #
-        # "date" and "week" are the only keys actually read anywhere in the pipeline (grep
-        # DAILY_TIME_COLUMNS/time_cols in kpi_pipeline/*.py to confirm). "year" is unused dead
-        # config -- kept as documented intent, not because anything reads it: Year is always
-        # derived from `date` (F.year(date)), deliberately, never from a raw 'year' column, because
-        # that raw column can carry the ISO week-year and mislabel late-December dates into the
-        # following year (see fiscal.py's module docstring).
+        # Column-name map for the RAW noob/daily-data table -- only consulted on the CIVIL path
+        # (use_fiscal_calendar=False, not tbretail's setting above). "year" is unused dead config:
+        # Year always comes from `date`, never a raw 'year' column (ISO week-year risk).
         "daily_time_columns": {
             "date": "date",
             "year": "year",
@@ -268,10 +253,8 @@ CONFIG: Dict[str, Any] = {
                 "IS_NVROUT": "CASE WHEN program LIKE '%NVROUT%' THEN 'yes' ELSE 'no' END",
             },
             "fillna": {"IS_NVROUT": "no"},
-            # Restricts the is_nvrout breakdown to the NVROUT universe only ('no' and
-            # NULL panels dropped from that slice) — Overall and every other slice
-            # (brand, SMW, is_comp) are unaffected.
-            "value_filters": {"IS_NVROUT": ["yes"]}
+            # Root "nvrout" = IS_NVROUT=='yes' only ('no'/NULL aren't their own root).
+            "root_values": {"IS_NVROUT": {"yes": "nvrout"}},
         },
         # ---------------------------------------------------------------------------
         # NGF list -> COMP vs NON-COMP split (does NOT remove anything from scope;
@@ -300,6 +283,8 @@ CONFIG: Dict[str, Any] = {
                 "IS_COMP": "'no'",
             },
             "fillna": {"IS_COMP": "yes"},
+            # Root "comp" = IS_COMP=='yes' only (NON-COMP isn't its own root).
+            "root_values": {"IS_COMP": {"yes": "comp"}},
         },
     ],
     "path_segments": {

@@ -13,11 +13,11 @@ Designed to run on **Databricks** against the customer Delta datastore (`/mnt/in
 
 | Output                                  | Description                                                                                                                                            |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `kpi_long`                              | One tidy table: `period_type` (annual / **ytd** / quarter / monthly / weekly), `period`, `dimension`, `dimension_value`, plus all configured metrics. Filter this to reproduce any slice/period panel. |
-| `comparison_yoy / ytd`                  | Prior vs current period with formatted display columns (overall + each active slice dimension). YoY is the last two annual periods; YTD compares the **same** elapsed-window **across years**, chained across every consecutive year pair present (see [Selecting which comparisons to run](#selecting-which-comparisons-to-run)). There is no separate QoQ/MoM/WoW comparison table — see the Quarter/Monthly/Weekly `kpi_long` period_type rows for recent-period value trends. Both are recomputed from the full merged kpi_long history on incremental saves. |
+| `kpi_long`                              | One tidy table: `period_type` (annual / **ytd** / quarter / monthly / weekly), `period`, `root`, `dimension`, `dimension_value`, plus all configured metrics. `root` is `"overall"` plus one per configured [dimension_source root](#roots-and-cuts-report-structure); `dimension`/`dimension_value` is the cut within that root. Filter this to reproduce any root/cut/period panel. |
+| `comparison_yoy / ytd`                  | Prior vs current period with formatted display columns, per root × cut. YoY is the last two annual periods; YTD compares the **same** elapsed-window **across years**, chained across every consecutive year pair present (see [Selecting which comparisons to run](#selecting-which-comparisons-to-run)). There is no separate QoQ/MoM/WoW comparison table — see the Quarter/Monthly/Weekly `kpi_long` period_type rows for recent-period value trends. Both are recomputed from the full merged kpi_long history on incremental saves. |
 | `scope_diff`                            | Side-by-side annual KPIs for **defined-only** vs **score-only** scope (optional sanity check). Only computed when `scope.run_scope_diff=True`. Compares scope **before** manual adjustments — intentional diagnostic of defined vs score coverage. |
-| `comparable_kpi_long` / `comparable_comparison_ytd` | Like-for-like YTD metrics over only the pairs present in both years of each consecutive-year link. Gated on `comparable_pairs.enabled=True`. |
-| **HTML report**                         | Standalone offline HTML with tabbed layout, Metric Details, and client/period info panel (see [HTML report](#html-report) section below).              |
+| `comparable_kpi_long` / `comparable_comparison_ytd` | Like-for-like YTD metrics over only the pairs present in both years of each consecutive-year link, per root × cut. Gated on `comparable_pairs.enabled=True`. |
+| **HTML report**                         | Standalone offline HTML with tabbed layout (an outer root tab when more than one root exists), Metric Details, and client/period info panel (see [HTML report](#html-report) section below). |
 
 
 Saved Delta tables live under `PATH_OUTPUT_ROOT`, partitioned by `run_date` per table:
@@ -64,8 +64,8 @@ retail-insights-pipeline/
   - `defined_scope` — column mapping for your scope Delta table
   - `path_segments.defined_scope` — Delta path segments under the datastore bucket
   - `input_filters` — optional Spark SQL filters on defined scope, lost sales, daily data
-  - `slices.dimensions` — product-master columns to slice by (e.g. `brand`)
-  - `dimension_sources` — optional, gated: pull extra slice dimensions from tables other than products (e.g. NVROUT from `extended_product`) — see [Dimension sources](#dimension-sources-extra-slices-from-other-tables)
+  - `slices.dimensions` — product-master columns to cut by (e.g. `brand`), applied within every root
+  - `dimension_sources` — optional, gated: each column becomes a root (a named, fully-broken-out population, e.g. NVROUT from `extended_product`) — see [Dimension sources → roots](#dimension-sources--roots-population-tabs-from-other-tables) and [Roots and cuts](#roots-and-cuts-report-structure)
   - `output.save_mode` — `initial`, `incremental`, or `full_refresh`
 3. **Open** `main.ipynb` and **Run All** — Cell 2 previews inputs, then the **Scope debug** cell reports distinct product/store counts per slice, before the full pipeline run in Cell 3.
 4. **Review** the save plan cell before the write cell runs. Set `allow_overwrite_existing=True` if you intentionally want to replace overlapping periods.
@@ -198,17 +198,13 @@ display(runner.scope_debug_summary())
 
 `build_dimensions()` and `build_scopes()` are idempotent; Cell 3's `runner.run()` rebuilds the same scope as part of the full pipeline. NULL slice values appear here as the string `"NULL"`; in `kpi_long` those rows carry an empty/None `dimension_value`.
 
-## Dimension sources (extra slices from other tables)
+## Dimension sources → roots (population tabs from other tables)
 
-**What it is.** By default, every slice dimension (the breakdown columns in the report) comes from the **products master** (`master-data/products`) — either a real column listed in `slices.dimensions` or a `slices.derived_dimensions` SQL expression over products columns. `dimension_sources` lets you pull a breakdown column from a **different table** when it does not live on products.
+**What it is.** `dimension_sources` pulls a breakdown column from a table other than `master-data/products` (e.g. a program/channel flag) and joins it onto the product attribute projection. If your column already exists on (or derives from) products, use `slices` instead — this is only for columns that live elsewhere.
 
-**Why it exists.** Some segmentations are not products attributes. A common example is a program/channel flag derived from a column on a separate operational table, not `master-data/products`. Without this feature you could only slice by products columns; the segment would be invisible to the report. `dimension_sources` joins that external column onto the product attribute table *after* scope is built, so it becomes a normal slice dimension everywhere downstream (`kpi_long`, comparisons, HTML).
+**Every dimension_source column is a ROOT, not a flat cut.** A root is a fully-broken-out population — like kpi-skill-toolkit's NVROUT/COMP major tabs — not just another breakdown column. `root_values` (`{dim_col: {raw_value: root_name}}`) controls which value(s) become a root and what to name them; omit it to auto-discover one root per distinct value found in the data. Every root additionally gets its own total plus a breakdown by each `slices` **cut** (brand, SMW, ...) — see [Roots and cuts](#roots-and-cuts-report-structure) below for the full model.
 
-**It is gated and opt-in.** The default config ships one **disabled** example. With nothing enabled, behaviour is exactly as before — slices come from products only. A data scientist who does *not* need external dimensions never has to think about this block; one who does flips `enabled: True` on a source. **If your breakdown column already exists on (or is derivable from) the products table, use `slices` — not this.** Dimension sources are only for columns that genuinely live elsewhere.
-
-### How it works
-
-Each **enabled** source is **left-joined** onto the product attribute projection by `join_key` (normally `product_id`, and it must already be a products column). The source's raw `columns` and `derived` SQL expressions (evaluated against the **source** table) become slice dimensions automatically — you do **not** also need to list them in `slices.dimensions`. They appear under `ACTIVE_SLICE_DIMENSIONS` in the Cell 1 / fiscal log.
+Gated/opt-in: the default config ships one disabled example; with nothing enabled, only the implicit `"overall"` root exists and the report looks exactly as before.
 
 ```python
 "dimension_sources": [
@@ -222,102 +218,73 @@ Each **enabled** source is **left-joined** onto the product attribute projection
         "derived": {                                    # Spark SQL over the SOURCE table
             "is_nvrout": "CASE WHEN program LIKE '%NVROUT%' THEN 'yes' ELSE 'no' END",
         },
+        "root_values": {"is_nvrout": {"yes": "nvrout"}},  # root "nvrout" = is_nvrout=='yes' only
     },
 ],
 "slices": {"dimensions": ["brand"], "derived_dimensions": {}},
 ```
 
-This produces an `is_nvrout` slice (`yes` / `no`) alongside `brand` — the `yes` panel is your NVROUT KPIs.
+This produces an `"nvrout"` root (alongside `"overall"`), each broken out by `brand`.
 
 ### Source-specific behaviour to know
 
-- **One row per `join_key`.** The source is reduced with `dropDuplicates([join_key])` **before** the join so it can never fan out (duplicate) the product rows. If the raw table has several rows per product (e.g. a source with multiple `program` values), the surviving row is **arbitrary** — pre-aggregate the source to one row per product (or to a clean membership flag) before pointing the toolkit at it. The toolkit does **not** clean the source (same data-quality contract as scope adjustments).
-- **Mutually exclusive within one column.** A single dimension column gives each product one value. To represent **overlapping** segments (e.g. a group whose membership includes part of another group), model them as **independent boolean dimensions** — one flag per segment — each its own slice; a product can be `yes` under both. A single `segment` column cannot express the overlap.
-- **Products missing from the source get NULL.** The join is a **left** join (it must keep every product). A product with no row in the source table gets `NULL` for the new dimension — *not* a default like `"no"`. A `CASE WHEN program LIKE '%NVROUT%' ... ELSE 'no'` expression only yields `"no"` for products that **have** a row in the source; products absent from `extended_product` are `NULL` (their own panel). Make the source cover the full product universe, use `fillna` (below), or accept the `NULL` bucket, if you want a clean `yes`/`no` split.
-- **`fillna` — impute the NULL side of a partial source.** `dimension_sources[].fillna` is `{dim_name: default_value}`, applied **after** the join, coalescing NULLs (products absent from the source) to a literal. This is the direct fix for a source that intentionally lists only one side of a split (e.g. a CSV of just the NON-COMP product_ids) — instead of leaving the complement `NULL`, it reads as the value you choose:
+- **One row per `join_key`.** The source is `dropDuplicates([join_key])`'d before the join so it can't fan out product rows. If the raw table has several rows per product, the surviving row is arbitrary — pre-aggregate the source first. The toolkit doesn't clean the source (same contract as scope adjustments).
+- **Left join → missing products get NULL**, not a default like `"no"`. A `CASE WHEN ... ELSE 'no'` expression only fires for products that have a row in the source at all; products absent from it are `NULL`. Use `fillna` (below) for a clean two-value split.
+- **`fillna: {dim_name: default}`** coalesces NULLs (products absent from the source) to a literal, after the join. Fixes a source that only lists one side of a split (e.g. a CSV of NON-COMP ids):
 
   ```python
   "dimension_sources": [
       {
-          "enabled": True,
-          "label": "ngf_comp_split",
-          "source": "csv",
+          "enabled": True, "label": "ngf_comp_split", "source": "csv",
           "path": "/Workspace/Users/you@invent.ai/lists/ngf_product_ids.csv",
-          "location": "workspace",
-          "join_key": "product_id",
-          "derived": {"is_comp": "'no'"},      # only fires for rows present in the CSV (NGF items)
-          "fillna": {"is_comp": "yes"},        # everyone else -> 'yes' instead of NULL
+          "location": "workspace", "join_key": "product_id",
+          "derived": {"is_comp": "'no'"},   # only fires for CSV rows (NGF items)
+          "fillna": {"is_comp": "yes"},     # everyone else -> 'yes' instead of NULL
+          "root_values": {"is_comp": {"yes": "comp"}},
       },
   ],
   ```
 
-  `fillna` keys must be among that source's own `columns`/`derived` dimensions — the toolkit fails loudly otherwise. Nothing is removed from scope; this only affects the `is_comp` slice breakdown, same as any other `dimension_sources` entry.
-- **Enabled sources fail loudly.** Unlike `derived_dimensions` (best-effort, skipped on error), an **enabled** dimension source raises on a bad path, missing column, or unresolved expression — a silently dropped segment would misreport the very breakdown you added it to produce. Disable the source if you want it ignored.
-- **CSV location.** Delta or CSV; CSV honours the same `location` (`datastore` / `workspace`) and `csv_options` as [scope adjustments](#manual-scope-adjustments).
+  `fillna` keys must be among that source's own dimensions — fails loudly otherwise.
+- **Enabled sources fail loudly** on a bad path, missing column, or unresolved expression (unlike `derived_dimensions`, which is best-effort). Disable a source to have it ignored.
+- **CSV location**: same `location`/`csv_options` convention as [scope adjustments](#manual-scope-adjustments).
 
-### Value filters (restrict slice values / drop the NULL bucket)
+## Roots and cuts (report structure)
 
-`value_filters` restricts which values of a slice dimension appear **in that dimension's own report breakdown** — it never affects Overall or any other slice. It is config-only (no environment variable). Available on both `slices.value_filters` and each `dimension_sources[].value_filters`. Each entry accepts **two shapes**:
+Every report row belongs to a **root** (which population) and a **cut** (how that population is broken down):
 
-**LIST form** (include-only; the original, still supported):
+- **Roots** = `"overall"` (always, unrestricted) plus one per configured `dimension_sources[].root_values` entry (e.g. `"nvrout"`, `"comp"`) — each restricts the population to rows matching that value. A client with no root-producing `dimension_sources` gets a single `"overall"` root and the report looks exactly as it did before this existed.
+- **Cuts** = `"overall"` (the root's own total, no further breakdown) plus each `slices.dimensions`/`derived_dimensions` entry (e.g. `brand`, `SMW`) — applied identically **within every root**, including `"overall"`.
 
-- **Dim omitted** — keep **all** values, including `NULL` (default).
-- **`[]` (empty list)** — keep all **non-null** values; drops only the `NULL` bucket.
-- **`["v1", "v2", ...]`** — keep **only** those values; `NULL` and any unlisted value are dropped.
+So with `root_values: {"is_nvrout": {"yes": "nvrout"}}` and `slices.dimensions: ["brand"]`, the report has: `overall` root × `overall` cut (grand total), `overall` × `brand` (brand breakdown across everything), `nvrout` × `overall` (NVROUT total), `nvrout` × `brand` (brand breakdown within NVROUT only) — mirroring kpi-skill-toolkit's `overall_annual_segment` / `nvr_all_annual_brand` style outputs. `kpi_long`, the HTML report (root becomes an outer tab when there's more than one), and comparisons (`root` column added to `comparison_yoy`/`comparison_ytd`/`comparable_comparison_ytd`) are all root × cut aware.
 
-**DICT form** (include and/or exclude, NULL-aware):
+### Value filters (restrict cut values / drop the NULL bucket)
 
-- **`{"include": ["A", "B"]}`** — keep **only** `A` and `B` (same as the list form; `NULL` dropped).
-- **`{"exclude": ["X", "Y"]}`** — keep **everything except** `X` and `Y`, **including `NULL`**. This is how you drop a set and keep the whole remainder.
-- **`{"include": [...], "exclude": [...]}`** — apply the include set first, then remove the excludes.
-- **`"keep_null": true｜false`** — optional; force-keep or force-drop the `NULL` bucket. Default: `NULL` is dropped when `include` is present, kept when only `exclude` is given.
+`slices.value_filters` restricts which values of a **cut** dimension appear in that cut's own breakdown — never Overall or any other cut. Config-only, two shapes:
+
+**LIST** (include-only): omit → keep all incl. `NULL` (default) · `[]` → drop only `NULL` · `["v1","v2"]` → keep only those, drop everything else incl. `NULL`.
+
+**DICT** (include/exclude, NULL-aware): `{"include": [...]}` → same as LIST · `{"exclude": [...]}` → keep everything except those, **including `NULL`** · both together → include then remove excludes · `"keep_null": true/false` → force the NULL bucket either way (default: dropped when `include` is set, kept otherwise).
 
 ```python
-"dimension_sources": [
-    {
-        "enabled": True,
-        "label": "extended_product",
-        ...
-        "derived": {"is_nvrout": "CASE WHEN program LIKE '%NVROUT%' THEN 'yes' ELSE 'no' END"},
-        "value_filters": {"is_nvrout": ["yes"]},   # numbers only for the NVROUT universe
-    },
-],
 "slices": {
     "dimensions": ["brand"],
     "derived_dimensions": {},
-    "value_filters": {},   # e.g. {"brand": ["NIKE", "ADIDAS"]} or {"brand": []} to drop a NULL brand bucket
+    "value_filters": {},   # e.g. {"brand": ["NIKE", "ADIDAS"]} or {"brand": []} to drop a NULL bucket
 },
 ```
 
-`is_nvrout: ["yes"]` above means the `is_nvrout` breakdown in `kpi_long` reports **numbers only for the NVROUT universe** (the `no` and `NULL` panels are dropped); `brand`, Overall, and every other slice are untouched.
+To exclude a set but keep the rest (e.g. a "not going forward" list that only lists what to drop, so everyone else is `NULL`): either give the complement a real label via `fillna`, or use `{"exclude": [...]}` to keep the `NULL` remainder.
 
-**Excluding a set but keeping the rest (e.g. a "not going forward" / NFG list).** When your source only lists the products to *drop* — so non-listed products come through as `NULL` — the list form cannot select the complement. Two options: give the complement a real label with `fillna` (see above — the breakdown then has clean named panels instead of a `NULL` one), or keep the `NULL` remainder and use `exclude`:
-
-```python
-"dimension_sources": [
-    {
-        "enabled": True,
-        "label": "nfg_list",                    # a CSV/Delta list of the not-going-forward product_ids
-        "source": "csv",
-        "path": "/Workspace/Users/you@invent.ai/lists/nfg.csv",
-        "location": "workspace",
-        "join_key": "product_id",
-        "derived": {"nfg": "CASE WHEN product_id IS NOT NULL THEN 'nfg' END"},  # 'nfg' for listed rows
-        "value_filters": {"nfg": {"exclude": ["nfg"]}},   # breakdown = everyone EXCEPT NFG (NULL kept)
-    },
-],
-```
-
-The `nfg` breakdown then covers the going-forward (COMP) universe only, while Overall and `brand` still include the NFG products. (Rows kept by `exclude` here carry `nfg = NULL`, so they appear under the dimension's `NULL`/None panel — give the flag a full-universe `ELSE` value if you want a cleaner label.)
-
-### Scope vs slices — two different machines
+### Scope vs. roots/cuts — three different knobs
 
 | Need | Use | Effect |
 | ---- | --- | ------ |
-| Include/exclude which (product, store, week) rows enter the KPIs (e.g. a JAB include list) | `scope_adjustments` | Changes scope **membership**; the addition's `scope_origin` label is for reporting only — it is **not** a report breakdown |
-| Break the report out by a segment (NVROUT vs COMP, etc.) | `slices` + `dimension_sources` | Adds a **dimension** the report groups by |
+| Include/exclude which (product, store, week) rows enter the KPIs at all | `scope_adjustments` | Changes scope **membership** |
+| A named, fully-broken-out population tab (NVROUT vs COMP) | `dimension_sources[].root_values` | Adds a **root** |
+| Break any root's population out by a dimension (brand, SMW) | `slices` | Adds a **cut**, applied within every root |
 
-`scope_adjustments` decide *which rows*; `slices` / `dimension_sources` decide *how rows are grouped*. A typical setup uses both: a scope addition **and** a dimension source for a segment flag.
+`scope_adjustments` decide *which rows exist at all*; roots decide *which population a report view covers*; cuts decide *how a population is broken down*. A typical setup uses all three: a scope addition, a root for a segment flag, and a cut for brand.
 
 ## Comparable pairs (like-for-like, YTD-only)
 
@@ -842,12 +809,12 @@ If you see slow runs, check: (1) scope table path is correct so defined scope is
 | Saved Delta stale vs notebook | Incremental skip kept old rows on disk while notebook shows fresh `kpi_long` — enable overwrite or use `full_refresh` |
 | Saved `kpi_long` had far fewer periods than the run actually computed (e.g. only the last 5 weeks/months) | Fixed — `ctx.kpi_long` was previously trimmed to the HTML display window *before* the save step; now only a separate `ctx.kpi_long_display` copy is trimmed, and `ctx.kpi_long`/the Delta save always hold the full computed window. Re-run and re-save if you saved under the old behavior. |
 | Comparisons skipped         | Need ≥2 years present in the run window (both YoY and YTD) |
-| Empty slice dimension       | Column missing from `master-data/products` or derived SQL failed validation — if it lives on another table, add a [dimension source](#dimension-sources-extra-slices-from-other-tables) |
+| Empty cut dimension       | Column missing from `master-data/products` or derived SQL failed validation — if it lives on another table, add a [dimension source](#dimension-sources--roots-population-tabs-from-other-tables) (it becomes a root, not a cut) |
 | Dimension source errors on read | An **enabled** dimension source fails loudly on bad path / missing column / bad expression (by design) — fix the source or set `enabled: False` |
-| Slice value count looks doubled | A `dimension_source` table has multiple rows per `join_key` — pre-aggregate to one row per product (toolkit keeps an arbitrary row, see [Dimension sources](#dimension-sources-extra-slices-from-other-tables)) |
-| `is_nvrout` (or another slice) shows a NULL bucket, or you want only one value (e.g. only NVROUT products) | set `value_filters` for that dimension in `slices` or the `dimension_source`: `["yes"]` keeps only `yes`; `[]` drops the NULL bucket; see [Value filters](#value-filters-restrict-slice-values--drop-the-null-bucket) |
-| A `dimension_source` NULL bucket should really read as a real value (e.g. "everyone not on this list is comp") | add `fillna: {dim_name: default}` on that `dimension_sources` entry — coalesces the NULL left by the join to your literal; see [Dimension sources](#dimension-sources-extra-slices-from-other-tables) |
-| Scope debug counts don't match `kpi_long` per slice | The debug cell recomputes scope independently — re-run it after any `config.py` change (scope mode, adjustments, `value_filters`) so it reflects the same scope Cell 3 builds. NULL slice values show as `"NULL"` here but as blank/None in `kpi_long` |
+| Cut value count looks doubled | A `dimension_source` table has multiple rows per `join_key` — pre-aggregate to one row per product (toolkit keeps an arbitrary row, see [Dimension sources](#dimension-sources--roots-population-tabs-from-other-tables)) |
+| Only want one root value (e.g. only NVROUT products), or a root you expected is missing | Set `root_values` on that `dimension_sources` entry: `{"yes": "nvrout"}` makes exactly one root from `is_nvrout=='yes'`; omit it to auto-discover one root per distinct value instead. `NULL` never gets its own root. |
+| A cut dimension's NULL bucket shows and you want it excluded/renamed | `slices.value_filters` for cuts (`["yes"]` keeps only `yes`; `[]` drops NULL) — see [Value filters](#value-filters-restrict-cut-values--drop-the-null-bucket). For a `dimension_source`'s own NULL bucket, use `fillna: {dim_name: default}` on that source instead (coalesces the join's NULL to a literal) |
+| Scope debug counts don't match `kpi_long` per cut | The debug cell recomputes scope independently — re-run it after any `config.py` change (scope mode, adjustments, `value_filters`) so it reflects the same scope Cell 3 builds. NULL values show as `"NULL"` here but as blank/None in `kpi_long` |
 | Lost-sales / in-stock numbers change only for slower products after enabling ensemble | Expected — clusters not in `fast_mover_clusters` (and products with no/NULL cluster) now use the 365-day model |
 | Slice/pair counts for the speed cluster look doubled | `product-cluster-attributes-snapshot` has >1 `sales_speed` row per product — reader dedupes on `product_id`; verify upstream data |
 | Ensemble run fails loudly on read | An enabled ensemble source path (`slow_path_segments` / `speed_cluster_path_segments`) is wrong, or the attributes table lacks the `attribute_name` value — fix path/attribute or set `enabled: False`. If the speed-cluster table is **wide**-shaped (the cluster is already its own column, no `attribute_name`/`attribute_value` columns), set `speed_cluster_format: "wide"` and `speed_cluster_value_col` to that column name instead |

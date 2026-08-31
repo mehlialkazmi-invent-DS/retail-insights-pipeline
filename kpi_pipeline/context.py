@@ -19,6 +19,16 @@ class KPIContext:
     products_attr: Optional[DataFrame] = None
     product_dims: Optional[DataFrame] = None
     active_slice_dimensions: List[str] = field(default_factory=list)
+    # Root-defining dimension_source columns (config.py's dimension_sources[*].root_values)
+    # excluded -- what's left is what actually gets its own breakdown ("cut") inside every root,
+    # including "overall". See kpi_long.build_kpi_long / fiscal._resolve_root_definitions.
+    cut_dimensions: List[str] = field(default_factory=list)
+    # One entry per root population (e.g. {"root": "nvrout", "dim_col": "IS_NVROUT", "value": "yes"}) --
+    # "overall" (no restriction) is always implicit and not listed here. Resolved at runtime in
+    # fiscal.build_fiscal_and_products from config.py's dimension_sources[*].root_values (explicit
+    # value->name mapping) or auto-discovered (one root per distinct value) when root_values is
+    # absent for a given dimension_source column.
+    root_definitions: List[Dict[str, Any]] = field(default_factory=list)
     available_fiscal_quarters: Optional[List[int]] = None
 
     defined_scope_keys: Optional[DataFrame] = None

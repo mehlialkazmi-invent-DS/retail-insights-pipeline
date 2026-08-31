@@ -584,30 +584,36 @@ def _dimension_values(
     return sorted(sub["dimension_value"].unique().tolist(), key=lambda x: str(x))
 
 
-def _tab_visibility_css(period_types: List[str], dims_by_period: Dict[str, List[str]], values_by_dim: Dict[str, List[str]]) -> str:
-    """Generate CSS rules for three-level tab visibility."""
+def _tab_visibility_css(
+    period_types: List[str],
+    dims_by_period: Dict[str, List[str]],
+    values_by_dim: Dict[str, List[str]],
+    root: str = "overall",
+) -> str:
+    """Generate CSS rules for three-level tab visibility. `root` namespaces every generated id so
+    multiple roots' tab groups (see _render_root_period_tabs) don't collide on one page."""
     lines: List[str] = []
 
     for pt in period_types:
         lines.append(
-            f"  #kpi-tab-{_safe_id(pt)}:checked ~ .top-panels .top-panel-{_safe_id(pt)} {{ display: block; }}"
+            f"  #kpi-tab-{_safe_id(root, pt)}:checked ~ .top-panels .top-panel-{_safe_id(root, pt)} {{ display: block; }}"
         )
         lines.append(
-            f"  #kpi-tab-{_safe_id(pt)}:checked ~ .top-tab-bar label[for='kpi-tab-{_safe_id(pt)}'] "
+            f"  #kpi-tab-{_safe_id(root, pt)}:checked ~ .top-tab-bar label[for='kpi-tab-{_safe_id(root, pt)}'] "
             f"{{ background: var(--surface); color: var(--ink); "
             f"box-shadow: inset 0 -3px 0 var(--accent); }}"
         )
 
         dims = dims_by_period.get(pt, ["overall"])
         for di, dim in enumerate(dims):
-            dim_id = _safe_id(pt, dim)
+            dim_id = _safe_id(root, pt, dim)
             lines.append(
                 f"  #kpi-dim-{dim_id}:checked "
-                f"~ .dim-panels-{_safe_id(pt)} .dim-panel-{dim_id} {{ display: block; }}"
+                f"~ .dim-panels-{_safe_id(root, pt)} .dim-panel-{dim_id} {{ display: block; }}"
             )
             lines.append(
                 f"  #kpi-dim-{dim_id}:checked "
-                f"~ .dim-tab-bar-{_safe_id(pt)} label[for='kpi-dim-{dim_id}'] "
+                f"~ .dim-tab-bar-{_safe_id(root, pt)} label[for='kpi-dim-{dim_id}'] "
                 f"{{ background: var(--accent); color: #fff; border-color: var(--accent); }}"
             )
 
@@ -615,7 +621,7 @@ def _tab_visibility_css(period_types: List[str], dims_by_period: Dict[str, List[
                 continue
             val_key = f"{pt}|{dim}"
             for vi, _ in enumerate(values_by_dim.get(val_key, [])):
-                val_id = _safe_id(pt, dim, str(vi))
+                val_id = _safe_id(root, pt, dim, str(vi))
                 lines.append(
                     f"  #kpi-val-{val_id}:checked "
                     f"~ .value-layout .value-panel-{val_id} {{ display: block; }}"
@@ -627,16 +633,19 @@ def _tab_visibility_css(period_types: List[str], dims_by_period: Dict[str, List[
                     f"border-left: 3px solid var(--accent); }}"
                 )
 
-    lines.append(
-        "  #kpi-tab-details:checked ~ .top-panels .top-panel-details { display: block; }"
-    )
-    lines.append(
-        "  #kpi-tab-details:checked ~ .top-tab-bar label[for='kpi-tab-details'] "
-        "{ background: var(--surface); color: var(--ink); "
-        "box-shadow: inset 0 -3px 0 var(--accent); }"
-    )
-
     return "\n".join(lines)
+
+
+# "Metric Details" is root-independent (just metric definitions), so it's always a peer of
+# whichever tab level is OUTERMOST -- period tabs when there's only one root (today's exact
+# behavior), or the root tabs themselves when there's more than one -- never nested inside a
+# specific root's panel, and never duplicated per root. Emitted once regardless of root count.
+_DETAILS_TAB_CSS = (
+    "  #kpi-tab-details:checked ~ .top-panels .top-panel-details { display: block; }\n"
+    "  #kpi-tab-details:checked ~ .top-tab-bar label[for='kpi-tab-details'] "
+    "{ background: var(--surface); color: var(--ink); "
+    "box-shadow: inset 0 -3px 0 var(--accent); }"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -989,6 +998,7 @@ def _value_tabs_html(
     comparable_comp_df: Optional[pd.DataFrame] = None,
     comparable_label: str = "",
     month_display_by_period: Optional[Dict[str, str]] = None,
+    root: str = "overall",
 ) -> str:
     values = _dimension_values(kpi_long, period_type, dimension)
     if not values:
@@ -1001,19 +1011,19 @@ def _value_tabs_html(
         )
 
     radios = "".join(
-        f"<input type='radio' class='value-tab-anchor' name='val-{_safe_id(period_type, dimension)}' "
-        f"id='kpi-val-{_safe_id(period_type, dimension, str(i))}'{' checked' if i == 0 else ''}>"
+        f"<input type='radio' class='value-tab-anchor' name='val-{_safe_id(root, period_type, dimension)}' "
+        f"id='kpi-val-{_safe_id(root, period_type, dimension, str(i))}'{' checked' if i == 0 else ''}>"
         for i, _ in enumerate(values)
     )
 
     tab_labels = "".join(
-        f"<label for='kpi-val-{_safe_id(period_type, dimension, str(i))}' class='value-tab'>"
+        f"<label for='kpi-val-{_safe_id(root, period_type, dimension, str(i))}' class='value-tab'>"
         f"{_esc(str(v))}</label>"
         for i, v in enumerate(values)
     )
 
     panels = "".join(
-        f"<div class='value-panel value-panel-{_safe_id(period_type, dimension, str(i))}'>"
+        f"<div class='value-panel value-panel-{_safe_id(root, period_type, dimension, str(i))}'>"
         f"{_value_panel_content(kpi_long, period_type, dimension, v, metric_cols, labels, comp_df, comp_label, week_start_by_period, comparable_comp_df, comparable_label, month_display_by_period)}"
         f"</div>"
         for i, v in enumerate(values)
@@ -1042,17 +1052,18 @@ def _period_tab_html(
     comparable_comp_df: Optional[pd.DataFrame] = None,
     comparable_label: str = "",
     month_display_by_period: Optional[Dict[str, str]] = None,
+    root: str = "overall",
 ) -> str:
-    pt_id = _safe_id(period_type)
+    pt_id = _safe_id(root, period_type)
 
     radios = "".join(
         f"<input type='radio' class='dim-tab-anchor' name='dim-{pt_id}' "
-        f"id='kpi-dim-{_safe_id(period_type, dim)}'{' checked' if i == 0 else ''}>"
+        f"id='kpi-dim-{_safe_id(root, period_type, dim)}'{' checked' if i == 0 else ''}>"
         for i, dim in enumerate(dims)
     )
 
     tab_labels = "".join(
-        f"<label for='kpi-dim-{_safe_id(period_type, dim)}' class='dim-tab'>"
+        f"<label for='kpi-dim-{_safe_id(root, period_type, dim)}' class='dim-tab'>"
         f"{_esc(_dim_label(dim))}</label>"
         for dim in dims
     )
@@ -1060,7 +1071,7 @@ def _period_tab_html(
 
     panels: List[str] = []
     for dim in dims:
-        dim_id = _safe_id(period_type, dim)
+        dim_id = _safe_id(root, period_type, dim)
         if dim == "overall":
             values = _dimension_values(kpi_long, period_type, "overall")
             dval = values[0] if values else "overall"
@@ -1073,12 +1084,76 @@ def _period_tab_html(
             content = _value_tabs_html(
                 kpi_long, period_type, dim, metric_cols, labels,
                 comp_df, comp_label, week_start_by_period,
-                comparable_comp_df, comparable_label, month_display_by_period,
+                comparable_comp_df, comparable_label, month_display_by_period, root,
             )
         panels.append(f"<div class='kpi-dim-panel dim-panel-{dim_id}'>{content}</div>")
 
     panels_wrap = f"<div class='dim-panels-{pt_id}'>{''.join(panels)}</div>"
     return radios + tab_bar + panels_wrap
+
+
+def _comp_df_for_root(comp_map: Dict[str, Optional[pd.DataFrame]], root: str) -> Dict[str, Optional[pd.DataFrame]]:
+    """Restrict each period_type's comparison table to one root's rows (comparison_yoy/ytd and
+    comparable_comparison_ytd all carry a "root" column now -- see kpi_pipeline/comparisons.py)."""
+    out: Dict[str, Optional[pd.DataFrame]] = {}
+    for pt, df in comp_map.items():
+        out[pt] = df[df["root"] == root] if df is not None and not df.empty and "root" in df.columns else df
+    return out
+
+
+def _build_root_period_tabs(
+    kpi_long_root: pd.DataFrame,
+    root: str,
+    period_types: List[str],
+    dims: List[str],
+    metric_cols: List[str],
+    labels: Dict[str, str],
+    comp_map: Dict[str, Optional[pd.DataFrame]],
+    comparable_comp_map: Dict[str, Optional[pd.DataFrame]],
+    week_start_by_period: Dict[str, Any],
+    month_display_by_period: Dict[str, str],
+    extra_tab: Optional[Tuple[str, str, str]] = None,
+) -> Tuple[str, str]:
+    """Build (css, body_html) for one root's Annual/Quarter/Month/YTD/Weekly tab group, already
+    filtered to that root's rows. `extra_tab` (id, label, panel_html) -- used for "Metric Details"
+    when there's only one root (see render_kpi_html) -- is appended into the SAME radio group so
+    it sits as a peer of the period tabs, exactly matching the pre-roots layout; with more than
+    one root, Details instead becomes a peer of the root tabs themselves (extra_tab=None here)."""
+    dims_by_period = {pt: dims for pt in period_types}
+    values_by_dim: Dict[str, List[str]] = {}
+    for pt in period_types:
+        for dim in dims:
+            if dim != "overall":
+                values_by_dim[f"{pt}|{dim}"] = _dimension_values(kpi_long_root, pt, dim)
+    css = _tab_visibility_css(period_types, dims_by_period, values_by_dim, root)
+
+    group_name = f"kpi-top-{_safe_id(root)}"
+    radios = "".join(
+        f"<input type='radio' class='top-tab-anchor' name='{group_name}' "
+        f"id='kpi-tab-{_safe_id(root, pt)}'{' checked' if i == 0 else ''}>"
+        for i, pt in enumerate(period_types)
+    )
+    tab_labels = "".join(
+        f"<label for='kpi-tab-{_safe_id(root, pt)}' class='top-tab'>{_esc(_PERIOD_LABELS.get(pt, pt.title()))}</label>"
+        for pt in period_types
+    )
+    period_panels = "".join(
+        f"<div class='top-panel top-panel-{_safe_id(root, pt)}'>"
+        f"{_period_tab_html(kpi_long_root, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period, comparable_comp_map.get(pt), _COMPARABLE_LABELS.get(pt, ''), month_display_by_period, root)}"
+        f"</div>"
+        for pt in period_types
+    )
+
+    if extra_tab is not None:
+        extra_id, extra_label, extra_panel_html = extra_tab
+        radios += f"<input type='radio' class='top-tab-anchor' name='{group_name}' id='kpi-tab-{extra_id}'>"
+        tab_labels += f"<label for='kpi-tab-{extra_id}' class='top-tab'>{_esc(extra_label)}</label>"
+        period_panels += f"<div class='top-panel top-panel-{extra_id}'>{extra_panel_html}</div>"
+        css += "\n" + _DETAILS_TAB_CSS
+
+    tab_bar = f"<div class='top-tab-bar'>{tab_labels}</div>"
+    body = radios + tab_bar + f"<div class='top-panels'>{period_panels}</div>"
+    return css, body
 
 
 def _metric_details_html(
@@ -1170,6 +1245,7 @@ def _report_info_html(
 _PERIOD_ORDER = ["annual", "ytd", "quarter", "monthly", "weekly"]
 _PERIOD_LABELS = {"annual": "Annual", "ytd": "YTD", "quarter": "Quarter", "monthly": "Monthly", "weekly": "Weekly"}
 _PERIOD_COMP_LABEL = {"annual": "YoY", "ytd": "YTD"}
+_COMPARABLE_LABELS = {"ytd": "Comparable YTD"}
 
 _TURNOVER_PERIOD_LABELS = {
     "annual": "Annual Inventory Turnover Rate",
@@ -1231,8 +1307,11 @@ def render_kpi_html(
     ]
     labels: Dict[str, str] = settings.get("METRIC_LABELS") or {}
 
+    # Root-defining dimension_source columns are NOT cuts (they're what "root" partitions on) --
+    # use cut_dimensions, not active_slice_dimensions, so e.g. IS_NVROUT doesn't also render as
+    # its own flat dimension tab now that it drives the root tabs instead.
     configured_slices = list(settings.get("SLICE_DIMENSIONS") or [])
-    active_dims = list(ctx.active_slice_dimensions or [])
+    active_dims = list(getattr(ctx, "cut_dimensions", None) or [])
     slice_source = active_dims or configured_slices
     dims = _infer_dimensions(kpi_long, slice_source)
 
@@ -1262,7 +1341,6 @@ def render_kpi_html(
         "monthly": None,
         "weekly": None,
     }
-    _COMPARABLE_LABELS = {"ytd": "Comparable YTD"}
 
     week_start_by_period: Dict[str, Any] = {}
     if getattr(ctx, "fiscal_week", None) is not None:
@@ -1273,51 +1351,87 @@ def render_kpi_html(
     if "monthly" in period_types and getattr(ctx, "fiscal_cal", None) is not None and getattr(ctx, "fiscal_week", None) is not None:
         month_display_by_period = _build_month_display_labels(ctx)
 
-    dims_by_period = {pt: dims for pt in period_types}
-    values_by_dim: Dict[str, List[str]] = {}
-    for pt in period_types:
-        for dim in dims:
-            if dim != "overall":
-                values_by_dim[f"{pt}|{dim}"] = _dimension_values(kpi_long, pt, dim)
+    # Roots: "overall" plus one per ctx.root_definitions (e.g. "nvrout", "comp" -- see
+    # fiscal._resolve_root_definitions), restricted to whatever actually has rows in this
+    # kpi_long (defensive; should normally be all of them). A single root (the common case for a
+    # client with no root-producing dimension_sources configured) renders exactly as before --
+    # no extra tab layer. More than one root gets its own outer tab, each containing its own
+    # complete Annual/Quarter/Month/YTD/Weekly tab set, mirroring kpi-skill-toolkit's NVROUT/COMP
+    # major tabs (see kpi_pipeline/kpi_long.build_kpi_long for how these rows were produced).
+    present_roots = set(kpi_long["root"].unique()) if "root" in kpi_long.columns else {"overall"}
+    roots = [r for r in (["overall"] + [rd["root"] for rd in ctx.root_definitions]) if r in present_roots]
+    if not roots:
+        roots = ["overall"]
 
-    dyn_css = _tab_visibility_css(period_types, dims_by_period, values_by_dim)
+    details_panel_html = f"<div class='top-panel top-panel-details'>{_metric_details_html(metric_cols, labels, defs)}</div>"
 
-    top_radios = "".join(
-        f"<input type='radio' class='top-tab-anchor' name='kpi-top' "
-        f"id='kpi-tab-{_safe_id(pt)}'{' checked' if i == 0 else ''}>"
-        for i, pt in enumerate(period_types)
-    )
-    top_radios += "<input type='radio' class='top-tab-anchor' name='kpi-top' id='kpi-tab-details'>"
+    if len(roots) == 1:
+        root = roots[0]
+        kpi_long_root = kpi_long[kpi_long["root"] == root] if "root" in kpi_long.columns else kpi_long
+        dyn_css, body = _build_root_period_tabs(
+            kpi_long_root, root, period_types, dims, metric_cols, labels,
+            _comp_df_for_root(comp_map, root), _comp_df_for_root(comparable_comp_map, root),
+            week_start_by_period, month_display_by_period,
+            extra_tab=("details", "Metric Details", _metric_details_html(metric_cols, labels, defs)),
+        )
+        main_panel = f"<div class='panel'>{body}</div>"
+    else:
+        css_parts: List[str] = []
+        root_panels: List[str] = []
+        for root in roots:
+            kpi_long_root = kpi_long[kpi_long["root"] == root]
+            css, body = _build_root_period_tabs(
+                kpi_long_root, root, period_types, dims, metric_cols, labels,
+                _comp_df_for_root(comp_map, root), _comp_df_for_root(comparable_comp_map, root),
+                week_start_by_period, month_display_by_period,
+            )
+            css_parts.append(css)
+            root_panels.append((root, body))
 
-    tab_labels = "".join(
-        f"<label for='kpi-tab-{_safe_id(pt)}' class='top-tab'>{_esc(_PERIOD_LABELS.get(pt, pt.title()))}</label>"
-        for pt in period_types
-    )
-    tab_labels += "<label for='kpi-tab-details' class='top-tab'>Metric Details</label>"
-    top_tab_bar = f"<div class='top-tab-bar'>{tab_labels}</div>"
+        root_radios = "".join(
+            f"<input type='radio' class='top-tab-anchor' name='kpi-root' "
+            f"id='kpi-root-{_safe_id(root)}'{' checked' if i == 0 else ''}>"
+            for i, (root, _) in enumerate(root_panels)
+        )
+        root_radios += "<input type='radio' class='top-tab-anchor' name='kpi-root' id='kpi-root-details'>"
 
-    period_panels = "".join(
-        f"<div class='top-panel top-panel-{_safe_id(pt)}'>"
-        f"{_period_tab_html(kpi_long, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period, comparable_comp_map.get(pt), _COMPARABLE_LABELS.get(pt, ''), month_display_by_period)}"
-        f"</div>"
-        for pt in period_types
-    )
+        root_labels = "".join(
+            f"<label for='kpi-root-{_safe_id(root)}' class='top-tab'>"
+            f"{_esc('Overall' if root == 'overall' else root)}</label>"
+            for root, _ in root_panels
+        )
+        root_labels += "<label for='kpi-root-details' class='top-tab'>Metric Details</label>"
+        root_tab_bar = f"<div class='top-tab-bar'>{root_labels}</div>"
 
-    details_panel = (
-        f"<div class='top-panel top-panel-details'>"
-        f"{_metric_details_html(metric_cols, labels, defs)}"
-        f"</div>"
-    )
+        root_panels_html = "".join(
+            f"<div class='top-panel top-panel-root-{_safe_id(root)}'><div class='panel'>{body}</div></div>"
+            for root, body in root_panels
+        )
+        root_panels_html += f"<div class='top-panel top-panel-root-details'>{details_panel_html}</div>"
 
-    all_panels = f"<div class='top-panels'>{period_panels}{details_panel}</div>"
+        root_css_lines: List[str] = []
+        for root, _ in root_panels:
+            rid = _safe_id(root)
+            root_css_lines.append(
+                f"  #kpi-root-{rid}:checked ~ .top-panels .top-panel-root-{rid} {{ display: block; }}"
+            )
+            root_css_lines.append(
+                f"  #kpi-root-{rid}:checked ~ .top-tab-bar label[for='kpi-root-{rid}'] "
+                f"{{ background: var(--surface); color: var(--ink); box-shadow: inset 0 -3px 0 var(--accent); }}"
+            )
+        root_css_lines.append(
+            "  #kpi-root-details:checked ~ .top-panels .top-panel-root-details { display: block; }"
+        )
+        root_css_lines.append(
+            "  #kpi-root-details:checked ~ .top-tab-bar label[for='kpi-root-details'] "
+            "{ background: var(--surface); color: var(--ink); box-shadow: inset 0 -3px 0 var(--accent); }"
+        )
 
-    main_panel = (
-        f"<div class='panel'>"
-        f"{top_radios}"
-        f"{top_tab_bar}"
-        f"{all_panels}"
-        f"</div>"
-    )
+        dyn_css = "\n".join(css_parts) + "\n" + "\n".join(root_css_lines)
+        main_panel = (
+            f"<div class='panel'>{root_radios}{root_tab_bar}"
+            f"<div class='top-panels'>{root_panels_html}</div></div>"
+        )
 
     slice_dim_labels = [d for d in dims if d != "overall"]
     report_info = _report_info_html(
