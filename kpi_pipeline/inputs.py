@@ -10,20 +10,22 @@ from pyspark.sql import functions as F
 # Fallback defaults when a settings dict predates lost_sales_source/instock_source (e.g. a
 # customer config that duplicates config.py's schema instead of importing it) and so lacks
 # these resolved keys entirely — reproduces the schema every pipeline read has always assumed.
-DEFAULT_LOST_SALES_COLUMN_MAP: Dict[str, str] = {
+DEFAULT_LOST_SALES_COLUMN_MAP: Dict[str, Any] = {
     "week_col": "week_start_date",
     "product_col": "product_id",
     "store_col": "store_id",
     "lost_sales_col": "lost_sales",
     "in_stock_col": "in_stock",
     "total_days_col": "details.total_days",
+    "product_agg_level_col": None,
 }
-DEFAULT_INSTOCK_SOURCE_COLUMN_MAP: Dict[str, str] = {
+DEFAULT_INSTOCK_SOURCE_COLUMN_MAP: Dict[str, Any] = {
     "week_col": "week_start_date",
     "product_col": "product_id",
     "store_col": "store_id",
     "in_stock_col": "in_stock",
     "total_days_col": "total_days",
+    "product_agg_level_col": None,
 }
 
 
@@ -108,32 +110,67 @@ def _print_date_range(df: DataFrame, date_col: str, label: str) -> None:
     print(f"  {label} date range in source ({date_col}): {bounds['min']} to {bounds['max']}")
 
 
-def _rename_join_keys_to_canonical(df: DataFrame, col_map: Dict[str, str]) -> DataFrame:
+def _rename_join_keys_to_canonical(df: DataFrame, col_map: Dict[str, Any]) -> DataFrame:
     """Rename a source's own product/store/week columns to the pipeline's canonical
     names (product_id, store_id, week_start_date) so every downstream reader can keep
-    assuming those names regardless of what a client's raw table calls them."""
+    assuming those names regardless of what a client's raw table calls them.
+
+    store_col is optional: a source with no per-store dimension (e.g. reporting_inv_fc_dfu/
+    report_dfu's lost_sales/instock columns, aggregated to product_agg_level x week only) sets
+    it to None, and the resulting frame simply has no store_id column at all.
+    """
     renames = {
         col_map["product_col"]: "product_id",
-        col_map["store_col"]: "store_id",
         col_map["week_col"]: "week_start_date",
     }
+    store_col = col_map.get("store_col")
+    if store_col:
+        renames[store_col] = "store_id"
     for source_col, canonical in renames.items():
         if source_col != canonical:
             df = df.withColumnRenamed(source_col, canonical)
     return df
 
 
+def _map_product_agg_level_to_product_id(
+    spark: SparkSession,
+    df: DataFrame,
+    col_map: Dict[str, Any],
+    settings: Dict[str, Any],
+    quiet: bool = False,
+) -> DataFrame:
+    """Backfill product_id from product_agg_level when a source is keyed by planning/DFU level
+    instead of product_id (e.g. reporting_inv_fc_dfu/report_dfu) -- mirrors kpi-skill-toolkit's
+    own product_agg_level fallback. A no-op when product_col is already on the source (even if
+    product_agg_level_col happens to be configured) or when product_agg_level_col isn't
+    configured/present -- so this only ever fires when actually needed.
+    """
+    product_col = col_map["product_col"]
+    agg_col = col_map.get("product_agg_level_col")
+    if product_col in df.columns or not agg_col or agg_col not in df.columns:
+        return df
+    if not quiet:
+        print(f"  mapping {agg_col!r} -> product_id via product_planning_level")
+    mapping = (
+        spark.read.format("delta")
+        .load(settings["PATH_PRODUCT_PLANNING_LEVEL"])
+        .select(F.col("planning_level_id").alias(agg_col), "product_id")
+        .distinct()
+    )
+    return df.join(mapping, on=agg_col, how="inner")
+
+
 def read_lost_sales_source(
     spark: SparkSession, settings: Dict[str, Any], path: Optional[str] = None, quiet: bool = False
 ) -> DataFrame:
     path = path or settings["PATH_LOST_SALES"]
+    col_map = settings.get("LOST_SALES_COLUMN_MAP") or DEFAULT_LOST_SALES_COLUMN_MAP
     filters = _input_filters(settings, "lost_sales")
     if not quiet:
         print(f"reading lost_sales: {path}")
     raw = spark.read.format("delta").load(path)
-    raw = _rename_join_keys_to_canonical(
-        raw, settings.get("LOST_SALES_COLUMN_MAP") or DEFAULT_LOST_SALES_COLUMN_MAP
-    )
+    raw = _map_product_agg_level_to_product_id(spark, raw, col_map, settings, quiet=quiet)
+    raw = _rename_join_keys_to_canonical(raw, col_map)
     if filters and not quiet:
         print(f"lost_sales filters ({len(filters)}):")
     out = apply_input_filters(raw, filters, "lost_sales", quiet=quiet)
@@ -144,7 +181,8 @@ def read_lost_sales_source(
 def read_instock_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
     """Raw in-stock table for the instock_source override (only read when enabled).
 
-    Renamed to canonical product_id/store_id/week_start_date join keys; in_stock_col and
+    Renamed to canonical product_id/[store_id/]week_start_date join keys (store_id only when
+    store_col is configured -- see _rename_join_keys_to_canonical); in_stock_col and
     total_days_col are left under their configured names for the caller to aggregate.
     """
     path = settings["PATH_INSTOCK_SOURCE"]
@@ -152,6 +190,7 @@ def read_instock_source(spark: SparkSession, settings: Dict[str, Any], quiet: bo
     if not quiet:
         print(f"reading instock_source: {path}")
     raw = spark.read.format("delta").load(path)
+    raw = _map_product_agg_level_to_product_id(spark, raw, col_map, settings, quiet=quiet)
     return _rename_join_keys_to_canonical(raw, col_map)
 
 

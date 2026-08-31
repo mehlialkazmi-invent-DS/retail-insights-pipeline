@@ -66,11 +66,27 @@ def _aggregate_lost_sales_pairweek(ctx: KPIContext, raw: DataFrame, start, end) 
         # (calendar year) rather than the source 'year' column, which can carry the ISO
         # week-year (late-December weeks labelled as the next year). See fiscal.py.
         agg_exprs.append(F.first(F.col("week").cast("int"), ignorenulls=True).alias("_ls_week"))
-    return filtered.groupBy("product_id", "store_id", "week_start_date").agg(*agg_exprs)
+    # Grouped without store_id when the source has none (store_col=None in
+    # LOST_SALES_COLUMN_MAP) -- CAUTION (see config.py's lost_sales_source comment): lost_sales
+    # is an absolute count, so a pair-week without store_id gets broadcast across every scoped
+    # store of that product downstream (read_lost_sales_weekly's join), which OVER-COUNTS if
+    # later summed across stores. Only safe for in_stock/total_days (ratios), not lost_sales.
+    group_keys = ["product_id", "week_start_date"]
+    if "store_id" in raw.columns:
+        group_keys.insert(1, "store_id")
+    return filtered.groupBy(*group_keys).agg(*agg_exprs)
 
 
 def _aggregate_instock_pairweek(ctx: KPIContext, raw: DataFrame, start, end) -> DataFrame:
-    """Aggregate the standalone instock_source table to (product_id, store_id, week_start_date)."""
+    """Aggregate the standalone instock_source table to (product_id[, store_id], week_start_date).
+
+    Grouped without store_id when the source has none (store_col=None in
+    INSTOCK_SOURCE_COLUMN_MAP, e.g. reporting_inv_fc_dfu/report_dfu) -- read_lost_sales_weekly's
+    join then broadcasts this pair-week's value across every scoped store of that product
+    instead of requiring an exact (product, store, week) match. Safe here: in_stock_days/
+    total_days are a ratio, and summing the same broadcast value across a product's stores then
+    dividing reproduces the original ratio (numerator and denominator scale identically).
+    """
     col_map = ctx.settings.get("INSTOCK_SOURCE_COLUMN_MAP") or DEFAULT_INSTOCK_SOURCE_COLUMN_MAP
     filtered = (
         raw.withColumn("week_start_date", F.to_date("week_start_date"))
@@ -80,7 +96,10 @@ def _aggregate_instock_pairweek(ctx: KPIContext, raw: DataFrame, start, end) -> 
         F.sum(F.col(col_map["in_stock_col"]).cast("double")).alias("in_stock_days"),
         F.sum(F.col(col_map["total_days_col"]).cast("double")).alias("total_days"),
     ]
-    return filtered.groupBy("product_id", "store_id", "week_start_date").agg(*agg_exprs)
+    group_keys = ["product_id", "week_start_date"]
+    if "store_id" in raw.columns:
+        group_keys.insert(1, "store_id")
+    return filtered.groupBy(*group_keys).agg(*agg_exprs)
 
 
 def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataFrame:
@@ -174,7 +193,15 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
     if s.get("INSTOCK_SOURCE_ENABLED", False):
         instock_raw = read_instock_source(ctx.spark, s, quiet=True)
         instock_agg = _aggregate_instock_pairweek(ctx, instock_raw, start, end)
-        deduped = deduped.join(instock_agg, on=["product_id", "store_id", "week_start_date"], how="left")
+        # Join on (product_id, week_start_date) only when instock_agg has no store_id (source
+        # configured with store_col=None) -- this fans the single product-week value out to
+        # every store_id row already in `deduped`, i.e. broadcasts it across scoped stores.
+        # Safe for a ratio (see _aggregate_instock_pairweek); requires INSTOCK_SOURCE_ENABLED's
+        # in_stock/total_days to be the only fields coming from this source (already the case).
+        instock_join_keys = ["product_id", "week_start_date"]
+        if "store_id" in instock_agg.columns:
+            instock_join_keys.insert(1, "store_id")
+        deduped = deduped.join(instock_agg, on=instock_join_keys, how="left")
 
     ctx.lost_sales_weekly_base = _enrich_lost_sales_with_time_grain(ctx, deduped).withColumn(
         "fiscal_week_days",
