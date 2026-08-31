@@ -32,15 +32,26 @@ CONFIG: Dict[str, Any] = {
     },
     "fiscal_calendar": {
         "use_fiscal_calendar": True,
-        # Column on the fiscal_cal upload carrying a display month label per week (e.g. "August").
-        # Read as-is (verbatim) when the column exists on fiscal_cal -- trusts the client's own
-        # fiscal calendar instead of re-deriving a name. Only relevant when use_fiscal_calendar is
-        # True; ignored (no such column exists) on the civil-calendar path, where the Monthly tab's
-        # month number is already the real calendar month.
-        # Set to None if this client's fiscal_cal has no such column, or you don't want it used --
-        # the Monthly tab then falls back to deriving the display month from the majority real
-        # calendar month across each fiscal month's actual dates (see html_report._build_month_display_labels).
-        "month_name_col": "month_name",
+        # Column names to read from the fiscal_cal upload, only relevant when use_fiscal_calendar
+        # is True (ignored on the civil-calendar path -- there, Fiscal_Quarter/Fiscal_Month are
+        # always derived from `date` directly, which IS the real calendar quarter/month already).
+        #
+        # Each entry is independently optional and auto-detected: read/parsed when the named
+        # column exists on fiscal_cal; derived instead when it's absent OR set to None here. This
+        # lets every client's fiscal_cal provide as much or as little of this as it actually has --
+        # see fiscal.py's _build_fiscal_week_frame and html_report._build_month_display_labels for
+        # exactly how each one derives when missing.
+        "column_map": {
+            "quarter_col": "Quarter",  # raw quarter label (e.g. "Q1") -> Fiscal_Quarter number.
+                                        # Derived as ceil(Fiscal_Month / 3) if absent.
+            "month_col": "Month",  # raw month code (e.g. "M01") -> Fiscal_Month number. Derived
+                                    # as the real calendar month of the week's start date if absent.
+            "month_name_col": "month_name",  # display month label (e.g. "August"), shown verbatim
+                                              # on the Monthly tab. Derived (majority real calendar
+                                              # month across each fiscal month's actual dates) if
+                                              # absent -- see the note on fiscal calendars whose
+                                              # fiscal month number doesn't match the calendar month.
+        },
         "daily_time_columns": {
             "date": "date",
             "year": "year",
@@ -888,7 +899,9 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         **window,
         "EXCLUDED_STORE_IDS_FOR_SERVICE_METRICS": cfg["service_metrics"]["excluded_store_ids"],
         "USE_FISCAL_CALENDAR": cfg["fiscal_calendar"]["use_fiscal_calendar"],
-        "FISCAL_MONTH_NAME_COL": cfg["fiscal_calendar"].get("month_name_col"),
+        "FISCAL_QUARTER_COL": cfg["fiscal_calendar"].get("column_map", {}).get("quarter_col"),
+        "FISCAL_MONTH_COL": cfg["fiscal_calendar"].get("column_map", {}).get("month_col"),
+        "FISCAL_MONTH_NAME_COL": cfg["fiscal_calendar"].get("column_map", {}).get("month_name_col"),
         "DAILY_TIME_COLUMNS": cfg["fiscal_calendar"]["daily_time_columns"],
         "SCOPE_MIN_PERCENTILE": min_pct,
         "SCOPE_MIN_WEEKS_FOR_FILTER": score_scope["min_weeks_for_filter"],
