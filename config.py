@@ -309,7 +309,7 @@ CONFIG: Dict[str, Any] = {
         # (lost_sales_ensemble.slow_path_segments) sources — same schema, same filters.
         "defined_scope": [],
         "lost_sales": [],
-        "daily_data": [],
+        "daily_data": ["usable = 1"],
     },
     # ---------------------------------------------------------------------------
     # LOST-SALES SOURCE — column mapping for the raw lost-sales table
