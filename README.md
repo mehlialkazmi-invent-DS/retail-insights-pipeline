@@ -627,14 +627,19 @@ Maps raw lost-sales table columns to canonical names. Allows customers whose los
 "lost_sales_source": {
     "week_col": "week_start_date",        # default; maps to canonical week_start_date
     "product_col": "product_id",          # default
-    "store_col": "store_id",              # default
+    "store_col": "store_id",              # default; set None if the source has no per-store dimension
     "lost_sales_col": "lost_sales",       # default
     "in_stock_col": "in_stock",           # default
     "total_days_col": "details.total_days",  # default; supports dotted nested-struct paths
+    "product_agg_level_col": None,        # set when the source is keyed by product_agg_level, not product_id
 }
 ```
 
 **Behaviour.** Downstream code always sees canonical column names (`week_start_date`, `product_id`, `store_id`, `lost_sales`, `in_stock`, `total_days`) regardless of the mapping. `week_col`/`product_col`/`store_col` are renamed to their canonical join-key names at read time in `kpi_pipeline/inputs.py`; `lost_sales_col`/`in_stock_col`/`total_days_col` are read under their configured names and aliased to the canonical output names during aggregation in `kpi_pipeline/pipeline.py` (`_aggregate_lost_sales_pairweek`). Defaults reproduce tbretail's current schema exactly, so enabling this block with all defaults produces no behaviour change for existing customers.
+
+**`product_agg_level_col`** (optional): when a source is keyed by planning/DFU level instead of `product_id` (e.g. `reporting_inv_fc_dfu/report_dfu`), set this to that column's name. Auto-detected — only fires when `product_col` is absent from the source; a no-op otherwise, even if configured. Left-joins to `path_segments.product_planning_level` (renaming `planning_level_id` to this column) to backfill `product_id`, mirroring kpi-skill-toolkit's own fallback.
+
+**`store_col: None`** (optional): for a source with no per-store dimension. `lost_sales` is an absolute count, not a ratio — a store-less value gets broadcast across every scoped store of that product, which **over-counts** if later summed across stores. This is safe for `instock_source`'s ratio fields (below), not safe here without an explicit per-store normalization — prefer a genuinely per-store source for `lost_sales_source` when one exists.
 
 ### `instock_source`
 
@@ -646,13 +651,32 @@ Maps raw lost-sales table columns to canonical names. Allows customers whose los
     "path_segments": None,                # required when enabled; path to the instock table under datastore bucket
     "week_col": "week_start_date",        # column name; default "week_start_date"
     "product_col": "product_id",          # column name; default "product_id"
-    "store_col": "store_id",              # column name; default "store_id"
+    "store_col": "store_id",              # column name; default "store_id"; set None if store-less (see below)
     "in_stock_col": "in_stock",           # column name; default "in_stock"
     "total_days_col": "total_days",       # column name; default "total_days"; supports dotted nested-struct paths
+    "product_agg_level_col": None,        # set when the source is keyed by product_agg_level, not product_id
 }
 ```
 
 **Behaviour.** When `enabled=False` (default), `in_stock`/`total_days` are aggregated from `lost_sales_source`'s table exactly as before — no change to existing pipelines. When `enabled=True`, `_aggregate_lost_sales_pairweek` stops aggregating `in_stock`/`total_days` from the lost-sales table entirely (only `lost_sales` is aggregated from it); the pipeline instead reads and aggregates the separate `instock_source` table and left-joins it onto the lost-sales weekly frame by `(product_col, store_col, week_col)`. A pair-week present in lost-sales with no matching row in `instock_source` gets `NULL` for `in_stock`/`total_days` — there is no fallback to a lost-sales-side value, since none is computed in this mode. Downstream metrics (`in_stock_rate`, `weighted_instock_rate`, `lost_sales_pct`) use whatever the join produces.
+
+**`product_agg_level_col`**: same auto-detected fallback as `lost_sales_source` above.
+
+**`store_col: None`** — for a source with no per-store dimension (e.g. `reporting_inv_fc_dfu/report_dfu`, aggregated to `product_agg_level` × week only). The join drops `store_id` from its condition and broadcasts the product-week value across every scoped store instead. This **is** safe here, unlike `lost_sales_source`: `in_stock_days`/`total_days` form a ratio, and summing the same broadcast value across a product's stores then dividing reproduces the original ratio exactly (numerator and denominator scale identically) — you just lose real per-store variation, which a store-less source never had anyway. A verified example for tbretail:
+
+```python
+"instock_source": {
+    "enabled": True,
+    "path_segments": ["reporting", "future_visibility", "reporting_inv_fc_dfu", "report_dfu"],
+    "week_col": "TY_week_start_date",
+    "in_stock_col": "TY_total_days_instock",   # actual, NOT the raw sim_instock_days
+    "total_days_col": "TY_total_day",          # actual, NOT the raw sim_total_days
+    "product_agg_level_col": "product_agg_level",
+    "store_col": None,
+}
+```
+
+`sim_instock_days`/`sim_total_days` on this table are the future-visibility *simulation's* projected values, not observed actuals — they're only blended into `TY_total_days_instock`/`TY_total_day` for weeks on or after the simulation's own run week (i.e. current/future weeks with no real history yet). Reading the raw `sim_` columns directly would report simulated numbers even for historical periods.
 
 **Mutually exclusive with `lost_sales_ensemble.enabled=True`.** When `lost_sales_ensemble.enabled=True`, the ensemble blends two lost-sales models and picks in-stock/total-days per row from whichever model was selected — this does not compose with `instock_source`'s separate-table override, which assumes a single lost-sales source. Only one of the two may be active; `materialize()` raises a `ValueError` if both are `True`.
 
