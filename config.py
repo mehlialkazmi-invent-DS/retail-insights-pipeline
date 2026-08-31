@@ -128,9 +128,9 @@ CONFIG: Dict[str, Any] = {
         #
         # Only actually consulted on the CIVIL-calendar path (use_fiscal_calendar=False) --
         # build_time_grain_from_daily_data() (fiscal.py) reads daily_data's own date/week columns
-        # directly to build Year/Week there, instead of joining a fiscal_cal upload. When
-        # use_fiscal_calendar=True, daily_data's date/week columns aren't read through this map at
-        # all -- Year/Week always come from the fiscal_cal join instead.
+        # directly to build Year/Week there, instead of joining a fiscal_cal upload. On the
+        # fiscal-calendar path (tbretail's actual setting, above) daily_data's date/week columns
+        # aren't read through this map at all -- Year/Week always come from the fiscal_cal join.
         #
         # "date" and "week" are the only keys actually read anywhere in the pipeline (grep
         # DAILY_TIME_COLUMNS/time_cols in kpi_pipeline/*.py to confirm). "year" is unused dead
