@@ -111,6 +111,27 @@ def _print_date_range(df: DataFrame, date_col: str, label: str) -> None:
     print(f"  {label} date range in source ({date_col}): {bounds['min']} to {bounds['max']}")
 
 
+def rename_column_or_fail(df: DataFrame, source_col: str, canonical: str, config_key: str) -> DataFrame:
+    """Rename source_col -> canonical, failing loudly if source_col isn't actually a column.
+
+    Plain ``withColumnRenamed`` silently no-ops when the source column doesn't exist --
+    instead of erroring at the point of misconfiguration, it hides the problem until some
+    later, unrelated operation (e.g. a groupBy several calls downstream) finally references
+    the canonical name and fails with a confusing "column not found" pointing at the wrong
+    line. Every config-driven rename in this pipeline should go through this helper instead.
+
+    Verifies the column exists even when source_col already equals canonical (no rename
+    needed) -- "already correctly named" is still a claim about the source's actual schema,
+    not something to assume without checking.
+    """
+    if source_col not in df.columns:
+        raise ValueError(
+            f"{config_key}={source_col!r} not found on the source table; "
+            f"available columns: {sorted(df.columns)}"
+        )
+    return df.withColumnRenamed(source_col, canonical)
+
+
 def _rename_join_keys_to_canonical(df: DataFrame, col_map: Dict[str, Any]) -> DataFrame:
     """Rename a source's own product/store/week columns to the pipeline's canonical
     names (product_id, store_id, week_start_date) so every downstream reader can keep
@@ -120,16 +141,11 @@ def _rename_join_keys_to_canonical(df: DataFrame, col_map: Dict[str, Any]) -> Da
     report_dfu's lost_sales/instock columns, aggregated to product_agg_level x week only) sets
     it to None, and the resulting frame simply has no store_id column at all.
     """
-    renames = {
-        col_map["product_col"]: "product_id",
-        col_map["week_col"]: "week_start_date",
-    }
+    df = rename_column_or_fail(df, col_map["product_col"], "product_id", "product_col")
+    df = rename_column_or_fail(df, col_map["week_col"], "week_start_date", "week_col")
     store_col = col_map.get("store_col")
     if store_col:
-        renames[store_col] = "store_id"
-    for source_col, canonical in renames.items():
-        if source_col != canonical:
-            df = df.withColumnRenamed(source_col, canonical)
+        df = rename_column_or_fail(df, store_col, "store_id", "store_col")
     return df
 
 
@@ -141,15 +157,25 @@ def _map_product_agg_level_to_product_id(
     quiet: bool = False,
 ) -> DataFrame:
     """Backfill product_id from product_agg_level when a source is keyed by planning/DFU level
-    instead of product_id (e.g. reporting_inv_fc_dfu/report_dfu) -- mirrors kpi-skill-toolkit's
-    own product_agg_level fallback. A no-op when product_col is already on the source (even if
-    product_agg_level_col happens to be configured) or when product_agg_level_col isn't
-    configured/present -- so this only ever fires when actually needed.
+    instead of product_id (e.g. a table where that key is genuinely one-to-many with
+    product_id) -- mirrors kpi-skill-toolkit's own product_agg_level fallback. A no-op when
+    product_col is already on the source (even if product_agg_level_col happens to be
+    configured) or when product_agg_level_col isn't configured at all -- so this only ever
+    fires when actually needed. But if product_agg_level_col IS explicitly configured and
+    product_col is absent, the configured column must actually exist -- unlike "not
+    configured", a wrong explicit value is a real misconfiguration and should fail loudly
+    here rather than silently no-op and surface as a confusing missing-product_id error
+    several calls downstream.
     """
     product_col = col_map["product_col"]
     agg_col = col_map.get("product_agg_level_col")
-    if product_col in df.columns or not agg_col or agg_col not in df.columns:
+    if product_col in df.columns or not agg_col:
         return df
+    if agg_col not in df.columns:
+        raise ValueError(
+            f"product_agg_level_col={agg_col!r} not found on the source table; "
+            f"available columns: {sorted(df.columns)}"
+        )
     if not quiet:
         print(f"  mapping {agg_col!r} -> product_id via product_planning_level")
     mapping = (

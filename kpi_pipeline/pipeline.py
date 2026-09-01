@@ -15,6 +15,7 @@ from kpi_pipeline.inputs import (
     read_instock_source,
     read_lost_sales_source,
     read_speed_cluster_source,
+    rename_column_or_fail,
 )
 
 
@@ -225,19 +226,17 @@ def build_scoped_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs_in: D
         get_daily_data_raw(ctx)
         .select(*select_cols)
         .withColumn(date_col, F.to_date(F.col(date_col)))
-        .withColumnRenamed(date_col, "date")
-        .filter(F.col("date").between(F.lit(start), F.lit(end)))
     )
+    daily = rename_column_or_fail(daily, date_col, "date", "fiscal_calendar.daily_time_columns.date")
+    daily = daily.filter(F.col("date").between(F.lit(start), F.lit(end)))
     if has_store:
         daily = daily.join(scope_pairs_in, on=["product_id", "store_id"], how="left_semi")
     if not s["USE_FISCAL_CALENDAR"]:
         # Year = calendar year of `date`; Week = native fiscal week column. Avoids the
         # source 'year' column's ISO week-year mislabel (Dec -> next year). See fiscal.py.
-        daily = (
-            daily.withColumn("Year", F.year(F.col("date")))
-            .withColumnRenamed(week_col, "Week")
-            .withColumn("Week", F.col("Week").cast("int"))
-        )
+        daily = daily.withColumn("Year", F.year(F.col("date")))
+        daily = rename_column_or_fail(daily, week_col, "Week", "fiscal_calendar.daily_time_columns.week")
+        daily = daily.withColumn("Week", F.col("Week").cast("int"))
     else:
         daily = daily.join(broadcast(ctx.fiscal_cal.select("date", "Year", "Week")), on="date", how="inner")
 

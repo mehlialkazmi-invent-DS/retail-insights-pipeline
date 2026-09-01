@@ -11,7 +11,12 @@ from pyspark.sql.functions import broadcast
 from pyspark.sql.window import Window
 
 from kpi_pipeline.context import KPIContext
-from kpi_pipeline.inputs import get_daily_data_raw, read_csv_source, read_defined_scope_source
+from kpi_pipeline.inputs import (
+    get_daily_data_raw,
+    read_csv_source,
+    read_defined_scope_source,
+    rename_column_or_fail,
+)
 
 
 def _window_weeks(ctx: KPIContext) -> DataFrame:
@@ -109,11 +114,14 @@ def read_daily_for_scope(ctx: KPIContext, start_date: datetime.date, end_date: d
     """
     time_cols = ctx.settings["DAILY_TIME_COLUMNS"]
     date_col = time_cols["date"]
-    return (
+    daily = (
         get_daily_data_raw(ctx)
         .select("product_id", "store_id", date_col, "sales_revenue", "sales_quantity", "inventory")
         .withColumn(date_col, F.to_date(F.col(date_col)))
-        .withColumnRenamed(date_col, "date")
+    )
+    daily = rename_column_or_fail(daily, date_col, "date", "fiscal_calendar.daily_time_columns.date")
+    return (
+        daily
         .filter(F.col("date").between(F.lit(start_date), F.lit(end_date)))
         .groupBy("product_id", "store_id", "date")
         .agg(
