@@ -1,83 +1,40 @@
-# TBretail customer config for the retail-insights-pipeline toolkit.
-# Usage (Databricks, same folder as main.ipynb): %run ./tbretail_config
+# Generic reference config for the retail-insights-pipeline toolkit -- a starting point for a
+# NEW customer, not any specific customer's own deployed values. Copy this file, then replace
+# every placeholder below with your own paths/business rules; see README.md for full docs on
+# every CONFIG key.
+# Usage (Databricks, same folder as main.ipynb): %run ./config
 #                                                 settings = materialize(fund.paste)
-# See retail-insights-pipeline/README.md for full documentation.
 #
-# SETUP CHECKLIST (one-time, before first run):
-#   1. Export JAB product IDs → CSV.
-#      In Databricks, run a quick cell to join the JAB Excel against products and
-#      write product_id values to the workspace path below, e.g.:
+# GETTING STARTED — minimum edits before your first run:
+#   1. customer: your customer's slug (used to resolve the datastore bucket by default).
+#   2. path_segments: point every entry at your own tables (defined_scope, daily_data,
+#      products, lost_sales at minimum).
+#   3. defined_scope: column names on YOUR scope table (product_col/store_col/date_col/etc).
+#   4. reporting_window.as_of_date: today, or whatever date you want the report to run through.
+#   5. service_metrics.excluded_store_ids: any e-com/non-physical "stores" to exclude from
+#      WOS/turnover/mean_stock/instock/lost sales (leave [] if none apply).
 #
-#        from pyspark.sql import functions as F
-#        import pandas as pd
-#        jab_codes = load_jab_skuloc_itemcodes(NFG_EXCEL_PATH_JAB)  # from kpi_metrics notebook
-#        jab_ids = (
-#            spark.read.format("delta").load(PATH_PRODUCTS)
-#            .filter(F.col("product_code").isin(jab_codes))
-#            .select("product_id").distinct()
-#        )
-#        jab_ids.toPandas().to_csv(
-#            "/dbfs/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
-#            "KPI-NEW/data/jab_product_ids.csv", index=False
-#        )
-#      Then flip scope_adjustments.additions[0].enabled = True.
-#
-#   2. Export NON-COMP (NFG list) product IDs → CSV.
-#      In Databricks, run a quick cell to join the NFG Excel against products and
-#      write product_id values to the workspace path below, e.g.:
-#
-#        import pandas as pd
-#        from pyspark.sql import functions as F
-#        pdf_nfg = pd.read_excel(NFG_EXCEL_PATH)
-#        col_ic = [c for c in pdf_nfg.columns if str(c).strip().lower() == "itemcode"]
-#        item_col = col_ic[0] if col_ic else pdf_nfg.columns[2]
-#        nfg_codes = [
-#            c for c in pdf_nfg[item_col].dropna().astype(str).str.strip().unique()
-#            if c and c.lower() != "grand total"
-#        ]
-#        non_comp_ids = (
-#            spark.read.format("delta").load(PATH_PRODUCTS)
-#            .filter(F.col("product_code").isin(nfg_codes))
-#            .select("product_id").distinct()
-#        )
-#        non_comp_ids.toPandas().to_csv(
-#            "/dbfs/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
-#            "KPI-NEW/data/non_comp_product_ids.csv", index=False
-#        )
-#      Then flip scope_adjustments.removals[0].enabled = True.
-#
-#   3. Export NGF item product IDs → CSV (for dimension_sources["ngf_comp_split"]).
-#      Unlike step 2 above, this does NOT remove items from scope — NGF items stay in
-#      daily_data/scope and in the Overall numbers; they're just flagged so you can
-#      slice comp vs non-comp within the same report. Same join pattern as step 1/2:
-#
-#        import pandas as pd
-#        from pyspark.sql import functions as F
-#        pdf_ngf = pd.read_excel(NGF_EXCEL_PATH)  # your NGF item list
-#        ngf_codes = [str(c).strip() for c in pdf_ngf["itemcode"].dropna().unique()]
-#        ngf_ids = (
-#            spark.read.format("delta").load(PATH_PRODUCTS)
-#            .filter(F.col("product_code").isin(ngf_codes))
-#            .select("product_id").distinct()
-#        )
-#        ngf_ids.toPandas().to_csv(
-#            "/dbfs/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
-#            "KPI-NEW/data/ngf_product_ids.csv", index=False
-#        )
-#      Then flip dimension_sources (the "ngf_comp_split" entry).enabled = True.
-#      The entry's "fillna": {"is_comp": "yes"} imputes non-NGF products to 'yes' —
-#      without it they'd come back NULL, since this CSV only covers NGF items.
-#
-#   4. Update reporting_window.as_of_date before each run.
-#
-# WHAT THIS CONFIG PRODUCES:
-#   Scope:       defined + hybrid score backfill, JAB additions, NON-COMP removals
-#   Lost sales:  ensemble of fast (120-day) + slow (365-day) noob models, blended by
-#                product sales-speed cluster (see lost_sales_ensemble below)
-#   Dimensions:  is_nvrout (NVROUT vs COMP), brand, SMW (KNG vs SMW)
-#   Comparisons: YoY / YTD
-#   Comparable:  like-for-like YTD over a per-link (consecutive-year-pair) pair universe
-#   Report:      TBretail KPI Report HTML with all slices and comparable tables
+# OPTIONAL, gated features (all OFF/empty by default in this template — turn on as needed):
+#   scope_adjustments   — manual scope additions/removals from a CSV/Delta source, e.g. a
+#                         business-curated product list that should always be in (or out of)
+#                         scope regardless of what the scope table itself says. See the
+#                         disabled example below for the pattern (store_col=None + date_col/
+#                         year_col/week_col=None = "every store, every week" for that source's
+#                         product_ids).
+#   dimension_sources   — join an external table onto products to add a new slice dimension
+#                         that can also become its OWN root population tab (see README's
+#                         "Dimension sources -> roots" section) — e.g. a channel or program
+#                         flag from a table the products master doesn't itself carry.
+#   lost_sales_ensemble — blend a fast/slow lost-sales model pair by product sales-speed
+#                         cluster instead of reading a single lost-sales source as-is.
+#   instock_source      — read in-stock rate from a SEPARATE table instead of lost_sales_
+#                         source's own in_stock/total_days columns (e.g. when a different
+#                         pipeline computes instock than the one computing lost sales).
+#                         Supports fallback_sources to backfill weeks a rolling-window
+#                         source's primary column-set doesn't reach (see README).
+#   comparable_pairs    — like-for-like YTD over pairs present in both years of each link;
+#                         requires 2+ years in the report window (run_min_date spanning that
+#                         far back) to have anything to compute.
 
 import copy
 import datetime
@@ -85,16 +42,16 @@ import os
 from typing import Any, Callable, Dict, Optional
 
 # Period-over-period comparison kinds the pipeline can produce, in canonical order.
-# Kept in sync with retail-insights-pipeline/config.py. QoQ/MoM/WoW comparison tables were
-# dropped for simplicity — the Quarter/Monthly/Weekly period tabs already show recent-period
-# value trends, covering "recent quarters/months/weeks" without a separate delta table.
+# QoQ/MoM/WoW comparison tables were dropped for simplicity — the Quarter/Monthly/Weekly period
+# tabs already show recent-period value trends, covering "recent quarters/months/weeks" without
+# a separate delta table.
 COMPARISON_KINDS_ALL = ("yoy", "ytd")
 
 CONFIG: Dict[str, Any] = {
     # =============================================================================
     # IDENTITY & RUN WINDOW
     # =============================================================================
-    "customer": "tbretail",
+    "customer": "your_customer",  # datastore bucket defaults to /mnt/invent-{customer}-datastore
     "run": {
         # full       = compute KPIs from source Delta tables (default)
         # html_only  = load saved outputs from output.path_segments and render HTML only
@@ -103,28 +60,28 @@ CONFIG: Dict[str, Any] = {
     "reporting_window": {
         # Update as_of_date before each run. REPORT_END_DATE resolves to the last
         # completed Saturday on or before this date.
-        "as_of_date": "2026-08-02",
-        "run_min_date": "2025-02-08",  # None = YTD from Jan 1; e.g. "2025-01-01" for multi-year
+        "as_of_date": "2026-09-01",
+        "run_min_date": None,  # None = YTD from Jan 1; e.g. "2024-01-01" for multi-year
     },
     # =============================================================================
     # CALENDAR
     # =============================================================================
     "fiscal_calendar": {
         "use_fiscal_calendar": True,
-        # tbretail's fiscal_cal upload columns (used since use_fiscal_calendar=True above). Each
-        # is auto-detected/optional -- read when present, derived when absent. tbretail's fiscal
-        # year runs Feb-Jan, so fiscal month/quarter numbers don't match the real calendar (fiscal
-        # month 07 has been observed spanning real 8/2-8/29) -- month_name_col is read verbatim
-        # for the Monthly tab label for exactly that reason, instead of deriving one from the
-        # (fiscal, not calendar) month number.
+        # Your fiscal_cal upload's column names (used since use_fiscal_calendar=True above).
+        # Each is auto-detected/optional -- read when present, derived when absent. If your
+        # fiscal year is calendar-offset (e.g. doesn't start in January), set month_name_col so
+        # the Monthly tab reads a real display label verbatim instead of deriving one from the
+        # (fiscal, not calendar) month number -- a fiscal month number doesn't reliably map to
+        # a real calendar month once the fiscal year itself is offset.
         "column_map": {
             "quarter_col": "Quarter",
             "month_col": "Month",
             "month_name_col": "month_name",
         },
-        # Column-name map for the RAW noob/daily-data table -- only consulted on the CIVIL path
-        # (use_fiscal_calendar=False, not tbretail's setting above). "year" is unused dead config:
-        # Year always comes from `date`, never a raw 'year' column (ISO week-year risk).
+        # Column-name map for the RAW daily-data table -- only consulted on the CIVIL path
+        # (use_fiscal_calendar=False). "year" is unused dead config: Year always comes from
+        # `date`, never a raw 'year' column (ISO week-year risk).
         "daily_time_columns": {
             "date": "date",
             "year": "year",
@@ -170,20 +127,17 @@ CONFIG: Dict[str, Any] = {
     },
     "scope_adjustments": {
         # ---------------------------------------------------------------------------
-        # ADDITIONS: JAB products (from NFG_EXCEL_PATH_JAB)
+        # ADDITIONS: force specific products into scope regardless of the defined scope
+        # table (e.g. a business-curated "always report on these" list). Disabled example
+        # below shows the pattern -- store_col=None + date_col/year_col/week_col=None means
+        # "every store, every week in the report window" for this source's product_ids.
         # ---------------------------------------------------------------------------
-        # These are replenishment products whose product_codes start with "JAB".
-        # They are included in scope regardless of the defined scope table.
-        # See SETUP CHECKLIST at the top of this file for how to create the CSV.
         "additions": [
             {
-                "enabled": True,  # flip to True after creating the CSV
-                "label": "jab_products",
+                "enabled": False,  # flip on once path points at a real table/CSV
+                "label": "example_addition",
                 "source": "csv",
-                "path": (
-                    "/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
-                    "KPI-NEW/data/jab_product_ids.csv"
-                ),
+                "path": "/Workspace/Shared/your_project/data/addition_product_ids.csv",
                 "location": "workspace",
                 "csv_options": {"header": True, "inferSchema": True},
                 "join_keys": ["product_id"],
@@ -193,38 +147,17 @@ CONFIG: Dict[str, Any] = {
                 "year_col": None,
                 "week_col": None,
             },
-            {
-                "enabled": True,  # flip to True after creating the CSV
-                "label": "NGF products",
-                "source": "csv",
-                "path": (
-                    "/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
-                    "KPI-NEW/data/non_comp_ids_20260817.csv"
-                ),
-                "location": "workspace",
-                "csv_options": {"header": True, "inferSchema": True},
-                "join_keys": ["product_id"],
-                "product_col": "product_id",
-                "store_col": None,
-                "date_col": None,
-                "year_col": None,
-                "week_col": None,
-            }
         ],
         # ---------------------------------------------------------------------------
-        # REMOVALS: NON-COMP products (from NFG_EXCEL_PATH / NFG Excel list)
+        # REMOVALS: exclude specific products from scope (e.g. a business-curated
+        # "never report on these" list). Same shape/mechanics as additions above.
         # ---------------------------------------------------------------------------
-        # Products on the NFG (Non-Future-Growth) list are excluded from KPI scope.
-        # After removal, is_nvrout='yes' = NVROUT segment; is_nvrout='no' = COMP segment.
-        # See SETUP CHECKLIST at the top of this file for how to create the CSV.
         "removals": [
             {
-                "enabled": False,  # flip to True after creating the CSV
+                "enabled": False,  # flip on once path points at a real table/CSV
+                "label": "example_removal",
                 "source": "csv",
-                "path": (
-                    "/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
-                    "KPI-NEW/data/non_comp_ids_20260817.csv"
-                ),
+                "path": "/Workspace/Shared/your_project/data/removal_product_ids.csv",
                 "location": "workspace",
                 "csv_options": {"header": True, "inferSchema": True},
                 "join_keys": ["product_id"],
@@ -233,7 +166,7 @@ CONFIG: Dict[str, Any] = {
                 "date_col": None,
                 "year_col": None,
                 "week_col": None,
-            }
+            },
         ],
     },
     # =============================================================================
@@ -243,10 +176,12 @@ CONFIG: Dict[str, Any] = {
         "fiscal": ["one_time_uploads", "fiscal_cal"],
         "daily_data": ["noob", "daily-data"],
         "products": ["master-data", "products"],
-        "lost_sales": ["noob", "lost-sales", "model_id=top_down_excluding_ecom"],
+        # Add a model_id=... path segment here if your lost-sales table is partitioned by model.
+        "lost_sales": ["noob", "lost-sales"],
         "defined_scope": ["analysis", "instock_rate", "instock_rate_scope"],
         # product_agg_level -> product_id map for lost_sales_source/instock_source's
-        # product_agg_level_col (see README).
+        # product_agg_level_col (see README) -- only needed if either source is keyed by a
+        # planning/DFU level instead of product_id.
         "product_planning_level": ["operation", "product_planning_level"],
     },
     "input_filters": {
@@ -262,7 +197,8 @@ CONFIG: Dict[str, Any] = {
     # LOST-SALES SOURCE — column mapping for the raw lost-sales table
     # ---------------------------------------------------------------------------
     # Downstream code always sees canonical column names regardless of this mapping (see
-    # README). TBretail's lost-sales table already matches these defaults.
+    # README). Defaults below match a typical noob/lost-sales schema -- override only the
+    # columns your own table names differently.
     "lost_sales_source": {
         "week_col": "week_start_date",
         "product_col": "product_id",
@@ -275,21 +211,25 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     # INSTOCK SOURCE — optional override to read in-stock days from a DIFFERENT table
     # ---------------------------------------------------------------------------
-    # OFF for tbretail: in-stock/total-days come from lost_sales_source above, as always.
-    # Mutually exclusive with lost_sales_ensemble below (enabled for tbretail) — leave off.
+    # OFF by default: in-stock/total-days come from lost_sales_source above. Turn this on
+    # only when a DIFFERENT pipeline computes instock than the one computing lost sales.
+    # Mutually exclusive with lost_sales_ensemble below.
     #
-    # Verified alternative (report_dfu; store-less, safe here since in-stock is a ratio — see README):
+    # Real-world example (one deployment's actual config, kept here to illustrate
+    # fallback_sources -- adapt the path/columns for your own source, don't copy verbatim):
     #   "enabled": True,
-    #   "path_segments": ["reporting", "future_visibility", "reporting_inv_fc_dfu", "report_dfu"],
+    #   "path_segments": ["reporting", "future_visibility", "some_report_table"],
     #   "week_col": "TY_week_start_date",
-    #   "in_stock_col": "TY_total_days_instock",  # actual, not sim_instock_days
-    #   "total_days_col": "TY_total_day",         # actual, not sim_total_days
+    #   "in_stock_col": "TY_total_days_instock",
+    #   "total_days_col": "TY_total_day",
     #   "product_agg_level_col": "product_agg_level",
     #   "store_col": None,
-    #   # TY_ only covers a rolling trailing window (report_dfu's own build horizon) -- LY_/LLY_
-    #   # carry the identical formula for the calendar week exactly 52/104 weeks earlier, so they
-    #   # backfill whatever weeks have rolled off TY_'s window (see README). Each fallback entry
-    #   # inherits product_col/store_col/product_agg_level_col from above unless overridden.
+    #   # fallback_sources: additional column-sets from the SAME table, appended in order to
+    #   # fill weeks the primary column-set doesn't have (e.g. a rolling-window source whose
+    #   # TY_ only reaches back so far, backfilled by LY_/LLY_ columns carrying the identical
+    #   # formula for the calendar week 52/104 weeks earlier -- see README). Each fallback
+    #   # entry inherits product_col/store_col/product_agg_level_col from above unless
+    #   # overridden.
     #   "fallback_sources": [
     #       {"week_col": "LY_week_start_date", "in_stock_col": "LY_total_days_instock", "total_days_col": "LY_total_day"},
     #       {"week_col": "LLY_week_start_date", "in_stock_col": "LLY_total_days_instock", "total_days_col": "LLY_total_day"},
@@ -308,17 +248,17 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     # LOST-SALES ENSEMBLE — blend two lost-sales models by product sales speed
     # ---------------------------------------------------------------------------
-    # ENABLED for TBretail: fast movers (speed cluster in fast_mover_clusters) take
-    # the 120-day model at path_segments.lost_sales; everyone else — slower clusters
-    # AND products with no/NULL cluster — takes the 365-day model below. All three
-    # aggregate fields (lost_sales, in_stock, details.total_days) for a given
-    # product/store/week come from ONE model (never mixed).
+    # OFF by default: lost_sales_source above is read as a single source, as-is. Turn this on
+    # to blend a fast-mover model (path_segments.lost_sales) with a slow-mover model (below) by
+    # each product's own sales-speed cluster instead -- fast movers (cluster in
+    # fast_mover_clusters) take the fast model; everyone else (other clusters AND products with
+    # no/NULL cluster) takes the slow model. All three aggregate fields (lost_sales, in_stock,
+    # total_days) for a given product/store/week always come from the SAME chosen model.
     "lost_sales_ensemble": {
-        "enabled": True,
-        "slow_path_segments": ["noob", "lost-sales", "model_id=top_down_excluding_ecom_365days"],
-        # Product sales-speed source. TBretail's speed_cluster_path_segments below is the
-        # platform's long-format attributes table (one row per product_id x attribute_name) —
-        # speed_cluster_format="long" is the matching shape.
+        "enabled": False,
+        "slow_path_segments": ["noob", "lost-sales"],  # e.g. a longer-lookback model variant
+        # Product sales-speed source. "long" = a long-format attributes table (one row per
+        # product_id x attribute_name); "wide" = the cluster is already its own column.
         "speed_cluster_path_segments": ["noob", "product-cluster-attributes-snapshot"],
         "speed_cluster_format": "long",
         "speed_cluster_attribute_name": "sales_speed",
@@ -331,12 +271,13 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     # SLICES — dimensions sourced from master-data/products
     # ---------------------------------------------------------------------------
-    # brand:     raw column on products table
-    # SMW: derived — KNG vs SMW split (same logic as v4 notebook)
     "slices": {
-        "dimensions": ["brand"],
+        "dimensions": ["brand"],  # any column(s) on your products table
         "derived_dimensions": {
-            "SMW": "CASE WHEN brand = 'KNG' THEN 'KNG' ELSE 'SMW' END",
+            # Example: a SQL CASE expression evaluated against the products table, producing
+            # a new cut dimension not present as a raw column. Replace with your own, or
+            # remove this entry if you don't need any derived dimensions.
+            "example_derived": "CASE WHEN brand = 'A' THEN 'Group A' ELSE 'Other' END",
         },
         # Restrict which values of a slice dimension appear in the breakdown (that
         # dimension only; Overall and other slices are unaffected). Two shapes:
@@ -346,64 +287,28 @@ CONFIG: Dict[str, Any] = {
         "value_filters": {},
     },
     # ---------------------------------------------------------------------------
-    # DIMENSION SOURCES — NVROUT flag from operation/extended_product
+    # DIMENSION SOURCES — optional external tables that become named ROOT populations
     # ---------------------------------------------------------------------------
-    # is_nvrout = 'yes' → NVROUT products
-    # is_nvrout = 'no'  → COMP products (once NON-COMP removed via scope_adjustments)
-    # is_nvrout = NULL  → products not present in extended_product (check coverage)
-    #
-    # IMPORTANT: extended_product must have one row per product_id for this flag to
-    # be accurate. If a product can have multiple program values across rows, pre-
-    # aggregate the table to a single NVROUT membership flag per product_id and
-    # point "path" at that table instead of path_segments. The toolkit dedups
-    # extended_product by product_id before joining, keeping an arbitrary row.
+    # Gated feature: disabled example below shows the pattern. Each enabled source is
+    # left-joined onto products by join_key, contributes new slice dimension(s), and — via
+    # root_values — can also become its own root population tab (see README's "Dimension
+    # sources -> roots" section) instead of an ordinary flat cut.
     "dimension_sources": [
         {
-            "enabled": True,
-            "label": "extended_product",
+            "enabled": False,
+            "label": "example_dimension_source",
             "source": "delta",
-            "path_segments": ["operation", "extended_product"],
+            "path_segments": ["operation", "some_attribute_table"],
             "join_key": "product_id",
             "columns": [],
             "derived": {
-                # Products absent from extended_product get NULL, not 'no'.
-                # If you need a clean yes/no split with no NULLs, make the source
-                # cover the full product universe or replace this with a pre-agg table.
-                "IS_NVROUT": "CASE WHEN program LIKE '%NVROUT%' THEN 'yes' ELSE 'no' END",
+                # Products absent from the source get NULL, not the ELSE branch -- fillna
+                # (below) imputes that if you need a clean two-value split with no NULLs.
+                "IS_EXAMPLE_FLAG": "CASE WHEN some_column = 'X' THEN 'yes' ELSE 'no' END",
             },
-            "fillna": {"IS_NVROUT": "no"},
-            # Root "nvrout" = IS_NVROUT=='yes' only ('no'/NULL aren't their own root).
-            "root_values": {"IS_NVROUT": {"yes": "nvrout"}},
-        },
-        # ---------------------------------------------------------------------------
-        # NGF list -> COMP vs NON-COMP split (does NOT remove anything from scope;
-        # NGF items stay in daily_data/scope and in the Overall numbers).
-        #
-        # derived SQL runs against the SOURCE table's own rows, before the left join.
-        # Since this CSV only lists NGF product_ids, "derived" only ever fires for NGF
-        # rows -> is_comp = 'no'. Every other product has no row in this CSV at all, so
-        # after the left join it would get NULL, not 'yes' — fillna (below) imputes that
-        # NULL to 'yes' instead, giving a clean two-value is_comp split with no NULLs,
-        # despite the source only covering one side of the split.
-        # ---------------------------------------------------------------------------
-        {
-            "enabled": True,  # flip to True after creating the CSV
-            "label": "ngf_comp_split",
-            "source": "csv",
-            "path": (
-                "/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
-                "KPI-NEW/data/non_comp_ids_20260817.csv"
-            ),
-            "location": "workspace",
-            "csv_options": {"header": True, "inferSchema": True},
-            "join_key": "product_id",
-            "columns": [],
-            "derived": {
-                "IS_COMP": "'no'",
-            },
-            "fillna": {"IS_COMP": "yes"},
-            # Root "comp" = IS_COMP=='yes' only (NON-COMP isn't its own root).
-            "root_values": {"IS_COMP": {"yes": "comp"}},
+            "fillna": {"IS_EXAMPLE_FLAG": "no"},
+            # Root "example_root" = IS_EXAMPLE_FLAG=='yes' only ('no'/NULL aren't their own root).
+            "root_values": {"IS_EXAMPLE_FLAG": {"yes": "example_root"}},
         },
     ],
     # =============================================================================
@@ -417,11 +322,11 @@ CONFIG: Dict[str, Any] = {
         "enabled": ["yoy", "ytd"],
     },
     "comparable_pairs": {
-        # Like-for-like YTD (comparable is YTD-only): recomputes YTD metrics over only the
-        # (product_id, store_id) pairs present in BOTH years of each consecutive-year link — the
-        # same concept as v4's _pairs_same_calendar_years / sameytd. Requires run_min_date to span
-        # at least 2 years (e.g. "2024-01-01" for a comparable 2024-vs-2025 link).
-        "enabled": True,
+        # OFF by default -- requires run_min_date to span at least 2 years (e.g. "2024-01-01"
+        # for a comparable 2024-vs-2025 link) to have anything to compute. Like-for-like YTD:
+        # recomputes YTD metrics over only the (product_id, store_id) pairs present in BOTH
+        # years of each consecutive-year link.
+        "enabled": False,
     },
     # =============================================================================
     # METRICS
@@ -480,15 +385,17 @@ CONFIG: Dict[str, Any] = {
         "pp_change_metrics": ["in_stock_rate", "weighted_instock_rate", "lost_sales_pct"],
     },
     "service_metrics": {
-        # E-com / non-service stores excluded from instock, WOS, lost sales %, mean stock.
-        "excluded_store_ids": [829, 639, 917],
+        # Store IDs to exclude from WOS/turnover/mean_stock/instock/lost-sales specifically
+        # (e.g. e-com fulfillment "stores" with no real shelf inventory) -- sales/AUR/AUC still
+        # include all scoped stores regardless. Empty by default; add your own if applicable.
+        "excluded_store_ids": [],
     },
     # =============================================================================
     # OUTPUT & REPORTING
     # =============================================================================
     "output": {
         "save_outputs": True,
-        "path_segments": ["analysis", "kpis_tbretail", "outputs"],
+        "path_segments": ["analysis", "kpi_reports", "outputs"],
         "run_date": None,
         "save_mode": "initial",
         "allow_overwrite_existing": True,
@@ -497,11 +404,10 @@ CONFIG: Dict[str, Any] = {
     "html_report": {
         "enabled": True,
         "filename": "kpi_report_{customer}_{report_end}.html",
-        "report_title": "TBretail KPI Report",
+        "report_title": "KPI Report",  # customize per client, e.g. "Acme Corp KPI Report"
         "output_path_segments": None,
         "metric_definitions": {},
-        # Show all years to cover the 2024 / 2025 / 2026 multi-year view.
-        # Set to 3 or 4 to cap if the report gets too wide.
+        # Set to 3 or 4 to cap if the report gets too wide with many years in view.
         "weekly_display_weeks": 5,
         "monthly_display_months": 5,
         "quarterly_display_quarters": 5,

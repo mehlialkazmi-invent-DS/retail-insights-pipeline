@@ -33,7 +33,7 @@ Default example: `.../analysis/kpi_reports/outputs/kpi_long/run_date=2026-06-15/
 ```
 retail-insights-pipeline/
 ├── README.md           # This file
-├── config.py           # tbretail's OWN deployed config, not a blank template -- see note below
+├── config.py           # Generic reference template -- copy + customize per client (see below)
 ├── main.ipynb          # Databricks runner — compute, preview save plan, write, HTML report
 └── kpi_pipeline/       # Pipeline logic (imported by main.ipynb)
     ├── runner.py       # KPIRunner orchestrates the full run + HTML report generation
@@ -53,7 +53,7 @@ retail-insights-pipeline/
 
 ## Quick start (Databricks)
 
-**`config.py` is tbretail's own deployed config, not a blank starter template.** It hardcodes `customer: "tbretail"`, tbretail's absolute workspace paths under `scope_adjustments`/`dimension_sources`, tbretail's fiscal-year quirks, and business defaults like `comparable_pairs.enabled: True`. Onboarding a **new** customer: copy `config.py`'s *structure* (the CONFIG dict shape, `materialize()`, the toolkit-generic sections — path_segments, defined_scope, lost_sales_source, slices, metrics, output, html_report), but replace every tbretail-specific value, path, and business rule rather than assuming any of them are safe defaults. `tbretail_config.py` (one directory up) is the actually-deployed copy of this file for tbretail's own runs — kept in sync with `config.py` except for tbretail-specific customizations (currently: `lost_sales_source` reads `report_dfu` directly instead of running `lost_sales_ensemble`).
+**`config.py` is a generic reference template, not any specific customer's deployed config.** Every optional feature (`scope_adjustments`, `dimension_sources`, `lost_sales_ensemble`, `instock_source`, `comparable_pairs`) ships disabled with an illustrative placeholder example — copy this file per client, then replace `customer`, every `path_segments` entry, `defined_scope`'s column names, and any business rules (scope adjustments, dimension sources) with that client's own values. A real, fully-wired-up deployed config for one customer (tbretail) lives as `tbretail_config.py`, a sibling file one directory up from this repo — diff against it to see what a genuinely customized config looks like in practice (it currently reads `lost_sales_source`/`instock_source` directly from a customer-specific reporting table instead of running `lost_sales_ensemble`, and has real `scope_adjustments`/`dimension_sources` business rules wired in).
 
 1. **Upload** to a Databricks workspace folder (same directory):
   - `main.ipynb`

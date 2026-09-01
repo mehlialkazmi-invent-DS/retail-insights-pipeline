@@ -22,7 +22,7 @@ Toolkit root: `retail-insights-pipeline/`
 
 ## 1. Quick onboarding (5-minute start)
 
-**`config.py` in this repo is tbretail's own deployed config, not a blank template** — it hardcodes `customer: "tbretail"`, tbretail's absolute workspace CSV paths, fiscal-year quirks, and business defaults (`comparable_pairs.enabled: True`, etc.). Onboarding a **different** customer: copy its structure, replace every tbretail-specific value — don't assume any of them are safe defaults. `tbretail_config.py` (repo root's parent directory) is the actually-deployed copy for tbretail's own runs.
+**`config.py` in this repo is a generic reference template, not any specific customer's deployed config** — every optional feature (`scope_adjustments`, `dimension_sources`, `lost_sales_ensemble`, `instock_source`, `comparable_pairs`) ships disabled with a placeholder example. Onboarding a customer: copy its structure, replace every placeholder with that customer's own values — don't assume any of them are safe defaults. `tbretail_config.py` (repo root's parent directory) is a real, fully-wired-up deployed config for tbretail specifically — diff against it to see what an actual customization looks like.
 
 If you are a new DS picking this up for the first time:
 
