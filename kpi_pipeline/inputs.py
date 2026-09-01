@@ -111,6 +111,25 @@ def _print_date_range(df: DataFrame, date_col: str, label: str) -> None:
     print(f"  {label} date range in source ({date_col}): {bounds['min']} to {bounds['max']}")
 
 
+def rename_column_or_fail(df: DataFrame, source_col: str, canonical: str, config_key: str) -> DataFrame:
+    """Rename source_col -> canonical, failing loudly if source_col isn't actually a column.
+
+    Plain ``withColumnRenamed`` silently no-ops when the source column doesn't exist --
+    instead of erroring at the point of misconfiguration, it hides the problem until some
+    later, unrelated operation (e.g. a groupBy several calls downstream) finally references
+    the canonical name and fails with a confusing "column not found" pointing at the wrong
+    line. Every config-driven rename in this pipeline should go through this helper instead.
+    """
+    if source_col == canonical:
+        return df
+    if source_col not in df.columns:
+        raise ValueError(
+            f"{config_key}={source_col!r} not found on the source table; "
+            f"available columns: {sorted(df.columns)}"
+        )
+    return df.withColumnRenamed(source_col, canonical)
+
+
 def _rename_join_keys_to_canonical(df: DataFrame, col_map: Dict[str, Any]) -> DataFrame:
     """Rename a source's own product/store/week columns to the pipeline's canonical
     names (product_id, store_id, week_start_date) so every downstream reader can keep
@@ -120,16 +139,11 @@ def _rename_join_keys_to_canonical(df: DataFrame, col_map: Dict[str, Any]) -> Da
     report_dfu's lost_sales/instock columns, aggregated to product_agg_level x week only) sets
     it to None, and the resulting frame simply has no store_id column at all.
     """
-    renames = {
-        col_map["product_col"]: "product_id",
-        col_map["week_col"]: "week_start_date",
-    }
+    df = rename_column_or_fail(df, col_map["product_col"], "product_id", "product_col")
+    df = rename_column_or_fail(df, col_map["week_col"], "week_start_date", "week_col")
     store_col = col_map.get("store_col")
     if store_col:
-        renames[store_col] = "store_id"
-    for source_col, canonical in renames.items():
-        if source_col != canonical:
-            df = df.withColumnRenamed(source_col, canonical)
+        df = rename_column_or_fail(df, store_col, "store_id", "store_col")
     return df
 
 
