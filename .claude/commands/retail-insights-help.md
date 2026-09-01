@@ -477,11 +477,15 @@ Map raw lost-sales and instock table columns to canonical names, or read in-stoc
 - `week_col`, `product_col`, `store_col`, `lost_sales_col`, `in_stock_col`, `total_days_col` — all default to tbretail's current schema.
 - Downstream code always sees canonical names (`week_start_date`, `product_id`, `store_id`, `lost_sales`, `in_stock`, `total_days`).
 - Supports dotted nested-struct paths (e.g. `total_days_col: "details.total_days"`).
+- `product_agg_level_col` (optional): auto-detected fallback for a source keyed by planning/DFU level instead of `product_id` — left-joins `path_segments.product_planning_level` to backfill `product_id`. No-op while `product_col` is present.
+- `store_col: None` (optional): for a store-less source. **Unsafe here** — `lost_sales` is an absolute count, so broadcasting one product-week value across a product's stores and later summing over-counts by the store-count factor. Prefer a genuinely per-store source; implemented for consistency with `instock_source` but no example is wired up.
 - Defaults produce no behaviour change.
 
 **`instock_source`** — optional; read in-stock from a separate table (when your in-stock rate is calculated separately from lost-sales):
 - `enabled: False` by default — instock/total-days come from `lost_sales_source`.
 - `enabled: True` — reads `path_segments` table, left-joins by `(product_col, store_col, week_col)`, overrides in-stock/total-days values in lost-sales pairs.
+- `product_agg_level_col`: same auto-detected fallback as `lost_sales_source`, above.
+- `store_col: None`: **safe here**, unlike `lost_sales_source` — `in_stock`/`total_days` form a ratio, so broadcasting a store-less value across every scoped store and summing/dividing reproduces the original ratio exactly (numerator and denominator scale identically); you just lose real per-store variation, which a store-less source never had anyway. Verified example: `reporting_inv_fc_dfu/report_dfu` (product_agg_level × week only; uses the actual `TY_total_days_instock`/`TY_total_day`, not the simulated `sim_*` columns) — wired as a commented, ready-to-enable block in `tbretail_config.py`, not activated.
 - Mutually exclusive with `lost_sales_ensemble.enabled=True` — ensemble's per-row model selection doesn't compose with a separate-table override; `materialize()` fails if both are True.
 
 ---
