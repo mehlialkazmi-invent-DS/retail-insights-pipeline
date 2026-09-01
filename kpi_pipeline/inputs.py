@@ -26,6 +26,7 @@ DEFAULT_INSTOCK_SOURCE_COLUMN_MAP: Dict[str, Any] = {
     "in_stock_col": "in_stock",
     "total_days_col": "total_days",
     "product_agg_level_col": None,
+    "fallback_sources": [],
 }
 
 
@@ -179,19 +180,45 @@ def read_lost_sales_source(
 
 
 def read_instock_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
-    """Raw in-stock table for the instock_source override (only read when enabled).
+    """In-stock table for the instock_source override (only read when enabled).
 
-    Renamed to canonical product_id/[store_id/]week_start_date join keys (store_id only when
-    store_col is configured -- see _rename_join_keys_to_canonical); in_stock_col and
-    total_days_col are left under their configured names for the caller to aggregate.
+    Renamed to canonical product_id/[store_id/]week_start_date/in_stock/total_days columns,
+    regardless of what the source calls them (see INSTOCK_SOURCE_COLUMN_MAP).
+
+    fallback_sources (optional): additional column-sets read from the SAME table -- e.g.
+    report_dfu's LY_/LLY_ columns, which carry the same in_stock/total_days formula for the
+    calendar week exactly 52/104 weeks before each row's own TY_ week (see README) -- appended
+    in listed order to fill in weeks the primary column-set doesn't have. A fallback never
+    overrides a (product[, store], week) the primary (or an earlier fallback) already covered;
+    it only fills genuinely missing weeks. Safe because in_stock/total_days is a ratio and both
+    sources compute it the same way for any real week they both happen to cover.
     """
     path = settings["PATH_INSTOCK_SOURCE"]
     col_map = settings.get("INSTOCK_SOURCE_COLUMN_MAP") or DEFAULT_INSTOCK_SOURCE_COLUMN_MAP
     if not quiet:
         print(f"reading instock_source: {path}")
     raw = spark.read.format("delta").load(path)
-    raw = _map_product_agg_level_to_product_id(spark, raw, col_map, settings, quiet=quiet)
-    return _rename_join_keys_to_canonical(raw, col_map)
+
+    def _build(cm: Dict[str, Any]) -> DataFrame:
+        df = _map_product_agg_level_to_product_id(spark, raw, cm, settings, quiet=quiet)
+        df = _rename_join_keys_to_canonical(df, cm)
+        select_cols = ["product_id", "week_start_date"]
+        if "store_id" in df.columns:
+            select_cols.insert(1, "store_id")
+        return df.select(
+            *select_cols,
+            F.col(cm["in_stock_col"]).alias("in_stock"),
+            F.col(cm["total_days_col"]).alias("total_days"),
+        )
+
+    combined = _build(col_map)
+    key_cols = [c for c in ("product_id", "store_id", "week_start_date") if c in combined.columns]
+    for fallback_map in col_map.get("fallback_sources", []) or []:
+        if not quiet:
+            print(f"  appending instock fallback source (week_col={fallback_map['week_col']!r})")
+        fallback = _build(fallback_map)
+        combined = combined.unionByName(fallback.join(combined.select(*key_cols), on=key_cols, how="left_anti"))
+    return combined
 
 
 def read_speed_cluster_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:

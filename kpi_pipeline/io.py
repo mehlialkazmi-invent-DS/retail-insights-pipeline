@@ -26,6 +26,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
+from kpi_pipeline.comparisons import _selected_comparison_kinds
 from kpi_pipeline.context import KPIContext
 
 
@@ -99,13 +100,6 @@ COMPARISON_TABLES: Tuple[str, ...] = ("comparison_yoy", "comparison_ytd")
 # runs. The comparable comparison table is then recomputed from the merged comparable_kpi_long —
 # the same pattern as regular comparisons from kpi_long. Comparable is YTD-only.
 COMPARABLE_COMPARISON_TABLES: Tuple[str, ...] = ("comparable_comparison_ytd",)
-
-
-def _selected_comparison_kinds(ctx: KPIContext) -> List[str]:
-    """Comparison kinds selected via config (defaults to both), in canonical order."""
-    all_kinds = ("yoy", "ytd")
-    selected = set(ctx.settings.get("COMPARISON_KINDS") or all_kinds)
-    return [k for k in all_kinds if k in selected]
 
 
 def _output_frames(ctx: KPIContext) -> Dict[str, pd.DataFrame]:

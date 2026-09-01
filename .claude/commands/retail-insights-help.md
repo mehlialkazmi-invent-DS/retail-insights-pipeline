@@ -22,6 +22,8 @@ Toolkit root: `retail-insights-pipeline/`
 
 ## 1. Quick onboarding (5-minute start)
 
+**`config.py` in this repo is tbretail's own deployed config, not a blank template** — it hardcodes `customer: "tbretail"`, tbretail's absolute workspace CSV paths, fiscal-year quirks, and business defaults (`comparable_pairs.enabled: True`, etc.). Onboarding a **different** customer: copy its structure, replace every tbretail-specific value — don't assume any of them are safe defaults. `tbretail_config.py` (repo root's parent directory) is the actually-deployed copy for tbretail's own runs.
+
 If you are a new DS picking this up for the first time:
 
 1. **Upload to Databricks** — same folder: `main.ipynb`, `config.py`, entire `kpi_pipeline/`.
@@ -486,6 +488,7 @@ Map raw lost-sales and instock table columns to canonical names, or read in-stoc
 - `enabled: True` — reads `path_segments` table, left-joins by `(product_col, store_col, week_col)`, overrides in-stock/total-days values in lost-sales pairs.
 - `product_agg_level_col`: same auto-detected fallback as `lost_sales_source`, above.
 - `store_col: None`: **safe here**, unlike `lost_sales_source` — `in_stock`/`total_days` form a ratio, so broadcasting a store-less value across every scoped store and summing/dividing reproduces the original ratio exactly (numerator and denominator scale identically); you just lose real per-store variation, which a store-less source never had anyway. Verified example: `reporting_inv_fc_dfu/report_dfu` (product_agg_level × week only; uses the actual `TY_total_days_instock`/`TY_total_day`, not the simulated `sim_*` columns) — wired as a commented, ready-to-enable block in `tbretail_config.py`, not activated.
+- `fallback_sources` (optional): additional column-sets read from the SAME table, appended in order to fill weeks the primary column-set doesn't have (e.g. `report_dfu`'s `TY_` window only reaches back its own trailing build horizon; `LY_`/`LLY_` carry the identical formula 52/104 weeks earlier and backfill older history). `read_instock_source` left-anti-joins each fallback against everything already covered before unioning — a fallback fills gaps, never overrides a week the primary (or an earlier fallback) already has. Each entry needs its own `week_col`/`in_stock_col`/`total_days_col`; `product_col`/`store_col`/`product_agg_level_col` inherit from the parent block unless overridden.
 - Mutually exclusive with `lost_sales_ensemble.enabled=True` — ensemble's per-row model selection doesn't compose with a separate-table override; `materialize()` fails if both are True.
 
 ---

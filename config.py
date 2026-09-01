@@ -91,6 +91,9 @@ from typing import Any, Callable, Dict, Optional
 COMPARISON_KINDS_ALL = ("yoy", "ytd")
 
 CONFIG: Dict[str, Any] = {
+    # =============================================================================
+    # IDENTITY & RUN WINDOW
+    # =============================================================================
     "customer": "tbretail",
     "run": {
         # full       = compute KPIs from source Delta tables (default)
@@ -103,10 +106,9 @@ CONFIG: Dict[str, Any] = {
         "as_of_date": "2026-08-02",
         "run_min_date": "2025-02-08",  # None = YTD from Jan 1; e.g. "2025-01-01" for multi-year
     },
-    "service_metrics": {
-        # E-com / non-service stores excluded from instock, WOS, lost sales %, mean stock.
-        "excluded_store_ids": [829, 639, 917],
-    },
+    # =============================================================================
+    # CALENDAR
+    # =============================================================================
     "fiscal_calendar": {
         "use_fiscal_calendar": True,
         # tbretail's fiscal_cal upload columns (used since use_fiscal_calendar=True above). Each
@@ -129,6 +131,9 @@ CONFIG: Dict[str, Any] = {
             "week": "week",
         },
     },
+    # =============================================================================
+    # SCOPE & POPULATION
+    # =============================================================================
     "score_scope": {
         # Only consulted for the MISSING weeks under hybrid scope (see "scope" below).
         "min_percentile": 0.2,
@@ -144,19 +149,24 @@ CONFIG: Dict[str, Any] = {
         "use_hybrid_scope": False,
         "run_scope_diff": False,
     },
-    "comparable_pairs": {
-        # Like-for-like YTD (comparable is YTD-only): recomputes YTD metrics over only the
-        # (product_id, store_id) pairs present in BOTH years of each consecutive-year link — the
-        # same concept as v4's _pairs_same_calendar_years / sameytd. Requires run_min_date to span
-        # at least 2 years (e.g. "2024-01-01" for a comparable 2024-vs-2025 link).
-        "enabled": True,
-    },
-    "comparisons": {
-        # Which period-over-period comparisons to compute, print, save, and render.
-        # Choose any subset of "yoy", "ytd". kpi_long (the raw per-period metrics, including
-        # quarter/monthly/weekly value trends) is always produced in full regardless of this
-        # setting — there is no separate QoQ/MoM/WoW comparison table.
-        "enabled": ["yoy", "ytd"],
+    "defined_scope": {
+        # grain — how the scope table defines membership:
+        #   "product"            -> distinct product_id (store- and week-agnostic: every store,
+        #                           every window week, for each in-scope product).
+        #   "product_store"      -> distinct (product_id, store_id); week-agnostic (default).
+        #   "product_store_week" -> the scope table's own (product, store, week) rows are honoured
+        #                           (strict); weeks come from date_col (or year_col/week_col).
+        # Week-agnostic grains span the whole report window; product_store_week is the only grain
+        # whose hybrid backfill fills weeks the scope table does not cover.
+        "grain": "product_store",
+        "product_col": "product_id",
+        "store_col": "store_id",        # required for product_store / product_store_week grains
+        # date/year/week: read ONLY for product_store_week grain (to resolve the scope's weeks).
+        #   DATE path:   date_col -> fiscal_cal -> Year/Week (preferred).
+        #   NATIVE path: date_col=None, set year_col/week_col (year must be a true calendar year).
+        "date_col": "week_start_date",
+        "year_col": None,
+        "week_col": None,
     },
     "scope_adjustments": {
         # ---------------------------------------------------------------------------
@@ -226,6 +236,115 @@ CONFIG: Dict[str, Any] = {
             }
         ],
     },
+    # =============================================================================
+    # DATA SOURCES
+    # =============================================================================
+    "path_segments": {
+        "fiscal": ["one_time_uploads", "fiscal_cal"],
+        "daily_data": ["noob", "daily-data"],
+        "products": ["master-data", "products"],
+        "lost_sales": ["noob", "lost-sales", "model_id=top_down_excluding_ecom"],
+        "defined_scope": ["analysis", "instock_rate", "instock_rate_scope"],
+        # product_agg_level -> product_id map for lost_sales_source/instock_source's
+        # product_agg_level_col (see README).
+        "product_planning_level": ["operation", "product_planning_level"],
+    },
+    "input_filters": {
+        # Optional Spark SQL expressions applied when reading each source.
+        # NOTE: when lost_sales_ensemble.enabled=True, this "lost_sales" filter list is
+        # applied to BOTH the fast (path_segments.lost_sales) and slow
+        # (lost_sales_ensemble.slow_path_segments) sources — same schema, same filters.
+        "defined_scope": [],
+        "lost_sales": [],
+        "daily_data": ["usable = 1"],
+    },
+    # ---------------------------------------------------------------------------
+    # LOST-SALES SOURCE — column mapping for the raw lost-sales table
+    # ---------------------------------------------------------------------------
+    # Downstream code always sees canonical column names regardless of this mapping (see
+    # README). TBretail's lost-sales table already matches these defaults.
+    "lost_sales_source": {
+        "week_col": "week_start_date",
+        "product_col": "product_id",
+        "store_col": "store_id",
+        "lost_sales_col": "lost_sales",
+        "in_stock_col": "in_stock",
+        "total_days_col": "details.total_days",  # supports a dotted nested-struct path
+        "product_agg_level_col": None,  # set if source has product_agg_level, not product_id (see README)
+    },
+    # ---------------------------------------------------------------------------
+    # INSTOCK SOURCE — optional override to read in-stock days from a DIFFERENT table
+    # ---------------------------------------------------------------------------
+    # OFF for tbretail: in-stock/total-days come from lost_sales_source above, as always.
+    # Mutually exclusive with lost_sales_ensemble below (enabled for tbretail) — leave off.
+    #
+    # Verified alternative (report_dfu; store-less, safe here since in-stock is a ratio — see README):
+    #   "enabled": True,
+    #   "path_segments": ["reporting", "future_visibility", "reporting_inv_fc_dfu", "report_dfu"],
+    #   "week_col": "TY_week_start_date",
+    #   "in_stock_col": "TY_total_days_instock",  # actual, not sim_instock_days
+    #   "total_days_col": "TY_total_day",         # actual, not sim_total_days
+    #   "product_agg_level_col": "product_agg_level",
+    #   "store_col": None,
+    #   # TY_ only covers a rolling trailing window (report_dfu's own build horizon) -- LY_/LLY_
+    #   # carry the identical formula for the calendar week exactly 52/104 weeks earlier, so they
+    #   # backfill whatever weeks have rolled off TY_'s window (see README). Each fallback entry
+    #   # inherits product_col/store_col/product_agg_level_col from above unless overridden.
+    #   "fallback_sources": [
+    #       {"week_col": "LY_week_start_date", "in_stock_col": "LY_total_days_instock", "total_days_col": "LY_total_day"},
+    #       {"week_col": "LLY_week_start_date", "in_stock_col": "LLY_total_days_instock", "total_days_col": "LLY_total_day"},
+    #   ],
+    "instock_source": {
+        "enabled": False,
+        "path_segments": None,  # required when enabled=True, e.g. ["some", "instock", "table"]
+        "week_col": "week_start_date",
+        "product_col": "product_id",
+        "store_col": "store_id",
+        "in_stock_col": "in_stock",
+        "total_days_col": "total_days",
+        "product_agg_level_col": None,
+        "fallback_sources": [],  # optional additional column-sets from the same table (see above)
+    },
+    # ---------------------------------------------------------------------------
+    # LOST-SALES ENSEMBLE — blend two lost-sales models by product sales speed
+    # ---------------------------------------------------------------------------
+    # ENABLED for TBretail: fast movers (speed cluster in fast_mover_clusters) take
+    # the 120-day model at path_segments.lost_sales; everyone else — slower clusters
+    # AND products with no/NULL cluster — takes the 365-day model below. All three
+    # aggregate fields (lost_sales, in_stock, details.total_days) for a given
+    # product/store/week come from ONE model (never mixed).
+    "lost_sales_ensemble": {
+        "enabled": True,
+        "slow_path_segments": ["noob", "lost-sales", "model_id=top_down_excluding_ecom_365days"],
+        # Product sales-speed source. TBretail's speed_cluster_path_segments below is the
+        # platform's long-format attributes table (one row per product_id x attribute_name) —
+        # speed_cluster_format="long" is the matching shape.
+        "speed_cluster_path_segments": ["noob", "product-cluster-attributes-snapshot"],
+        "speed_cluster_format": "long",
+        "speed_cluster_attribute_name": "sales_speed",
+        "speed_cluster_value_col": "product_speed_cluster",  # unused under format="long"
+        "fast_mover_clusters": [1, 2, 3],
+    },
+    # =============================================================================
+    # CUTS & DIMENSIONS
+    # =============================================================================
+    # ---------------------------------------------------------------------------
+    # SLICES — dimensions sourced from master-data/products
+    # ---------------------------------------------------------------------------
+    # brand:     raw column on products table
+    # SMW: derived — KNG vs SMW split (same logic as v4 notebook)
+    "slices": {
+        "dimensions": ["brand"],
+        "derived_dimensions": {
+            "SMW": "CASE WHEN brand = 'KNG' THEN 'KNG' ELSE 'SMW' END",
+        },
+        # Restrict which values of a slice dimension appear in the breakdown (that
+        # dimension only; Overall and other slices are unaffected). Two shapes:
+        #   LIST (include-only): omit -> all incl NULL | [] -> all non-null | ["A","B"] -> only those
+        #   DICT (include/exclude): {"include": ["A"]} keep only A | {"exclude": ["A"]} keep the
+        #       rest incl NULL | add "keep_null": True/False to force the NULL bucket.
+        "value_filters": {},
+    },
     # ---------------------------------------------------------------------------
     # DIMENSION SOURCES — NVROUT flag from operation/extended_product
     # ---------------------------------------------------------------------------
@@ -287,119 +406,26 @@ CONFIG: Dict[str, Any] = {
             "root_values": {"IS_COMP": {"yes": "comp"}},
         },
     ],
-    "path_segments": {
-        "fiscal": ["one_time_uploads", "fiscal_cal"],
-        "daily_data": ["noob", "daily-data"],
-        "products": ["master-data", "products"],
-        "lost_sales": ["noob", "lost-sales", "model_id=top_down_excluding_ecom"],
-        "defined_scope": ["analysis", "instock_rate", "instock_rate_scope"],
-        # product_agg_level -> product_id map for lost_sales_source/instock_source's
-        # product_agg_level_col (see README).
-        "product_planning_level": ["operation", "product_planning_level"],
+    # =============================================================================
+    # COMPARISONS
+    # =============================================================================
+    "comparisons": {
+        # Which period-over-period comparisons to compute, print, save, and render.
+        # Choose any subset of "yoy", "ytd". kpi_long (the raw per-period metrics, including
+        # quarter/monthly/weekly value trends) is always produced in full regardless of this
+        # setting — there is no separate QoQ/MoM/WoW comparison table.
+        "enabled": ["yoy", "ytd"],
     },
-    "defined_scope": {
-        # grain — how the scope table defines membership:
-        #   "product"            -> distinct product_id (store- and week-agnostic: every store,
-        #                           every window week, for each in-scope product).
-        #   "product_store"      -> distinct (product_id, store_id); week-agnostic (default).
-        #   "product_store_week" -> the scope table's own (product, store, week) rows are honoured
-        #                           (strict); weeks come from date_col (or year_col/week_col).
-        # Week-agnostic grains span the whole report window; product_store_week is the only grain
-        # whose hybrid backfill fills weeks the scope table does not cover.
-        "grain": "product_store",
-        "product_col": "product_id",
-        "store_col": "store_id",        # required for product_store / product_store_week grains
-        # date/year/week: read ONLY for product_store_week grain (to resolve the scope's weeks).
-        #   DATE path:   date_col -> fiscal_cal -> Year/Week (preferred).
-        #   NATIVE path: date_col=None, set year_col/week_col (year must be a true calendar year).
-        "date_col": "week_start_date",
-        "year_col": None,
-        "week_col": None,
-    },
-    "input_filters": {
-        # Optional Spark SQL expressions applied when reading each source.
-        # NOTE: when lost_sales_ensemble.enabled=True, this "lost_sales" filter list is
-        # applied to BOTH the fast (path_segments.lost_sales) and slow
-        # (lost_sales_ensemble.slow_path_segments) sources — same schema, same filters.
-        "defined_scope": [],
-        "lost_sales": [],
-        "daily_data": ["usable = 1"],
-    },
-    # ---------------------------------------------------------------------------
-    # LOST-SALES SOURCE — column mapping for the raw lost-sales table
-    # ---------------------------------------------------------------------------
-    # Downstream code always sees canonical column names regardless of this mapping (see
-    # README). TBretail's lost-sales table already matches these defaults.
-    "lost_sales_source": {
-        "week_col": "week_start_date",
-        "product_col": "product_id",
-        "store_col": "store_id",
-        "lost_sales_col": "lost_sales",
-        "in_stock_col": "in_stock",
-        "total_days_col": "details.total_days",  # supports a dotted nested-struct path
-        "product_agg_level_col": None,  # set if source has product_agg_level, not product_id (see README)
-    },
-    # ---------------------------------------------------------------------------
-    # INSTOCK SOURCE — optional override to read in-stock days from a DIFFERENT table
-    # ---------------------------------------------------------------------------
-    # OFF for tbretail: in-stock/total-days come from lost_sales_source above, as always.
-    # Mutually exclusive with lost_sales_ensemble below (enabled for tbretail) — leave off.
-    #
-    # Verified alternative (report_dfu; store-less, safe here since in-stock is a ratio — see README):
-    #   "enabled": True,
-    #   "path_segments": ["reporting", "future_visibility", "reporting_inv_fc_dfu", "report_dfu"],
-    #   "week_col": "TY_week_start_date",
-    #   "in_stock_col": "TY_total_days_instock",  # actual, not sim_instock_days
-    #   "total_days_col": "TY_total_day",         # actual, not sim_total_days
-    #   "product_agg_level_col": "product_agg_level",
-    #   "store_col": None,
-    "instock_source": {
-        "enabled": False,
-        "path_segments": None,  # required when enabled=True, e.g. ["some", "instock", "table"]
-        "week_col": "week_start_date",
-        "product_col": "product_id",
-        "store_col": "store_id",
-        "in_stock_col": "in_stock",
-        "total_days_col": "total_days",
-        "product_agg_level_col": None,
-    },
-    # ---------------------------------------------------------------------------
-    # LOST-SALES ENSEMBLE — blend two lost-sales models by product sales speed
-    # ---------------------------------------------------------------------------
-    # ENABLED for TBretail: fast movers (speed cluster in fast_mover_clusters) take
-    # the 120-day model at path_segments.lost_sales; everyone else — slower clusters
-    # AND products with no/NULL cluster — takes the 365-day model below. All three
-    # aggregate fields (lost_sales, in_stock, details.total_days) for a given
-    # product/store/week come from ONE model (never mixed).
-    "lost_sales_ensemble": {
+    "comparable_pairs": {
+        # Like-for-like YTD (comparable is YTD-only): recomputes YTD metrics over only the
+        # (product_id, store_id) pairs present in BOTH years of each consecutive-year link — the
+        # same concept as v4's _pairs_same_calendar_years / sameytd. Requires run_min_date to span
+        # at least 2 years (e.g. "2024-01-01" for a comparable 2024-vs-2025 link).
         "enabled": True,
-        "slow_path_segments": ["noob", "lost-sales", "model_id=top_down_excluding_ecom_365days"],
-        # Product sales-speed source. TBretail's speed_cluster_path_segments below is the
-        # platform's long-format attributes table (one row per product_id x attribute_name) —
-        # speed_cluster_format="long" is the matching shape.
-        "speed_cluster_path_segments": ["noob", "product-cluster-attributes-snapshot"],
-        "speed_cluster_format": "long",
-        "speed_cluster_attribute_name": "sales_speed",
-        "speed_cluster_value_col": "product_speed_cluster",  # unused under format="long"
-        "fast_mover_clusters": [1, 2, 3],
     },
-    # ---------------------------------------------------------------------------
-    # SLICES — dimensions sourced from master-data/products
-    # ---------------------------------------------------------------------------
-    # brand:     raw column on products table
-    # SMW: derived — KNG vs SMW split (same logic as v4 notebook)
-    "slices": {
-        "dimensions": ["brand"],
-        "derived_dimensions": {
-            "SMW": "CASE WHEN brand = 'KNG' THEN 'KNG' ELSE 'SMW' END",
-        },
-        # Restrict which values of a slice dimension appear in the breakdown (that
-        # dimension only; Overall and other slices are unaffected). Two shapes:
-        #   LIST (include-only): omit -> all incl NULL | [] -> all non-null | ["A","B"] -> only those
-        #   DICT (include/exclude): {"include": ["A"]} keep only A | {"exclude": ["A"]} keep the
-        #       rest incl NULL | add "keep_null": True/False to force the NULL bucket.
-        "value_filters": {},
-    },
+    # =============================================================================
+    # METRICS
+    # =============================================================================
     "metrics": {
         "metric_cols": [
             "total_sales_quantity",
@@ -453,6 +479,13 @@ CONFIG: Dict[str, Any] = {
         },
         "pp_change_metrics": ["in_stock_rate", "weighted_instock_rate", "lost_sales_pct"],
     },
+    "service_metrics": {
+        # E-com / non-service stores excluded from instock, WOS, lost sales %, mean stock.
+        "excluded_store_ids": [829, 639, 917],
+    },
+    # =============================================================================
+    # OUTPUT & REPORTING
+    # =============================================================================
     "output": {
         "save_outputs": True,
         "path_segments": ["analysis", "kpis_tbretail", "outputs"],
@@ -751,6 +784,17 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "in_stock_col": instock_source_cfg.get("in_stock_col", "in_stock"),
         "total_days_col": instock_source_cfg.get("total_days_col", "total_days"),
         "product_agg_level_col": instock_source_cfg.get("product_agg_level_col"),
+        "fallback_sources": [
+            {
+                "week_col": fb["week_col"],
+                "in_stock_col": fb["in_stock_col"],
+                "total_days_col": fb["total_days_col"],
+                "product_col": fb.get("product_col", instock_source_cfg.get("product_col", "product_id")),
+                "store_col": fb.get("store_col", instock_source_cfg.get("store_col", "store_id")),
+                "product_agg_level_col": fb.get("product_agg_level_col", instock_source_cfg.get("product_agg_level_col")),
+            }
+            for fb in instock_source_cfg.get("fallback_sources", []) or []
+        ],
     }
 
     window = _resolve_report_window(
@@ -812,12 +856,21 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             resolved["path"] = fund_paste(bucket, *resolved["path_segments"])
         dimension_sources.append(resolved)
 
-    # Per-dimension value filters, merged from slices + each dimension_source. Applied to
-    # a slice's own breakdown only (see kpi_pipeline/kpi_long._filter_frames_for_dimension).
+    # Root specs: one entry per (dim_col, root_values) pair declared on an enabled
+    # dimension_source -- resolved here (not left for fiscal.py to re-derive) so root_values
+    # stays the single place a dimension_source's root-defining column is declared. Consumed by
+    # fiscal.py's _resolve_root_definitions to build ctx.root_definitions and exclude these
+    # columns from ctx.cut_dimensions (see README's "Dimension sources -> roots" section).
+    root_specs = [
+        {"dim_col": dim_col, "root_values": mapping}
+        for src in dimension_sources
+        if src.get("enabled")
+        for dim_col, mapping in (src.get("root_values") or {}).items()
+    ]
+
+    # Per-dimension value filters, from slices only. Applied to a slice's own breakdown
+    # (see kpi_pipeline/kpi_long._filter_frames_for_dimension).
     slice_value_filters = dict(cfg["slices"].get("value_filters", {}) or {})
-    for src in dimension_sources:
-        for dim, allowed in (src.get("value_filters", {}) or {}).items():
-            slice_value_filters[dim] = allowed
     _validate_value_filters(slice_value_filters)
 
     # Selected comparison kinds — validated and normalised to canonical order.
@@ -907,6 +960,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "SLICE_DIMENSIONS": cfg["slices"]["dimensions"],
         "DERIVED_SLICE_DIMENSIONS": cfg["slices"]["derived_dimensions"],
         "DIMENSION_SOURCES": dimension_sources,
+        "ROOT_SPECS": root_specs,
         "SLICE_VALUE_FILTERS": slice_value_filters,
         "METRIC_COLS": metrics["metric_cols"],
         "SCOPE_DIFF_METRICS": metrics["scope_diff_metrics"],

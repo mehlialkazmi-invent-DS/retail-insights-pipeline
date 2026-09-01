@@ -10,7 +10,6 @@ from pyspark.sql.functions import broadcast
 
 from kpi_pipeline.context import KPIContext
 from kpi_pipeline.inputs import (
-    DEFAULT_INSTOCK_SOURCE_COLUMN_MAP,
     DEFAULT_LOST_SALES_COLUMN_MAP,
     get_daily_data_raw,
     read_instock_source,
@@ -80,6 +79,9 @@ def _aggregate_lost_sales_pairweek(ctx: KPIContext, raw: DataFrame, start, end) 
 def _aggregate_instock_pairweek(ctx: KPIContext, raw: DataFrame, start, end) -> DataFrame:
     """Aggregate the standalone instock_source table to (product_id[, store_id], week_start_date).
 
+    ``raw`` is read_instock_source's output, already on canonical in_stock/total_days columns
+    (including any fallback_sources already appended -- see read_instock_source).
+
     Grouped without store_id when the source has none (store_col=None in
     INSTOCK_SOURCE_COLUMN_MAP, e.g. reporting_inv_fc_dfu/report_dfu) -- read_lost_sales_weekly's
     join then broadcasts this pair-week's value across every scoped store of that product
@@ -87,14 +89,13 @@ def _aggregate_instock_pairweek(ctx: KPIContext, raw: DataFrame, start, end) -> 
     total_days are a ratio, and summing the same broadcast value across a product's stores then
     dividing reproduces the original ratio (numerator and denominator scale identically).
     """
-    col_map = ctx.settings.get("INSTOCK_SOURCE_COLUMN_MAP") or DEFAULT_INSTOCK_SOURCE_COLUMN_MAP
     filtered = (
         raw.withColumn("week_start_date", F.to_date("week_start_date"))
         .filter(F.col("week_start_date").between(F.lit(start), F.lit(end)))
     )
     agg_exprs = [
-        F.sum(F.col(col_map["in_stock_col"]).cast("double")).alias("in_stock_days"),
-        F.sum(F.col(col_map["total_days_col"]).cast("double")).alias("total_days"),
+        F.sum(F.col("in_stock").cast("double")).alias("in_stock_days"),
+        F.sum(F.col("total_days").cast("double")).alias("total_days"),
     ]
     group_keys = ["product_id", "week_start_date"]
     if "store_id" in raw.columns:
@@ -261,7 +262,17 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
     scope_keys = ["product_id", "store_id", "Year", "Week"] if has_store else ["product_id", "Year", "Week"]
     scope_core = scope_in.select(*scope_keys).distinct().cache()
 
-    lost_sales_weekly = read_lost_sales_weekly(ctx).join(scope_core, on=scope_keys, how="left_semi").cache()
+    lost_sales_raw = read_lost_sales_weekly(ctx)
+    if has_store and "store_id" not in lost_sales_raw.columns:
+        # lost_sales_source has no per-store dimension (e.g. report_dfu, store_col=None) --
+        # left_semi can't attach a store_id column that was never on lost_sales_raw, so this
+        # broadcasts its product-week value across every scoped store instead: a regular join
+        # on the non-store keys fans lost_sales_raw's single row out to one row per matching
+        # (product, store, week) in scope_core, picking up store_id from scope_core's side.
+        broadcast_keys = [k for k in scope_keys if k != "store_id"]
+        lost_sales_weekly = lost_sales_raw.join(scope_core, on=broadcast_keys, how="inner").cache()
+    else:
+        lost_sales_weekly = lost_sales_raw.join(scope_core, on=scope_keys, how="left_semi").cache()
 
     if has_store:
         scope_pair_weeks = scope_core.select("product_id", "store_id", "Year", "Week").distinct().cache()
@@ -281,6 +292,12 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
         if ctx.settings.get("INSTOCK_SOURCE_ENABLED", False)
         else F.coalesce(F.col("total_days"), F.col("fiscal_week_days"))
     )
+    # instock/lost-sales exclude EXCLUDED_STORE_IDS_FOR_SERVICE_METRICS here, same as
+    # WOS/turnover/mean_stock (metrics.py, via is_service_store()/daily_service). Deliberate:
+    # these are e-com fulfillment "stores" with no real shelf inventory -- "in stock" and
+    # "lost sales" (which presuppose physical stock and a stockout-driven demand gap) aren't
+    # meaningful concepts for them, so they're excluded from all four, even though this means
+    # diverging further from kpi-skill-toolkit (which excludes them from nothing).
     inst_data = (
         lost_sales_weekly.filter(is_service_store(ctx))
         .select(

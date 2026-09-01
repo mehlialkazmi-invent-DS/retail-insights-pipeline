@@ -33,7 +33,7 @@ Default example: `.../analysis/kpi_reports/outputs/kpi_long/run_date=2026-06-15/
 ```
 retail-insights-pipeline/
 ├── README.md           # This file
-├── config.py           # All user-editable settings (edit CONFIG, then %run in notebook)
+├── config.py           # tbretail's OWN deployed config, not a blank template -- see note below
 ├── main.ipynb          # Databricks runner — compute, preview save plan, write, HTML report
 └── kpi_pipeline/       # Pipeline logic (imported by main.ipynb)
     ├── runner.py       # KPIRunner orchestrates the full run + HTML report generation
@@ -52,6 +52,8 @@ retail-insights-pipeline/
 ```
 
 ## Quick start (Databricks)
+
+**`config.py` is tbretail's own deployed config, not a blank starter template.** It hardcodes `customer: "tbretail"`, tbretail's absolute workspace paths under `scope_adjustments`/`dimension_sources`, tbretail's fiscal-year quirks, and business defaults like `comparable_pairs.enabled: True`. Onboarding a **new** customer: copy `config.py`'s *structure* (the CONFIG dict shape, `materialize()`, the toolkit-generic sections — path_segments, defined_scope, lost_sales_source, slices, metrics, output, html_report), but replace every tbretail-specific value, path, and business rule rather than assuming any of them are safe defaults. `tbretail_config.py` (one directory up) is the actually-deployed copy of this file for tbretail's own runs — kept in sync with `config.py` except for tbretail-specific customizations (currently: `lost_sales_source` reads `report_dfu` directly instead of running `lost_sales_ensemble`).
 
 1. **Upload** to a Databricks workspace folder (same directory):
   - `main.ipynb`
@@ -655,6 +657,7 @@ Maps raw lost-sales table columns to canonical names. Allows customers whose los
     "in_stock_col": "in_stock",           # column name; default "in_stock"
     "total_days_col": "total_days",       # column name; default "total_days"; supports dotted nested-struct paths
     "product_agg_level_col": None,        # set when the source is keyed by product_agg_level, not product_id
+    "fallback_sources": [],               # optional additional column-sets from the SAME table (see below)
 }
 ```
 
@@ -677,6 +680,26 @@ Maps raw lost-sales table columns to canonical names. Allows customers whose los
 ```
 
 `sim_instock_days`/`sim_total_days` on this table are the future-visibility *simulation's* projected values, not observed actuals — they're only blended into `TY_total_days_instock`/`TY_total_day` for weeks on or after the simulation's own run week (i.e. current/future weeks with no real history yet). Reading the raw `sim_` columns directly would report simulated numbers even for historical periods.
+
+**`fallback_sources`** (optional): a list of additional column-sets, read from the SAME `path_segments` table, appended after the primary column-set to fill in weeks it doesn't have. Each entry needs its own `week_col`/`in_stock_col`/`total_days_col`; `product_col`/`store_col`/`product_agg_level_col` are inherited from the parent `instock_source` block unless overridden. A fallback never overrides a `(product[, store], week)` the primary — or an earlier fallback — already covered; it only fills genuinely missing weeks (`read_instock_source`'s `left_anti` + `unionByName`). This is safe because `in_stock`/`total_days` is a ratio and both column-sets compute it the same way for any real week they both happen to cover.
+
+`report_dfu`'s own `TY_` window only reaches back `path_segments.reporting_inv_fc_dfu`'s own trailing build horizon (tens of weeks, not years) — `LY_`/`LLY_` carry the identical formula for the calendar week exactly 52/104 weeks before each row's own `TY_` week, so they backfill older history `TY_` alone can't reach:
+
+```python
+"instock_source": {
+    "enabled": True,
+    "path_segments": ["reporting", "future_visibility", "reporting_inv_fc_dfu", "report_dfu"],
+    "week_col": "TY_week_start_date",
+    "in_stock_col": "TY_total_days_instock",
+    "total_days_col": "TY_total_day",
+    "product_agg_level_col": "product_agg_level",
+    "store_col": None,
+    "fallback_sources": [
+        {"week_col": "LY_week_start_date", "in_stock_col": "LY_total_days_instock", "total_days_col": "LY_total_day"},
+        {"week_col": "LLY_week_start_date", "in_stock_col": "LLY_total_days_instock", "total_days_col": "LLY_total_day"},
+    ],
+}
+```
 
 **Mutually exclusive with `lost_sales_ensemble.enabled=True`.** When `lost_sales_ensemble.enabled=True`, the ensemble blends two lost-sales models and picks in-stock/total-days per row from whichever model was selected — this does not compose with `instock_source`'s separate-table override, which assumes a single lost-sales source. Only one of the two may be active; `materialize()` raises a `ValueError` if both are `True`.
 
