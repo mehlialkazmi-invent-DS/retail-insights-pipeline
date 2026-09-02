@@ -1,8 +1,4 @@
-"""KPI metric computation.
-
-Sales metrics use all scoped stores; service metrics (WOS, instock, lost sales %, mean stock)
-exclude EXCLUDED_STORE_IDS_FOR_SERVICE_METRICS via is_service_store().
-"""
+"""KPI metric computation."""
 
 from __future__ import annotations
 
@@ -13,16 +9,20 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 from kpi_pipeline.context import KPIContext
-from kpi_pipeline.pipeline import is_service_store
 
 
-def filter_service_scope(ctx: KPIContext, df: DataFrame, scope_pair_weeks_in: DataFrame) -> DataFrame:
-    out = df.filter(is_service_store(ctx))
-    # Store-grain scoped_daily is already restricted to scope_pair_weeks; the semi-join is only
-    # needed in the product-week (no store grain) fallback path.
+def _restrict_to_scope_pair_weeks(ctx: KPIContext, df: DataFrame, scope_pair_weeks_in: DataFrame) -> DataFrame:
+    """Restrict scoped_daily to the (product, store, week) rows lost_sales_weekly actually has.
+
+    Only needed in the product-week (no store grain) fallback path: there, scope has no store
+    dimension of its own, so scoped_daily keeps every store daily_data has for an in-scope
+    (product, week) -- wider than scope_pair_weeks, which is derived from lost_sales_weekly's
+    own (narrower) store rows. In the store-grain path, scoped_daily is already restricted to
+    scope_pair_weeks, so this is a no-op skip.
+    """
     if "store_id" not in ctx.scope_keys:
-        out = out.join(scope_pair_weeks_in, on=["product_id", "store_id", "Year", "Week"], how="left_semi")
-    return out
+        return df.join(scope_pair_weeks_in, on=["product_id", "store_id", "Year", "Week"], how="left_semi")
+    return df
 
 
 def compute_kpis(
@@ -38,7 +38,7 @@ def compute_kpis(
     group_keys = list(group_keys)
     keys = [period_col] + group_keys
     daily_sales = scoped_daily_in.filter(period_filter)
-    daily_service = filter_service_scope(ctx, scoped_daily_in, scope_pair_weeks_in).filter(period_filter)
+    daily_pair_scoped = _restrict_to_scope_pair_weeks(ctx, scoped_daily_in, scope_pair_weeks_in).filter(period_filter)
     inst = inst_in.filter(period_filter)
 
     sales = (
@@ -68,7 +68,7 @@ def compute_kpis(
 
     week_keys = ["product_id", "Year", "Week"] + group_keys
     period_extra = [period_col] if period_col not in week_keys else []
-    daily_by_date = daily_service.groupBy(*week_keys, *period_extra, "date").agg(
+    daily_by_date = daily_pair_scoped.groupBy(*week_keys, *period_extra, "date").agg(
         F.sum("inventory").alias("daily_total_inventory"),
         F.sum("sales_quantity").alias("daily_sales_units"),
         F.sum("inventory_retail").alias("daily_total_inventory_retail"),
@@ -111,7 +111,7 @@ def compute_kpis(
         (F.sum(F.col("wos_cost") * F.col("weekly_sales_cost")) / F.sum("weekly_sales_cost")).alias("wos_cost"),
     )
 
-    seg_day = daily_service.groupBy(*keys, "date").agg(
+    seg_day = daily_pair_scoped.groupBy(*keys, "date").agg(
         F.sum("inventory").alias("daily_inv"),
         F.sum("inventory_retail").alias("daily_inv_retail"),
         F.sum("inventory_cost").alias("daily_inv_cost"),
@@ -122,7 +122,7 @@ def compute_kpis(
         F.avg("daily_inv_cost").alias("mean_stock_cost"),
     )
     turnover = (
-        daily_service.groupBy(*keys)
+        daily_pair_scoped.groupBy(*keys)
         .agg(F.sum("sales_quantity").alias("sales_units"))
         .join(mean_stock, on=keys, how="inner")
         .withColumn(
@@ -143,7 +143,7 @@ def compute_kpis(
     weekly_pair_instock = inst.groupBy(*wi_week_keys, *wi_period_extra).agg(
         F.greatest(F.lit(0.0), F.sum("stocked_pairs") / F.sum("available_days")).alias("_pair_instock_rate"),
     )
-    weekly_pair_sales = daily_service.groupBy(*wi_week_keys, *wi_period_extra).agg(
+    weekly_pair_sales = daily_pair_scoped.groupBy(*wi_week_keys, *wi_period_extra).agg(
         F.sum("sales_quantity").alias("_pair_sales_qty")
     )
     weighted_instock = (

@@ -70,6 +70,13 @@
 #
 #   4. Update reporting_window.as_of_date before each run.
 #
+# There is no dedicated "exclude these stores" config key. If a store should never contribute
+# to sales/WOS/instock/etc at all (e.g. an e-com fulfillment "store" with no real shelf
+# inventory), add a store_id exclusion to input_filters.daily_data -- it applies everywhere
+# daily_data is read (scope building included), not just to a subset of metrics. If your
+# lost-sales/instock source tables already exclude such stores upstream (common -- see
+# lost_sales_source/instock_source), nothing further is needed for those two metrics.
+#
 # WHAT THIS CONFIG PRODUCES:
 #   Scope:       defined + hybrid score backfill, JAB additions, NON-COMP removals
 #   Lost sales:  ensemble of fast (120-day) + slow (365-day) noob models, blended by
@@ -263,6 +270,11 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     # Downstream code always sees canonical column names regardless of this mapping (see
     # README). TBretail's lost-sales table already matches these defaults.
+    # product_col / product_agg_level_col: configure exactly ONE, never both. If the source has
+    # a native product_id-level column, set product_col to it (product_col always takes
+    # precedence when present -- see README). If it doesn't (keyed by planning/DFU level
+    # instead), set product_col to None and set product_agg_level_col -- the pipeline joins it
+    # to path_segments.product_planning_level to derive product_id (see README).
     "lost_sales_source": {
         "week_col": "week_start_date",
         "product_col": "product_id",
@@ -270,7 +282,7 @@ CONFIG: Dict[str, Any] = {
         "lost_sales_col": "lost_sales",
         "in_stock_col": "in_stock",
         "total_days_col": "details.total_days",  # supports a dotted nested-struct path
-        "product_agg_level_col": None,  # set if source has product_agg_level, not product_id (see README)
+        "product_agg_level_col": None,
     },
     # ---------------------------------------------------------------------------
     # INSTOCK SOURCE — optional override to read in-stock days from a DIFFERENT table
@@ -294,6 +306,8 @@ CONFIG: Dict[str, Any] = {
     #       {"week_col": "LY_week_start_date", "in_stock_col": "LY_total_days_instock", "total_days_col": "LY_total_day"},
     #       {"week_col": "LLY_week_start_date", "in_stock_col": "LLY_total_days_instock", "total_days_col": "LLY_total_day"},
     #   ],
+    # product_col / product_agg_level_col: same "configure exactly one" rule as
+    # lost_sales_source above -- product_col (when set and present on the source) always wins.
     "instock_source": {
         "enabled": False,
         "path_segments": None,  # required when enabled=True, e.g. ["some", "instock", "table"]
@@ -478,10 +492,6 @@ CONFIG: Dict[str, Any] = {
             "distinct_pair_count": "Distinct pairs",
         },
         "pp_change_metrics": ["in_stock_rate", "weighted_instock_rate", "lost_sales_pct"],
-    },
-    "service_metrics": {
-        # E-com / non-service stores excluded from instock, WOS, lost sales %, mean stock.
-        "excluded_store_ids": [829, 639, 917],
     },
     # =============================================================================
     # OUTPUT & REPORTING
@@ -933,7 +943,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "RUN_MODE": run_mode,
         "BUCKET": bucket,
         **window,
-        "EXCLUDED_STORE_IDS_FOR_SERVICE_METRICS": cfg["service_metrics"]["excluded_store_ids"],
         "USE_FISCAL_CALENDAR": cfg["fiscal_calendar"]["use_fiscal_calendar"],
         "FISCAL_QUARTER_COL": cfg["fiscal_calendar"].get("column_map", {}).get("quarter_col"),
         "FISCAL_MONTH_COL": cfg["fiscal_calendar"].get("column_map", {}).get("month_col"),

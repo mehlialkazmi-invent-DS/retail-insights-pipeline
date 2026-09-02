@@ -19,11 +19,6 @@ from kpi_pipeline.inputs import (
 )
 
 
-def is_service_store(ctx: KPIContext) -> F.Column:
-    """True for stores included in service metrics (excludes e-com IDs from config)."""
-    return ~F.col("store_id").isin(ctx.settings["EXCLUDED_STORE_IDS_FOR_SERVICE_METRICS"])
-
-
 def _enrich_lost_sales_with_time_grain(ctx: KPIContext, lost_sales_pair: DataFrame) -> DataFrame:
     fw_cols = ["week_start_date", "week_end_date", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Month"]
     if ctx.settings["USE_FISCAL_CALENDAR"]:
@@ -291,15 +286,8 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
         if ctx.settings.get("INSTOCK_SOURCE_ENABLED", False)
         else F.coalesce(F.col("total_days"), F.col("fiscal_week_days"))
     )
-    # instock/lost-sales exclude EXCLUDED_STORE_IDS_FOR_SERVICE_METRICS here, same as
-    # WOS/turnover/mean_stock (metrics.py, via is_service_store()/daily_service). Deliberate:
-    # these are e-com fulfillment "stores" with no real shelf inventory -- "in stock" and
-    # "lost sales" (which presuppose physical stock and a stockout-driven demand gap) aren't
-    # meaningful concepts for them, so they're excluded from all four, even though this means
-    # diverging further from kpi-skill-toolkit (which excludes them from nothing).
     inst_data = (
-        lost_sales_weekly.filter(is_service_store(ctx))
-        .select(
+        lost_sales_weekly.select(
             "product_id",
             "store_id",
             "Year",
@@ -319,13 +307,11 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
         F.sum("sales_quantity").alias("weekly_sales")
     )
     weekly_sales_for_lost = (
-        weekly_pair.filter(is_service_store(ctx))
-        .join(scope_pair_weeks, on=["product_id", "store_id", "Year", "Week"], how="left_semi")
+        weekly_pair.join(scope_pair_weeks, on=["product_id", "store_id", "Year", "Week"], how="left_semi")
         .select("product_id", "store_id", "Year", "Week", F.col("weekly_sales").alias("sales_quantity_weekly"))
     )
     lost_base = (
-        lost_sales_weekly.filter(is_service_store(ctx))
-        .select("product_id", "store_id", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Month", "lost_sales")
+        lost_sales_weekly.select("product_id", "store_id", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Month", "lost_sales")
         .join(weekly_sales_for_lost, on=["product_id", "store_id", "Year", "Week"], how="left")
         .withColumn("sales_quantity_weekly", F.coalesce(F.col("sales_quantity_weekly"), F.lit(0.0)))
         .withColumn(
