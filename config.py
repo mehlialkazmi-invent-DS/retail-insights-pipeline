@@ -139,11 +139,11 @@ CONFIG: Dict[str, Any] = {
             "month_name_col": "month_name",
         },
         # Column-name map for the RAW noob/daily-data table -- only consulted on the CIVIL path
-        # (use_fiscal_calendar=False, not tbretail's setting above). "year" is unused dead config:
-        # Year always comes from `date`, never a raw 'year' column (ISO week-year risk).
+        # (use_fiscal_calendar=False, not tbretail's setting above). No "year" key: Year always
+        # comes from `date` (F.year(date)), never a raw source year column -- that column can
+        # carry the ISO week-year (late-December weeks labelled as the next year). See fiscal.py.
         "daily_time_columns": {
             "date": "date",
-            "year": "year",
             "week": "week",
         },
     },

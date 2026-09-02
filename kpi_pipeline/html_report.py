@@ -111,51 +111,51 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
     "mean_stock": {
         "label": "Daily Stock Avg (units)",
         "definition": (
-            "Average of daily total inventory units across service stores. "
+            "Average of daily total inventory units across all scoped stores. "
             "Computed as the mean of each day's summed inventory — not the average of weekly averages."
         ),
-        "store_scope": "Service stores only (e-com excluded)",
+        "store_scope": "All scoped stores",
         "formula": "AVG over days of Σ_store(daily_inventory_units)",
     },
     "mean_stock_retail": {
         "label": "Daily Stock Avg Retail ($)",
-        "definition": "Average of daily total inventory at retail price across service stores.",
-        "store_scope": "Service stores only (e-com excluded)",
+        "definition": "Average of daily total inventory at retail price across all scoped stores.",
+        "store_scope": "All scoped stores",
         "formula": "AVG over days of Σ_store(daily_inventory × retail_price)",
     },
     "mean_stock_cost": {
         "label": "Daily Stock Avg Cost ($)",
-        "definition": "Average of daily total inventory at cost across service stores.",
-        "store_scope": "Service stores only (e-com excluded)",
+        "definition": "Average of daily total inventory at cost across all scoped stores.",
+        "store_scope": "All scoped stores",
         "formula": "AVG over days of Σ_store(daily_inventory × cost)",
     },
     "WOS": {
         "label": "WOS (units)",
         "definition": (
-            "Weeks of Supply based on units. Daily inventory and sales are summed across service "
-            "stores to product×date, then weekly WOS = avg daily inventory ÷ weekly sales at "
+            "Weeks of Supply based on units. Daily inventory and sales are summed across all "
+            "scoped stores to product×date, then weekly WOS = avg daily inventory ÷ weekly sales at "
             "product×fiscal week (not product×store×week). Sales-weighted rollup to the period — "
             "never computed directly at the period level."
         ),
-        "store_scope": "Service stores only (e-com excluded)",
+        "store_scope": "All scoped stores",
         "formula": "Σ(weekly_wos × weekly_sales) ÷ Σ(weekly_sales)",
     },
     "wos_revenue": {
         "label": "WOS Revenue",
         "definition": (
-            "Weeks of Supply based on retail revenue. Service stores aggregated to product×date, "
+            "Weeks of Supply based on retail revenue. All scoped stores aggregated to product×date, "
             "then weekly WOS at product×fiscal week; same sales-weighted period rollup as WOS."
         ),
-        "store_scope": "Service stores only (e-com excluded)",
+        "store_scope": "All scoped stores",
         "formula": "Σ(weekly_wos_revenue × weekly_sales_revenue) ÷ Σ(weekly_sales_revenue)",
     },
     "wos_cost": {
         "label": "WOS Cost",
         "definition": (
-            "Weeks of Supply based on cost. Service stores aggregated to product×date, "
+            "Weeks of Supply based on cost. All scoped stores aggregated to product×date, "
             "then weekly WOS at product×fiscal week; same sales-weighted period rollup as WOS."
         ),
-        "store_scope": "Service stores only (e-com excluded)",
+        "store_scope": "All scoped stores",
         "formula": "Σ(weekly_wos_cost × weekly_sales_cost) ÷ Σ(weekly_sales_cost)",
     },
     "inventory_turnover_rate": {
@@ -165,7 +165,7 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
             "labelled per-tab (Annual / YTD / Quarterly / Monthly / Weekly Inventory Turnover Rate). "
             "Higher values indicate faster sell-through relative to the stock held during that period."
         ),
-        "store_scope": "Service stores only (e-com excluded)",
+        "store_scope": "All scoped stores",
         "formula": "Sales Units ÷ Mean Stock (for the same period grain)",
     },
     "in_stock_rate": {
@@ -175,7 +175,7 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
             "derived from the top-down lost-sales model output — not from daily inventory directly. "
             "100% = always in stock during tracked days."
         ),
-        "store_scope": "Service stores only (e-com excluded)",
+        "store_scope": "All scoped stores",
         "formula": "Σ(in_stock_days) ÷ Σ(available_days)",
     },
     "weighted_instock_rate": {
@@ -185,7 +185,7 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
             "in_stock_days ÷ available_days. Period rollup weights each week by its sales units — "
             "high-volume products and weeks have proportionally more impact than unweighted in-stock rate."
         ),
-        "store_scope": "Service stores only (e-com excluded)",
+        "store_scope": "All scoped stores",
         "formula": "Σ(weekly_instock_rate × weekly_sales_units) ÷ Σ(weekly_sales_units)",
     },
     "lost_sales_pct": {
@@ -195,7 +195,7 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
             "The denominator uses corrected demand (actual sales + imputed lost demand) "
             "so the rate is not understated when in-stock days are low."
         ),
-        "store_scope": "Service stores only (e-com excluded)",
+        "store_scope": "All scoped stores",
         "formula": "100 × Σ(lost_sales) ÷ Σ(floor(weekly_sales + lost_sales))",
     },
 }
