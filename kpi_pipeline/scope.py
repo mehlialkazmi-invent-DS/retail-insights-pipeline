@@ -427,8 +427,8 @@ def apply_scope_adjustments(ctx: KPIContext, fund_paste: Optional[Callable[..., 
 
     # Compute the distinct active pairs once; reused by any single-key adjustment expansions.
     # read_daily_for_scope includes ALL stores, so join_keys=["product_id"] additions expand to
-    # every store selling the product (e-com included). Those e-com pairs contribute to total
-    # sales/revenue; the e-com exclusion is applied later, only for service metrics.
+    # every store selling the product -- every metric uses all scoped stores (see config.py),
+    # so there's no separate downstream exclusion for these pairs to fall under.
     needs_pairs = any(
         ("store_id" in ctx.scope_keys and "store_id" not in adj["join_keys"] and "product_id" in adj["join_keys"])
         or ("product_id" in ctx.scope_keys and "product_id" not in adj["join_keys"] and "store_id" in adj["join_keys"])

@@ -133,19 +133,27 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
         fast_raw = read_lost_sales_source(ctx.spark, s, s["PATH_LOST_SALES"], quiet=True)
         slow_raw = read_lost_sales_source(ctx.spark, s, s["PATH_LOST_SALES_SLOW"], quiet=True)
         native_week = not s["USE_FISCAL_CALENDAR"] and "week" in fast_raw.columns
+        # Both sides use the SAME LOST_SALES_COLUMN_MAP (store_col included), so fast/slow
+        # store_id presence is expected to agree -- only fast_raw is checked, mirroring
+        # native_week's own fast-only check just above.
+        has_store = "store_id" in fast_raw.columns
+        join_keys = ["product_id", "store_id", "week_start_date"] if has_store else ["product_id", "week_start_date"]
 
         fast_cols = [
-            "product_id", "store_id", "week_start_date",
+            "product_id", "week_start_date",
             F.col("lost_sales").alias("lost_sales_fast"),
             F.col("in_stock_days").alias("in_stock_days_fast"),
             F.col("total_days").alias("total_days_fast"),
         ]
         slow_cols = [
-            "product_id", "store_id", "week_start_date",
+            "product_id", "week_start_date",
             F.col("lost_sales").alias("lost_sales_slow"),
             F.col("in_stock_days").alias("in_stock_days_slow"),
             F.col("total_days").alias("total_days_slow"),
         ]
+        if has_store:
+            fast_cols.insert(1, "store_id")
+            slow_cols.insert(1, "store_id")
         if native_week:
             fast_cols.append(F.col("_ls_week").alias("_ls_week_fast"))
             slow_cols.append(F.col("_ls_week").alias("_ls_week_slow"))
@@ -154,7 +162,7 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
 
         cluster = read_speed_cluster_source(ctx.spark, s, quiet=True)
         merged = (
-            fast.join(slow, on=["product_id", "store_id", "week_start_date"], how="fullouter")
+            fast.join(slow, on=join_keys, how="fullouter")
             .join(cluster, on="product_id", how="left")
         )
         # ONE shared boolean drives ALL field selections -> fields never mix across models.
@@ -180,7 +188,9 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
         )
         if native_week:
             merged = merged.withColumn("_ls_week", F.coalesce(F.col("_ls_week_fast"), F.col("_ls_week_slow")))
-        select_cols = ["product_id", "store_id", "week_start_date", "lost_sales", "in_stock_days", "total_days"]
+        select_cols = ["product_id", "week_start_date", "lost_sales", "in_stock_days", "total_days"]
+        if has_store:
+            select_cols.insert(1, "store_id")
         if native_week:
             select_cols.append("_ls_week")
         deduped = merged.select(*select_cols)
@@ -251,9 +261,23 @@ def build_scoped_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs_in: D
 
 
 def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, DataFrame]:
-    """Build scoped_daily, inst_data, lost_base, and scope helper frames for one scope variant."""
-    has_store = "store_id" in scope_in.columns
-    scope_keys = ["product_id", "store_id", "Year", "Week"] if has_store else ["product_id", "Year", "Week"]
+    """Build scoped_daily, inst_data, lost_base, and scope helper frames for one scope variant.
+
+    has_store is read from ctx.scope_keys (set once in scope.build_defined_scope from
+    defined_scope.grain), not re-derived from scope_in.columns -- every scope variant this is
+    called with (hybrid_scope_keys, defined_scope_keys, score_only_scope_keys) is already built
+    to exactly ctx.scope_keys's columns, so ctx.scope_keys is the authoritative source. Failing
+    loudly here on a genuine mismatch is far more useful than silently falling back to the
+    store-less/product-week path and surfacing a confusing UNRESOLVED_COLUMN several calls later.
+    """
+    scope_keys = ctx.scope_keys
+    has_store = "store_id" in scope_keys
+    if has_store and "store_id" not in scope_in.columns:
+        raise ValueError(
+            "ctx.scope_keys expects store_id (defined_scope.grain is product_store or "
+            "product_store_week) but the scope frame passed to build_pipeline_frames doesn't "
+            f"have it -- columns: {sorted(scope_in.columns)}"
+        )
     scope_core = scope_in.select(*scope_keys).distinct().cache()
 
     lost_sales_raw = read_lost_sales_weekly(ctx)
