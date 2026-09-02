@@ -67,20 +67,29 @@
 #      Then flip dimension_sources (the "ngf_comp_split" entry).enabled = True.
 #      The entry's "fillna": {"is_comp": "yes"} imputes non-NGF products to 'yes' —
 #      without it they'd come back NULL, since this CSV only covers NGF items.
+#      NOTE: the actually-configured dimension_sources[1].path below currently points at
+#      non_comp_ids_20260817.csv (the step-2 NON-COMP file), not ngf_product_ids.csv as
+#      exported above — unclear whether that's deliberate reuse or the CSV in step 3 was
+#      never actually generated/wired in. Verify before treating either as correct.
 #
 #   4. Update reporting_window.as_of_date before each run.
 #
-# There is no dedicated "exclude these stores" config key. If a store should never contribute
-# to sales/WOS/instock/etc at all (e.g. an e-com fulfillment "store" with no real shelf
-# inventory), add a store_id exclusion to input_filters.daily_data -- it applies everywhere
-# daily_data is read (scope building included), not just to a subset of metrics. If your
-# lost-sales/instock source tables already exclude such stores upstream (common -- see
-# lost_sales_source/instock_source), nothing further is needed for those two metrics.
-#
-# WHAT THIS CONFIG PRODUCES:
-#   Scope:       defined + hybrid score backfill, JAB additions, NON-COMP removals
-#   Lost sales:  ensemble of fast (120-day) + slow (365-day) noob models, blended by
-#                product sales-speed cluster (see lost_sales_ensemble below)
+# WHAT THIS CONFIG PRODUCES (verified against the actual settings below):
+#   Scope:       defined scope only (use_hybrid_scope=False, no backfill); JAB additions
+#                (additions[0], on); an UNDOCUMENTED second addition unioning NON-COMP
+#                products into scope (additions[1], on — see CAUTION comment at that
+#                block, unconfirmed with a human); NON-COMP removal itself is OFF
+#                (removals[0].enabled=False), despite scope_adjustments' own comment
+#                saying NFG/NON-COMP products "are excluded from KPI scope".
+#   Lost sales:  read directly from future_visibility's report_dfu (its own pre-blended
+#                fast/slow ensemble output) via lost_sales_source — lost_sales_ensemble
+#                below is OFF; this repo no longer runs its own fast/slow blend.
+#   Instock:     also from report_dfu, via instock_source (ON) rather than lost_sales_source's
+#                own in_stock/total_days columns — instock_source's fallback_sources (LY_/LLY_)
+#                let instock reach further back than lost_sales_source's plain TY_ column would.
+#   Service metrics (WOS, turnover, mean_stock, instock, lost sales %): no dedicated
+#                store-exclusion config key — every metric uses all scoped stores. Add a
+#                store_id exclusion to input_filters.daily_data if one is ever needed.
 #   Dimensions:  is_nvrout (NVROUT vs COMP), brand, SMW (KNG vs SMW)
 #   Comparisons: YoY / YTD
 #   Comparable:  like-for-like YTD over a per-link (consecutive-year-pair) pair universe
@@ -200,6 +209,17 @@ CONFIG: Dict[str, Any] = {
                 "year_col": None,
                 "week_col": None,
             },
+            # CAUTION -- UNCONFIRMED, needs a decision before this repo is shared further:
+            # this entry points at the SAME CSV as the "REMOVALS: NON-COMP products" block
+            # below, which says NFG/NON-COMP products "are excluded from KPI scope" -- but
+            # placing it here, as an ADDITION with store_col=None, does the opposite: it
+            # unions every (product, store, week) selling these products into scope,
+            # unconditionally, regardless of removals[0] below (currently disabled). It is
+            # not mentioned in the SETUP CHECKLIST above, unlike every other adjustment in
+            # this file. This looks like an accidental copy of removals[0] into additions
+            # with the label swapped, but that has NOT been confirmed with a human -- do
+            # not disable or "fix" this without checking, since it currently affects which
+            # products count toward live production KPI numbers.
             {
                 "enabled": True,  # flip to True after creating the CSV
                 "label": "NGF products",
@@ -250,7 +270,7 @@ CONFIG: Dict[str, Any] = {
         "fiscal": ["one_time_uploads", "fiscal_cal"],
         "daily_data": ["noob", "daily-data"],
         "products": ["master-data", "products"],
-        "lost_sales": ["noob", "lost-sales", "model_id=top_down_excluding_ecom"],
+        "lost_sales": ["reporting", "future_visibility", "reporting_inv_fc_dfu", "report_dfu"],
         "defined_scope": ["analysis", "instock_rate", "instock_rate_scope"],
         # product_agg_level -> product_id map for lost_sales_source/instock_source's
         # product_agg_level_col (see README).
@@ -268,67 +288,75 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     # LOST-SALES SOURCE — column mapping for the raw lost-sales table
     # ---------------------------------------------------------------------------
-    # Downstream code always sees canonical column names regardless of this mapping (see
-    # README). TBretail's lost-sales table already matches these defaults.
-    # product_col / product_agg_level_col: configure exactly ONE, never both. If the source has
-    # a native product_id-level column, set product_col to it (product_col always takes
-    # precedence when present -- see README). If it doesn't (keyed by planning/DFU level
-    # instead), set product_col to None and set product_agg_level_col -- the pipeline joins it
-    # to path_segments.product_planning_level to derive product_id (see README).
+    # path_segments.lost_sales points at report_dfu (future_visibility's own pre-blended
+    # fast/slow ensemble output), not the raw noob/lost-sales model tables -- replaces
+    # lost_sales_ensemble below (now off) so lost_sales comes from this ONE source instead
+    # of retail-insights-pipeline running its own separate blend.
+    #
+    # in_stock_col/total_days_col below are UNUSED while instock_source.enabled=True (see
+    # that block) -- _aggregate_lost_sales_pairweek skips them in that mode. Left populated
+    # anyway so this block is self-sufficient if instock_source ever gets disabled again.
+    #
+    # product_col="product_id": report_dfu has a genuine, native product_id column (confirmed
+    # directly against the live table) -- no DFU/planning-level join needed here at all, so
+    # product_agg_level_col stays None. If a future source ever DOES only carry a DFU/
+    # planning-level key with a real one-to-many relationship to product_id, set
+    # product_col=None and set product_agg_level_col instead -- configure exactly one of the
+    # two, never both (product_col always wins when set and present on the source). See README
+    # and _map_product_agg_level_to_product_id's docstring (kpi_pipeline/inputs.py), which fails
+    # loudly if neither is usable, or if product_agg_level_col is configured but not present.
+    #
+    # CAUTION -- store_col=None: lost_sales is an absolute count; report_dfu has no store_id,
+    # so this pair-week's value gets broadcast across every scoped store of the product and
+    # OVER-COUNTS if later summed across stores (same risk documented on instock_source below,
+    # but that one is a ratio -- safe there, NOT safe here).
     "lost_sales_source": {
-        "week_col": "week_start_date",
+        "week_col": "TY_week_start_date",
         "product_col": "product_id",
-        "store_col": "store_id",
+        "store_col": None,  # see CAUTION above
         "lost_sales_col": "lost_sales",
-        "in_stock_col": "in_stock",
-        "total_days_col": "details.total_days",  # supports a dotted nested-struct path
-        "product_agg_level_col": None,
+        "in_stock_col": "TY_total_days_instock",  # actual, not sim_instock_days
+        "total_days_col": "TY_total_day",         # actual, not sim_total_days
+        "product_agg_level_col": None,  # not needed -- report_dfu has a native product_id column
     },
     # ---------------------------------------------------------------------------
     # INSTOCK SOURCE — optional override to read in-stock days from a DIFFERENT table
     # ---------------------------------------------------------------------------
-    # OFF for tbretail: in-stock/total-days come from lost_sales_source above, as always.
-    # Mutually exclusive with lost_sales_ensemble below (enabled for tbretail) — leave off.
+    # ON for tbretail: reads report_dfu directly (same table as lost_sales_source), but
+    # unlike that block, uses fallback_sources so in-stock reaches back further than
+    # TY_ alone would -- LY_/LLY_ backfill weeks that have rolled off TY_'s own trailing
+    # window (see README's fallback_sources docs). lost_sales itself stays on
+    # lost_sales_source above (its own TY_ column is trusted across the full date range,
+    # no LY_/LLY_ backfill needed there -- see that block's own comments). Mutually
+    # exclusive with lost_sales_ensemble below (off, no conflict).
     #
-    # Verified alternative (report_dfu; store-less, safe here since in-stock is a ratio — see README):
-    #   "enabled": True,
-    #   "path_segments": ["reporting", "future_visibility", "reporting_inv_fc_dfu", "report_dfu"],
-    #   "week_col": "TY_week_start_date",
-    #   "in_stock_col": "TY_total_days_instock",  # actual, not sim_instock_days
-    #   "total_days_col": "TY_total_day",         # actual, not sim_total_days
-    #   "product_agg_level_col": "product_agg_level",
-    #   "store_col": None,
-    #   # TY_ only covers a rolling trailing window (report_dfu's own build horizon) -- LY_/LLY_
-    #   # carry the identical formula for the calendar week exactly 52/104 weeks earlier, so they
-    #   # backfill whatever weeks have rolled off TY_'s window (see README). Each fallback entry
-    #   # inherits product_col/store_col/product_agg_level_col from above unless overridden.
-    #   "fallback_sources": [
-    #       {"week_col": "LY_week_start_date", "in_stock_col": "LY_total_days_instock", "total_days_col": "LY_total_day"},
-    #       {"week_col": "LLY_week_start_date", "in_stock_col": "LLY_total_days_instock", "total_days_col": "LLY_total_day"},
-    #   ],
-    # product_col / product_agg_level_col: same "configure exactly one" rule as
-    # lost_sales_source above -- product_col (when set and present on the source) always wins.
+    # product_col="product_id": report_dfu has a genuine, native product_id column (confirmed
+    # directly against the live table) -- no DFU/planning-level join needed, product_agg_level_col
+    # stays None. Same fact as lost_sales_source above (same table); same "configure exactly
+    # one of product_col / product_agg_level_col" rule applies here too.
     "instock_source": {
-        "enabled": False,
-        "path_segments": None,  # required when enabled=True, e.g. ["some", "instock", "table"]
-        "week_col": "week_start_date",
+        "enabled": True,
+        "path_segments": ["reporting", "future_visibility", "reporting_inv_fc_dfu", "report_dfu"],
+        "week_col": "TY_week_start_date",
         "product_col": "product_id",
-        "store_col": "store_id",
-        "in_stock_col": "in_stock",
-        "total_days_col": "total_days",
-        "product_agg_level_col": None,
-        "fallback_sources": [],  # optional additional column-sets from the same table (see above)
+        "store_col": None,
+        "in_stock_col": "TY_total_days_instock",  # actual, not sim_instock_days
+        "total_days_col": "TY_total_day",         # actual, not sim_total_days
+        "product_agg_level_col": None,  # not needed -- report_dfu has a native product_id column
+        "fallback_sources": [
+            {"week_col": "LY_week_start_date", "in_stock_col": "LY_total_days_instock", "total_days_col": "LY_total_day"},
+            {"week_col": "LLY_week_start_date", "in_stock_col": "LLY_total_days_instock", "total_days_col": "LLY_total_day"},
+        ],
     },
     # ---------------------------------------------------------------------------
     # LOST-SALES ENSEMBLE — blend two lost-sales models by product sales speed
     # ---------------------------------------------------------------------------
-    # ENABLED for TBretail: fast movers (speed cluster in fast_mover_clusters) take
-    # the 120-day model at path_segments.lost_sales; everyone else — slower clusters
-    # AND products with no/NULL cluster — takes the 365-day model below. All three
-    # aggregate fields (lost_sales, in_stock, details.total_days) for a given
-    # product/store/week come from ONE model (never mixed).
+    # OFF for TBretail: lost_sales_source above now reads report_dfu's already-blended
+    # output directly, so this repo no longer needs to run its own fast/slow blend. Left
+    # here, disabled, as the fallback path if report_dfu ever stops being usable as a source
+    # (e.g. scope/grain concerns -- see lost_sales_source's CAUTION comment above).
     "lost_sales_ensemble": {
-        "enabled": True,
+        "enabled": False,
         "slow_path_segments": ["noob", "lost-sales", "model_id=top_down_excluding_ecom_365days"],
         # Product sales-speed source. TBretail's speed_cluster_path_segments below is the
         # platform's long-format attributes table (one row per product_id x attribute_name) —
@@ -499,7 +527,7 @@ CONFIG: Dict[str, Any] = {
     "output": {
         "save_outputs": True,
         "path_segments": ["analysis", "kpis_tbretail", "outputs"],
-        "run_date": None,
+        "run_date": '2026-09-01',
         "save_mode": "initial",
         "allow_overwrite_existing": True,
         "recompute_comparisons_from_history": True,
