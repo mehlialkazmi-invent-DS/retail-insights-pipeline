@@ -57,7 +57,7 @@ class SavePlan:
 
     def print_summary(self) -> None:
         print(f"Save mode: {self.save_mode} | root: {self.output_root}")
-        if getattr(self, "run_date", None):
+        if self.run_date:
             print(f"Run date partition: run_date={self.run_date}")
         print(f"Allow overwrite existing: {self.allow_overwrite_existing}")
         for table in self.tables:

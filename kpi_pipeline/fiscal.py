@@ -19,7 +19,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import broadcast
 
 from kpi_pipeline.context import KPIContext
-from kpi_pipeline.inputs import read_csv_source
+from kpi_pipeline.inputs import get_daily_data_raw, read_csv_source
 
 
 def _build_fiscal_week_frame(
@@ -28,12 +28,15 @@ def _build_fiscal_week_frame(
     month_col: Optional[str] = None,
     month_name_col: Optional[str] = None,
 ) -> DataFrame:
-    """Aggregate day-level fiscal_cal rows to one row per (Year, Week).
+    """Aggregate day-level Year/Week rows to one row per (Year, Week).
 
-    Each of quarter_col/month_col/month_name_col is used when it names a column actually present
-    on daily_grain; otherwise that fiscal attribute is derived instead. This lets every client's
-    fiscal_cal upload -- with or without any of these columns -- resolve to the same output shape
-    (Fiscal_Quarter, Fiscal_Month[, Fiscal_Month_Name]). See config.py's fiscal_calendar.column_map.
+    Shared by both time-grain paths: the fiscal_cal upload (build_fiscal_cal_and_week_from_upload)
+    and the civil-calendar daily-data fallback (build_time_grain_from_daily_data, which never has
+    quarter_col/month_col/month_name_col to pass). Each of quarter_col/month_col/month_name_col is
+    used when it names a column actually present on daily_grain; otherwise that fiscal attribute is
+    derived instead. This lets every client's fiscal_cal upload -- with or without any of these
+    columns -- and the no-upload fallback both resolve to the same output shape (Fiscal_Quarter,
+    Fiscal_Month[, Fiscal_Month_Name]). See config.py's fiscal_calendar.column_map.
 
     Derivation fallbacks:
       * Fiscal_Month: F.month(week_start_date) -- the real calendar month. This IS correct as-is
@@ -150,7 +153,6 @@ def build_fiscal_cal_and_week_from_upload(
 
 def build_time_grain_from_daily_data(
     ctx: KPIContext,
-    path: str,
     time_cols: Dict[str, str],
     report_start_date: datetime.date,
     report_end_date: datetime.date,
@@ -159,9 +161,14 @@ def build_time_grain_from_daily_data(
     # Year is the CALENDAR year of `date`, not the source 'year' column: that column can
     # carry the ISO week-year, which labels late-December weeks as the following year
     # (e.g. Dec 2025 -> 2026) and mismatches the Quarter/Month derived from `date`.
+    #
+    # Reads via get_daily_data_raw -- the same cached, config-filtered daily_data read every
+    # other consumer uses -- rather than loading PATH_DAILY_DATA directly, so
+    # input_filters.daily_data (e.g. "usable = 1") applies here too. This is the function that
+    # derives Year/Week/Quarter/Month on the civil-calendar path (use_fiscal_calendar=False), so
+    # an unfiltered read here would leak excluded rows into every downstream period label.
     daily_time = (
-        ctx.spark.read.format("delta")
-        .load(path)
+        get_daily_data_raw(ctx)
         .select(date_col, week_col)
         .withColumn(date_col, F.to_date(F.col(date_col)))
         .filter(F.col(date_col).between(F.lit(report_start_date), F.lit(report_end_date)))
@@ -188,7 +195,7 @@ def build_fiscal_week_only(ctx: KPIContext) -> None:
         grain_label = "fiscal_cal upload"
     else:
         fiscal_cal, fiscal_week = build_time_grain_from_daily_data(
-            ctx, s["PATH_DAILY_DATA"], s["DAILY_TIME_COLUMNS"], start, end
+            ctx, s["DAILY_TIME_COLUMNS"], start, end
         )
         grain_label = "daily-data year/week"
 
@@ -341,7 +348,7 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
         grain_label = "fiscal_cal upload"
     else:
         fiscal_cal, fiscal_week = build_time_grain_from_daily_data(
-            ctx, s["PATH_DAILY_DATA"], s["DAILY_TIME_COLUMNS"], start, end
+            ctx, s["DAILY_TIME_COLUMNS"], start, end
         )
         grain_label = "daily-data year/week"
 

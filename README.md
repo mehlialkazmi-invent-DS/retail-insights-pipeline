@@ -101,7 +101,7 @@ Final scope = `defined_scope_keys` as built at the configured grain. For `produc
 Hybrid = defined scope (at the configured grain) **+ score backfill on the window weeks the defined scope does not cover**:
 
 1. **Covered weeks** — fiscal weeks in the window present in `defined_scope_keys`.
-2. **Missing weeks** — fiscal weeks in the window with no rows in `defined_scope_keys`. These are backfilled from **score scope** (`scope_origin=score`): computed once over the **full** window, each `(product_id, store_id)` keeps the weeks whose weekly sales and **last available in-week inventory** clear a per-pair percentile threshold (**all stores included** — scope membership is store-agnostic; e-com is excluded later only for service metrics), restricted to the missing weeks.
+2. **Missing weeks** — fiscal weeks in the window with no rows in `defined_scope_keys`. These are backfilled from **score scope** (`scope_origin=score`): computed once over the **full** window, each `(product_id, store_id)` keeps the weeks whose weekly sales and **last available in-week inventory** clear a per-pair percentile threshold (**all stores included** — scope membership is store-agnostic), restricted to the missing weeks.
 3. **Hybrid union** — defined rows (`scope_origin=defined`) ∪ missing-week backfill rows (`scope_origin=score`).
 
 For the week-agnostic grains (`product`, `product_store`) the defined scope already covers **every** window week, so there are no missing weeks and the backfill is a **no-op**. Hybrid backfill is only meaningful for `product_store_week`, whose covered weeks are exactly those present in the scope table.
@@ -308,7 +308,7 @@ Each consecutive-year link gets its **own** pair universe, computed from just th
 
 A pair present in 2025 and 2026 but *not* 2024 still counts for the 2025-vs-2026 link, even though it would fail a "present in every year" test. Because each link's restriction is independent, the **same year's metric value can differ depending on which link it's paired with** — 2025's YTD revenue as the "current" value in the 2024-vs-2025 link (restricted to 2024∩2025 pairs) is generally not the same number as 2025's YTD revenue as the "prior" value in the 2025-vs-2026 link (restricted to 2025∩2026 pairs). This is expected, not a bug.
 
-All metric frames (sales/inventory, service metrics, lost sales) are restricted to a link's pair set before metrics are computed, for **Overall and every slice**. Because each slice dimension is a product attribute, the single overall intersection grouped by slice equals a per-slice intersection.
+All metric frames (sales/inventory, in-stock, lost sales) are restricted to a link's pair set before metrics are computed, for **Overall and every slice**. Because each slice dimension is a product attribute, the single overall intersection grouped by slice equals a per-slice intersection.
 
 **Outputs**
 - `comparable_kpi_long` — per-link YTD metrics, tagged with `comparison_type="ytd"`, `comparable_pair_count` (that link's universe size), and `link_prior_year`/`link_current_year` (which link a row belongs to — needed because, as above, the same year can appear more than once with different values).
@@ -367,9 +367,9 @@ These reflect what's actually in the source table (before the report-window filt
 Controlled by `fiscal_calendar.use_fiscal_calendar`:
 
 - **`True` (default)** — Year/Week/Quarter/Month come from the uploaded `one_time_uploads/fiscal_cal` table.
-- **`False`** — the time grain is derived from `noob/daily-data` (`fiscal_calendar.daily_time_columns`). **Year is the CALENDAR year of `date`** (`F.year(date)`), and **Week is the native fiscal week column** (`daily_time_columns.week`). Quarter/Month are also derived from `date`.
+- **`False`** — the time grain is derived from `noob/daily-data` (`fiscal_calendar.daily_time_columns`, which has only `date`/`week` keys), read through the same config-filtered `daily_data` read every other consumer uses (so `input_filters.daily_data` applies here too). **Year is the CALENDAR year of `date`** (`F.year(date)`), and **Week is the native fiscal week column** (`daily_time_columns.week`). Quarter/Month are also derived from `date`.
 
-  The source `year` column (`daily_time_columns.year`) is **not** used for the reporting year — it can carry the **ISO week-year**, which labels late-December weeks as the *following* year (e.g. a week starting Dec 29, 2025 shown as `year=2026`). Using it directly mislabelled December as `Q4 2026` instead of `Q4 2025`. Deriving Year from `date` fixes this.
+  Year is deliberately never read from a raw source `year` column — it can carry the **ISO week-year**, which labels late-December weeks as the *following* year (e.g. a week starting Dec 29, 2025 shown as `year=2026`). Using it directly would mislabel December as `Q4 2026` instead of `Q4 2025`. Deriving Year from `date` avoids this.
 
   **Caveat**: a native fiscal week that straddles Jan 1 is split into two partial weeks in the Weekly view — one dated in the old calendar year, one in the new — instead of being a single week. Quarter, Month, and annual rollups are unaffected and remain correct.
 
@@ -393,12 +393,12 @@ Set `output.save_outputs: True` in `config.py` (default is `False`). The noteboo
 
 | Table | Contents | Merge keys (incremental mode) |
 | ----- | -------- | ----------------------------- |
-| `kpi_long` | All metrics × periods × slices (annual / ytd / quarter / monthly / weekly) | `period_type`, `period`, `dimension`, `dimension_value` |
-| `comparison_yoy` | YoY comparison rows | `comparison_type`, `dimension`, `dimension_value`, `metric_key`, `current_period` |
+| `kpi_long` | All metrics × periods × slices (annual / ytd / quarter / monthly / weekly) | `period_type`, `period`, `root`, `dimension`, `dimension_value` |
+| `comparison_yoy` | YoY comparison rows | `comparison_type`, `root`, `dimension`, `dimension_value`, `metric_key`, `current_period` |
 | `comparison_ytd` | YTD comparison rows (one row set per consecutive-year pair, elapsed-window sums) | same as YoY |
 | `scope_diff` | Defined vs score annual diff (when `run_scope_diff=True`) | `Year`, `metric` |
-| `comparable_kpi_long` | Comparable (like-for-like) per-link YTD metrics + `comparable_pair_count` (when `comparable_pairs.enabled=True`) | `comparison_type`, `period_type`, `period`, `dimension`, `dimension_value`, `link_prior_year`, `link_current_year` |
-| `comparable_comparison_ytd` | Comparable YTD comparison rows (when `comparable_pairs.enabled=True`) | recomputed from merged `comparable_kpi_long` — overwrites the partition |
+| `comparable_kpi_long` | Comparable (like-for-like) per-link YTD metrics + `comparable_pair_count` (when `comparable_pairs.enabled=True`) | `comparison_type`, `period_type`, `period`, `root`, `dimension`, `dimension_value`, `link_prior_year`, `link_current_year` |
+| `comparable_comparison_ytd` | Comparable YTD comparison rows (when `comparable_pairs.enabled=True`) | `comparison_type`, `root`, `dimension`, `dimension_value`, `metric_key`, `current_period` (same shape as YoY/YTD — usually recomputed from merged `comparable_kpi_long` and overwritten wholesale, see below) |
 
 There is no `comparison_qoq`/`comparison_mom`/`comparison_wow` table — see [Selecting which comparisons to run](#selecting-which-comparisons-to-run).
 
@@ -714,6 +714,7 @@ See [Output saves](#output-saves) for full mode behaviour, merge keys, workflows
     "run_date": None,
     "save_mode": "incremental",
     "allow_overwrite_existing": False,
+    "recompute_comparisons_from_history": True,
 }
 ```
 

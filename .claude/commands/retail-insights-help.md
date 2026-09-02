@@ -132,7 +132,7 @@ When a user wants to configure the toolkit, ask them (or read from their message
   }
   ```
   Each entry is independently optional/auto-detected: read when the column exists on `fiscal_cal`, derived when absent or set to `None`. This matters because **a client's fiscal month/quarter number does not necessarily match the real calendar month/quarter** — e.g. tbretail's fiscal year runs Feb–Jan, so fiscal month 07 has been observed spanning real 8/2–8/29. Feeding that number straight into a month-name lookup (`calendar.month_abbr[7]` → "Jul") would be **wrong** whenever a client's fiscal calendar is offset like this. So when `month_name_col` is absent, the Monthly tab instead derives its display label from the **majority real calendar month by day count** across each fiscal month's actual dates (`html_report._build_month_display_labels` / `fiscal._build_fiscal_week_frame`) — correct regardless of the offset, and a no-op (reduces to the trivial case) on a calendar-aligned fiscal year.
-- `False`: derived from `noob/daily-data` (`fiscal_calendar.daily_time_columns` — only `date`/`week` are actually read; `year` is dead config, kept as documented intent). **Year is the calendar year of `date`** (`F.year(date)`); **Week is the native fiscal week column**; Quarter/Month are both derived from the real calendar month the same way as the fiscal-calendar fallback above (they ARE the real calendar values here, so this is exact, not approximate). The source `daily_time_columns.year` column is **not** used for Year — it can carry the ISO week-year, mislabeling late-December weeks as the next year (e.g. Dec 2025 shown as `2026`), which previously mismatched the Quarter/Month derived from `date` (Dec 2025 → "Q4 2026"). Caveat: a fiscal week straddling Jan 1 now appears as two partial weeks (one per calendar year) in the Weekly view; quarter/month/annual rollups stay correct.
+- `False`: derived from `noob/daily-data` (`fiscal_calendar.daily_time_columns`, which has only `date`/`week` keys), read via `get_daily_data_raw` — the same cached, config-filtered read every other daily_data consumer uses, so `input_filters.daily_data` applies here too. **Year is the calendar year of `date`** (`F.year(date)`); **Week is the native fiscal week column**; Quarter/Month are both derived from the real calendar month the same way as the fiscal-calendar fallback above (they ARE the real calendar values here, so this is exact, not approximate). Year is deliberately never read from a raw source year column — it can carry the ISO week-year, mislabeling late-December weeks as the next year (e.g. Dec 2025 shown as `2026`), which previously mismatched the Quarter/Month derived from `date` (Dec 2025 → "Q4 2026"). Caveat: a fiscal week straddling Jan 1 now appears as two partial weeks (one per calendar year) in the Weekly view; quarter/month/annual rollups stay correct.
 
 ### 3.2 Scope mode
 
@@ -304,9 +304,10 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — comparabl
 | Table | Keys |
 |-------|------|
 | `kpi_long` | `period_type`, `period`, `root`, `dimension`, `dimension_value` |
-| `comparison_*` | `comparison_type`, `root`, `dimension`, `dimension_value`, `metric_key`, `current_period` |
+| `comparison_yoy` / `comparison_ytd` | `comparison_type`, `root`, `dimension`, `dimension_value`, `metric_key`, `current_period` |
 | `scope_diff` | `Year`, `metric` |
 | `comparable_kpi_long` | `comparison_type`, `period_type`, `period`, `root`, `dimension`, `dimension_value`, `link_prior_year`, `link_current_year` (the link tag is required — the same year can carry a different value per link it's paired with) |
+| `comparable_comparison_ytd` | `comparison_type`, `root`, `dimension`, `dimension_value`, `metric_key`, `current_period` (same shape as `comparison_yoy`/`comparison_ytd` — no link tag needed here: `current_period` already embeds `current_year`, and each consecutive-year link has a distinct `current_year`, so it can't collide across links) |
 
 **Save modes:**
 
@@ -563,19 +564,19 @@ Add a path to `path_segments` in config, read in `fiscal.py` or a new module, an
 | `distinct_product_count` | Distinct Products | All stores | COUNT DISTINCT product_id |
 | `distinct_store_count` | Distinct Stores | All stores | COUNT DISTINCT store_id |
 | `distinct_pair_count` | Distinct Pairs | All stores | COUNT DISTINCT (product_id, store_id) |
-| `mean_stock` | Daily Stock Avg (units) | Service only | AVG of daily summed inventory |
-| `mean_stock_retail` | Daily Stock Avg Retail | Service only | AVG of daily summed inventory at retail |
-| `mean_stock_cost` | Daily Stock Avg Cost | Service only | AVG of daily summed inventory at cost |
-| `WOS` | WOS (units) | Service only | product × fiscal week; service stores aggregated; sales-weighted weekly→period rollup |
-| `wos_revenue` | WOS Revenue | Service only | product × fiscal week; revenue-based rollup |
-| `wos_cost` | WOS Cost | Service only | product × fiscal week; cost-based rollup |
-| `inventory_turnover_rate` | Inventory Turnover Rate | Service only | Sales Units ÷ Mean Stock for the period; HTML shows tab-appropriate label |
-| `in_stock_rate` | In-Stock Rate | Service only | Σ(in_stock_days) ÷ Σ(available_days); pp-change in comparisons |
-| `weighted_instock_rate` | Weighted In-Stock Rate | Service only | Sales-weighted average of weekly in-stock rates; pp-change in comparisons |
-| `lost_sales_pct` | Lost Sales % | Service only | 100×Σ(lost_sales)÷Σ(floor(sales+lost_sales)); pp-change |
+| `mean_stock` | Daily Stock Avg (units) | All stores | AVG of daily summed inventory |
+| `mean_stock_retail` | Daily Stock Avg Retail | All stores | AVG of daily summed inventory at retail |
+| `mean_stock_cost` | Daily Stock Avg Cost | All stores | AVG of daily summed inventory at cost |
+| `WOS` | WOS (units) | All stores | product × fiscal week; all scoped stores aggregated; sales-weighted weekly→period rollup |
+| `wos_revenue` | WOS Revenue | All stores | product × fiscal week; revenue-based rollup |
+| `wos_cost` | WOS Cost | All stores | product × fiscal week; cost-based rollup |
+| `inventory_turnover_rate` | Inventory Turnover Rate | All stores | Sales Units ÷ Mean Stock for the period; HTML shows tab-appropriate label |
+| `in_stock_rate` | In-Stock Rate | All stores | Σ(in_stock_days) ÷ Σ(available_days); pp-change in comparisons |
+| `weighted_instock_rate` | Weighted In-Stock Rate | All stores | Sales-weighted average of weekly in-stock rates; pp-change in comparisons |
+| `lost_sales_pct` | Lost Sales % | All stores | 100×Σ(lost_sales)÷Σ(floor(sales+lost_sales)); pp-change |
 
 **Critical formula constraints (never break):**
-- WOS grain is **product × fiscal week**, not product×store×week. Three steps: (1) sum daily inventory/sales across service stores → product×date, (2) weekly WOS = `avg_daily_inventory / weekly_sales` at product×fiscal week, (3) sales-weighted rollup to the reporting period. Never divide period totals directly.
+- WOS grain is **product × fiscal week**, not product×store×week. Three steps: (1) sum daily inventory/sales across all scoped stores → product×date, (2) weekly WOS = `avg_daily_inventory / weekly_sales` at product×fiscal week, (3) sales-weighted rollup to the reporting period. Never divide period totals directly.
 - In-Stock Rate uses `available_days` from lost-sales output, not from daily data.
 - Lost Sales % denominator = corrected demand (sales + imputed lost), not sales alone.
 - `mean_stock` = average of daily totals (not average of weekly averages).
@@ -583,9 +584,9 @@ Add a path to `path_segments` in config, read in `fiscal.py` or a new module, an
 
 ### 6.1 WOS computation grain (important)
 
-Scope is product×store×week, but WOS in `metrics.py` is **not** computed at that grain. Implementation (`metrics.py` lines 62–105):
+Scope is product×store×week, but WOS in `metrics.py` is **not** computed at that grain. Implementation (`metrics.py`, `compute_kpis`):
 
-1. **product × date** — `groupBy(product_id, Year, Week, date)` sums inventory and sales across all service stores for each product-day.
+1. **product × date** — `groupBy(product_id, Year, Week, date)` sums inventory and sales across all scoped stores for each product-day.
 2. **product × fiscal week** — within each week, take `avg(daily_total_inventory)` and `sum(daily_sales)`; weekly WOS = `avg_daily_inventory / weekly_sales` (units, revenue, or cost variant).
 3. **period rollup** — sales-weighted average of weekly WOS values: `Σ(weekly_wos × weekly_sales) ÷ Σ(weekly_sales)`.
 
