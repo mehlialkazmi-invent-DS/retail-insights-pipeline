@@ -200,13 +200,18 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
     if s.get("INSTOCK_SOURCE_ENABLED", False):
         instock_raw = read_instock_source(ctx.spark, s, quiet=True)
         instock_agg = _aggregate_instock_pairweek(ctx, instock_raw, start, end)
-        # Join on (product_id, week_start_date) only when instock_agg has no store_id (source
-        # configured with store_col=None) -- this fans the single product-week value out to
-        # every store_id row already in `deduped`, i.e. broadcasts it across scoped stores.
-        # Safe for a ratio (see _aggregate_instock_pairweek); requires INSTOCK_SOURCE_ENABLED's
-        # in_stock/total_days to be the only fields coming from this source (already the case).
+        # store_id only goes in the join key when BOTH sides actually have it -- a real
+        # per-store match. If only one side has it (either direction: instock_agg store-less
+        # while deduped isn't, or vice versa), dropping store_id from the join key lets the
+        # regular (non-semi) join fan out/broadcast using whichever side does have it: that
+        # side's store_id survives as a plain pass-through column on the result, same
+        # mechanism as the same-direction broadcast documented in _aggregate_instock_pairweek.
+        # If NEITHER side has it, deduped simply stays store-less (handled downstream in
+        # build_pipeline_frames). Checking only instock_agg's side here would crash the join
+        # outright when instock_agg has store_id but deduped doesn't (on= requires the column
+        # to exist on both sides).
         instock_join_keys = ["product_id", "week_start_date"]
-        if "store_id" in instock_agg.columns:
+        if "store_id" in instock_agg.columns and "store_id" in deduped.columns:
             instock_join_keys.insert(1, "store_id")
         deduped = deduped.join(instock_agg, on=instock_join_keys, how="left")
 
@@ -296,6 +301,20 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
         scope_pair_weeks = scope_core.select("product_id", "store_id", "Year", "Week").distinct().cache()
         scope_pairs = scope_core.select("product_id", "store_id").distinct().cache()
     else:
+        # Product-grain scope has no store dimension of its own, so lost_sales_weekly is the
+        # only place scope_pair_weeks/scope_pairs can get one -- that only works when
+        # lost_sales_source itself carries store_id (lost_sales_source.store_col set). It's a
+        # genuinely unsupported combination otherwise (no source of store granularity anywhere),
+        # so fail loudly and name the fix instead of crashing on the hardcoded select below.
+        if "store_id" not in lost_sales_weekly.columns:
+            raise ValueError(
+                "defined_scope.grain='product' needs lost_sales_source to carry its own "
+                "store_id (lost_sales_source.store_col set) to determine per-store coverage for "
+                "scope_pair_weeks/scope_pairs -- lost_sales_source.store_col is None here, so "
+                "there is no source of store granularity. Either use a store-level "
+                "defined_scope.grain (product_store/product_store_week), or point "
+                "lost_sales_source at a table with its own store_id column."
+            )
         scope_pair_weeks = lost_sales_weekly.select("product_id", "store_id", "Year", "Week").distinct().cache()
         scope_pairs = lost_sales_weekly.select("product_id", "store_id").distinct().cache()
 
