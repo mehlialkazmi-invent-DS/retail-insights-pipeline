@@ -137,11 +137,27 @@ def _rename_join_keys_to_canonical(df: DataFrame, col_map: Dict[str, Any]) -> Da
     names (product_id, store_id, week_start_date) so every downstream reader can keep
     assuming those names regardless of what a client's raw table calls them.
 
-    store_col is optional: a source with no per-store dimension (e.g. reporting_inv_fc_dfu/
-    report_dfu's lost_sales/instock columns, aggregated to product_agg_level x week only) sets
-    it to None, and the resulting frame simply has no store_id column at all.
+    product_col and store_col are each optional: a source with no per-store dimension sets
+    store_col to None and the resulting frame simply has no store_id column at all; a source
+    with no native product-id-level column at all sets product_col to None, relying entirely
+    on product_agg_level_col's join (_map_product_agg_level_to_product_id, called before this)
+    to have already produced product_id.
+
+    Configure exactly one of product_col / product_agg_level_col per source, never both: if
+    product_col is set AND actually present on the source, it always takes precedence over
+    product_agg_level_col (see _map_product_agg_level_to_product_id's own no-op check) --
+    leaving both set is misleading, not additive, since the agg-level join would silently
+    never fire.
     """
-    df = rename_column_or_fail(df, col_map["product_col"], "product_id", "product_col")
+    product_col = col_map.get("product_col")
+    if product_col:
+        df = rename_column_or_fail(df, product_col, "product_id", "product_col")
+    elif "product_id" not in df.columns:
+        raise ValueError(
+            "product_col is not set and no product_id column was produced from "
+            "product_agg_level_col -- configure exactly one of product_col / "
+            "product_agg_level_col."
+        )
     df = rename_column_or_fail(df, col_map["week_col"], "week_start_date", "week_col")
     store_col = col_map.get("store_col")
     if store_col:
@@ -158,18 +174,23 @@ def _map_product_agg_level_to_product_id(
 ) -> DataFrame:
     """Backfill product_id from product_agg_level when a source is keyed by planning/DFU level
     instead of product_id (e.g. a table where that key is genuinely one-to-many with
-    product_id) -- mirrors kpi-skill-toolkit's own product_agg_level fallback. A no-op when
-    product_col is already on the source (even if product_agg_level_col happens to be
-    configured) or when product_agg_level_col isn't configured at all -- so this only ever
-    fires when actually needed. But if product_agg_level_col IS explicitly configured and
-    product_col is absent, the configured column must actually exist -- unlike "not
-    configured", a wrong explicit value is a real misconfiguration and should fail loudly
-    here rather than silently no-op and surface as a confusing missing-product_id error
-    several calls downstream.
+    product_id) -- mirrors kpi-skill-toolkit's own product_agg_level fallback (same
+    product_planning_level table, same planning_level_id rename, same inner join).
+
+    product_col is a precedence flag as much as a rename target: this is a no-op whenever
+    product_col is configured (non-None) AND actually present on the source -- product_col
+    always wins, even if product_agg_level_col also happens to be set. It also no-ops when
+    product_agg_level_col isn't configured at all (nothing to fall back to). It only actually
+    fires -- and does the join -- when product_col is None/absent-from-source AND
+    product_agg_level_col is configured. Configure exactly one of the two per source; if
+    product_agg_level_col IS explicitly configured (in the firing branch), the configured
+    column must actually exist -- unlike "not configured", a wrong explicit value is a real
+    misconfiguration and should fail loudly here rather than silently no-op and surface as a
+    confusing missing-product_id error several calls downstream.
     """
-    product_col = col_map["product_col"]
+    product_col = col_map.get("product_col")
     agg_col = col_map.get("product_agg_level_col")
-    if product_col in df.columns or not agg_col:
+    if (product_col and product_col in df.columns) or not agg_col:
         return df
     if agg_col not in df.columns:
         raise ValueError(

@@ -1460,8 +1460,6 @@ def render_kpi_html(
       {main_panel}
       <p class="footnote">
         Dollar values are in local currency.
-        Service metrics (WOS, In-Stock Rate, Lost Sales %, Mean Stock) exclude e-com stores
-        configured in <code>service_metrics.excluded_store_ids</code>.
       </p>
     </main>
   </div>

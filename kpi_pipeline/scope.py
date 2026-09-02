@@ -107,10 +107,9 @@ def build_defined_scope(ctx: KPIContext) -> None:
 def read_daily_for_scope(ctx: KPIContext, start_date: datetime.date, end_date: datetime.date) -> DataFrame:
     """Daily sales/inventory for scope building (score scope and adjustment pair expansion).
 
-    Includes ALL stores. E-com / non-service stores are NOT excluded here — scope
-    membership is store-agnostic so that total sales/revenue/inventory cover every store.
-    The e-com exclusion is applied later, only when computing service metrics
-    (WOS, mean stock, in-stock rate, lost sales %) via is_service_store() in metrics.py.
+    Includes ALL stores — scope membership is store-agnostic so that total sales/revenue/
+    inventory cover every store. Any store you want excluded from specific metrics should be
+    filtered via input_filters.daily_data (see config.py) rather than baked in here.
     """
     time_cols = ctx.settings["DAILY_TIME_COLUMNS"]
     date_col = time_cols["date"]

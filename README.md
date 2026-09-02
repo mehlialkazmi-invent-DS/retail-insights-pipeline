@@ -639,7 +639,7 @@ Maps raw lost-sales table columns to canonical names. Allows customers whose los
 
 **Behaviour.** Downstream code always sees canonical column names (`week_start_date`, `product_id`, `store_id`, `lost_sales`, `in_stock`, `total_days`) regardless of the mapping. `week_col`/`product_col`/`store_col` are renamed to their canonical join-key names at read time in `kpi_pipeline/inputs.py`; `lost_sales_col`/`in_stock_col`/`total_days_col` are read under their configured names and aliased to the canonical output names during aggregation in `kpi_pipeline/pipeline.py` (`_aggregate_lost_sales_pairweek`). Defaults reproduce tbretail's current schema exactly, so enabling this block with all defaults produces no behaviour change for existing customers.
 
-**`product_agg_level_col`** (optional): when a source is keyed by planning/DFU level instead of `product_id` (e.g. `reporting_inv_fc_dfu/report_dfu`), set this to that column's name. Auto-detected — only fires when `product_col` is absent from the source; a no-op otherwise, even if configured. Left-joins to `path_segments.product_planning_level` (renaming `planning_level_id` to this column) to backfill `product_id`, mirroring kpi-skill-toolkit's own fallback.
+**`product_col` / `product_agg_level_col` — configure exactly one, never both.** If the source has a native `product_id`-level column, set `product_col` to it. If it doesn't (keyed by planning/DFU level instead, e.g. `reporting_inv_fc_dfu/report_dfu`), set `product_col: None` and set `product_agg_level_col` to that column's name instead — the pipeline left-joins it to `path_segments.product_planning_level` (renaming `planning_level_id` to this column) to backfill `product_id`, mirroring kpi-skill-toolkit's own fallback. **Precedence:** if `product_col` is set AND actually present on the source, it always wins — `product_agg_level_col` is only ever consulted when `product_col` is `None`/absent-from-source, even if both happen to be configured at once, so leaving both set is misleading rather than additive. Setting `product_col: None` with no `product_agg_level_col` configured fails loudly at read time.
 
 **`store_col: None`** (optional): for a source with no per-store dimension. `lost_sales` is an absolute count, not a ratio — a store-less value gets broadcast across every scoped store of that product, which **over-counts** if later summed across stores. This is safe for `instock_source`'s ratio fields (below), not safe here without an explicit per-store normalization — prefer a genuinely per-store source for `lost_sales_source` when one exists.
 
@@ -663,7 +663,7 @@ Maps raw lost-sales table columns to canonical names. Allows customers whose los
 
 **Behaviour.** When `enabled=False` (default), `in_stock`/`total_days` are aggregated from `lost_sales_source`'s table exactly as before — no change to existing pipelines. When `enabled=True`, `_aggregate_lost_sales_pairweek` stops aggregating `in_stock`/`total_days` from the lost-sales table entirely (only `lost_sales` is aggregated from it); the pipeline instead reads and aggregates the separate `instock_source` table and left-joins it onto the lost-sales weekly frame by `(product_col, store_col, week_col)`. A pair-week present in lost-sales with no matching row in `instock_source` gets `NULL` for `in_stock`/`total_days` — there is no fallback to a lost-sales-side value, since none is computed in this mode. Downstream metrics (`in_stock_rate`, `weighted_instock_rate`, `lost_sales_pct`) use whatever the join produces.
 
-**`product_agg_level_col`**: same auto-detected fallback as `lost_sales_source` above.
+**`product_col` / `product_agg_level_col`**: same "configure exactly one, `product_col` wins if present" rule as `lost_sales_source` above.
 
 **`store_col: None`** — for a source with no per-store dimension (e.g. `reporting_inv_fc_dfu/report_dfu`, aggregated to `product_agg_level` × week only). The join drops `store_id` from its condition and broadcasts the product-week value across every scoped store instead. This **is** safe here, unlike `lost_sales_source`: `in_stock_days`/`total_days` form a ratio, and summing the same broadcast value across a product's stores then dividing reproduces the original ratio exactly (numerator and denominator scale identically) — you just lose real per-store variation, which a store-less source never had anyway. A verified example for tbretail:
 
@@ -791,17 +791,19 @@ Default metrics (configurable in `CONFIG["metrics"]`):
 
 - Sales / inventory (all scoped stores): `total_sales_quantity`, `total_sales_revenue`, `AUR`, `AUC`, `total_inventory`
 - Coverage (all scoped stores): `distinct_product_count`, `distinct_store_count`, `distinct_pair_count`
-- Service stores only: `mean_stock`, `mean_stock_retail`, `mean_stock_cost`, `WOS`, `wos_revenue`, `wos_cost`, `inventory_turnover_rate`, `in_stock_rate`, `weighted_instock_rate`, `lost_sales_pct`
+- Stock/service (all scoped stores): `mean_stock`, `mean_stock_retail`, `mean_stock_cost`, `WOS`, `wos_revenue`, `wos_cost`, `inventory_turnover_rate`, `in_stock_rate`, `weighted_instock_rate`, `lost_sales_pct`
+
+Every metric uses all scoped stores — there is no store-exclusion config key. If a store should never contribute at all (e.g. an e-com fulfillment "store"), filter it out via `input_filters.daily_data`, or rely on your `lost_sales_source`/`instock_source` tables already excluding it upstream (see [Config reference](#config-reference)).
 
 **Lost Sales %** = `100 × sum(lost_sales) / sum(floor(weekly_sales + lost_sales))` — denominator includes imputed lost demand.
 
-**In-Stock Rate** = `sum(in_stock_days) / sum(available_days)` from top-down lost-sales output (service stores only).
+**In-Stock Rate** = `sum(in_stock_days) / sum(available_days)` from top-down lost-sales output.
 
-**Weighted In-Stock Rate** = sales-weighted average of weekly in-stock rates: each fiscal week's in-stock rate is weighted by that week's sales volume when rolling up to the reporting period. Weeks with higher sales carry more weight. Reported as pp-change in comparisons (service stores only).
+**Weighted In-Stock Rate** = sales-weighted average of weekly in-stock rates: each fiscal week's in-stock rate is weighted by that week's sales volume when rolling up to the reporting period. Weeks with higher sales carry more weight. Reported as pp-change in comparisons.
 
-**WOS** = per-product per-fiscal-week WOS after summing daily inventory/sales across service stores at product×date (`avg_daily_inventory / weekly_sales`), then rolled up to the reporting period using a sales-weighted average. Not computed at product×store×week grain.
+**WOS** = per-product per-fiscal-week WOS after summing daily inventory/sales across all scoped stores at product×date (`avg_daily_inventory / weekly_sales`), then rolled up to the reporting period using a sales-weighted average. Not computed at product×store×week grain.
 
-**Inventory Turnover Rate** = Sales Units ÷ Mean Stock for the same period grain (service stores only). The HTML report labels it per-tab: **Annual**, **YTD**, **Quarterly**, **Monthly**, or **Weekly** Inventory Turnover Rate.
+**Inventory Turnover Rate** = Sales Units ÷ Mean Stock for the same period grain. The HTML report labels it per-tab: **Annual**, **YTD**, **Quarterly**, **Monthly**, or **Weekly** Inventory Turnover Rate.
 
 ## Programmatic use
 
@@ -837,7 +839,7 @@ The pipeline is optimised for large retail datasets on Databricks. Key patterns 
 - **HTML weekly columns**: sorted by `week_start_date` from `fiscal_week`, not lexicographic `Year_Week` strings.
 - **KPI sort**: final sort happens in pandas after `toPandas()`, not via Spark `orderBy` — removes a shuffle stage from every aggregation call.
 
-If you see slow runs, check: (1) scope table path is correct so defined scope is not empty, (2) `excluded_store_ids` is set correctly, (3) `run_min_date` is aligned to a Sunday (or left null for full YTD).
+If you see slow runs, check: (1) scope table path is correct so defined scope is not empty, (2) `run_min_date` is aligned to a Sunday (or left null for full YTD).
 
 ## Known limitations
 
