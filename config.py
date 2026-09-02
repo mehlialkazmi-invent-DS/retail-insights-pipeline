@@ -768,17 +768,33 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             resolved["path"] = fund_paste(bucket, *resolved["path_segments"])
         dimension_sources.append(resolved)
 
-    # Root specs: one entry per (dim_col, root_values) pair declared on an enabled
-    # dimension_source -- resolved here (not left for fiscal.py to re-derive) so root_values
-    # stays the single place a dimension_source's root-defining column is declared. Consumed by
-    # fiscal.py's _resolve_root_definitions to build ctx.root_definitions and exclude these
-    # columns from ctx.cut_dimensions (see README's "Dimension sources -> roots" section).
-    root_specs = [
-        {"dim_col": dim_col, "root_values": mapping}
-        for src in dimension_sources
-        if src.get("enabled")
-        for dim_col, mapping in (src.get("root_values") or {}).items()
-    ]
+    # Root specs: EVERY column an enabled dimension_source contributes (columns + derived) is
+    # root-defining -- never a cut (see README's "Dimension sources -> roots" section: "every one
+    # of its columns becomes a root ... not a flat cut", and the mutual-exclusivity design
+    # constraint). root_values supplies an explicit value->root-name mapping for a given dim_col;
+    # a dim_col with no entry in root_values (or a source with root_values omitted entirely)
+    # auto-discovers one root per distinct value instead (fiscal._resolve_root_definitions, since
+    # that needs real data). Resolved here (not left for fiscal.py to re-derive) so root_values
+    # stays the single place a root-defining column is declared, and so a root_values key that
+    # doesn't match any of the source's own columns/derived fails loudly now instead of silently
+    # never applying (that dim_col would otherwise fall through and become an ordinary cut).
+    root_specs = []
+    for src in dimension_sources:
+        if not src.get("enabled"):
+            continue
+        contributed = list(
+            dict.fromkeys(list(src.get("columns") or []) + list((src.get("derived") or {}).keys()))
+        )
+        root_values_cfg = dict(src.get("root_values") or {})
+        unknown_root_value_cols = set(root_values_cfg) - set(contributed)
+        if unknown_root_value_cols:
+            raise ValueError(
+                f"dimension_source {src.get('label', 'dimension_source')!r} root_values has "
+                f"column(s) {sorted(unknown_root_value_cols)} not among its own columns/derived "
+                f"{contributed}."
+            )
+        for dim_col in contributed:
+            root_specs.append({"dim_col": dim_col, "root_values": root_values_cfg.get(dim_col) or {}})
 
     # Per-dimension value filters, from slices only. Applied to a slice's own breakdown
     # (see kpi_pipeline/kpi_long._filter_frames_for_dimension).

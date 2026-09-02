@@ -385,28 +385,30 @@ def _read_adjustment_keys(
 
 
 def _anti_join_by_keys(scope: DataFrame, removal_keys: DataFrame, join_keys: List[str]) -> DataFrame:
-    has_time = "Year" in removal_keys.columns and "Week" in removal_keys.columns
+    """Anti-join ``scope`` against ``removal_keys`` on the adjustment's own ``join_keys``,
+    restricted to whichever of those columns the resolved scope grain actually carries, plus
+    Year/Week (present on both once resolved). ``_read_adjustment_keys`` has already
+    cascaded/collapsed ``removal_keys`` to the scope's own grain -- e.g. a product-only removal
+    (``join_keys=["product_id"]``) under a product_store-grain scope deliberately drops the
+    store_id that removal_keys picked up while cascading via scope_pairs, so the anti-join matches
+    (and removes) every store of that product, not just the ones with recorded daily activity in
+    scope_pairs (see apply_scope_adjustments's scope_pairs comment for the addition-side analog).
 
-    if has_time and join_keys == ["product_id"]:
-        return scope.join(removal_keys.select("product_id", "Year", "Week").distinct(), on=["product_id", "Year", "Week"], how="left_anti")
-    if has_time and join_keys == ["store_id"]:
-        return scope.join(removal_keys.select("store_id", "Year", "Week").distinct(), on=["store_id", "Year", "Week"], how="left_anti")
-    if has_time and join_keys == ["product_id", "store_id"]:
-        return scope.join(
-            removal_keys.select("product_id", "store_id", "Year", "Week").distinct(),
-            on=["product_id", "store_id", "Year", "Week"],
-            how="left_anti",
+    A join_keys column the scope grain lacks entirely (e.g. store_id under
+    defined_scope.grain="product") has no sound anti-join translation here -- silently falling
+    back to a Year/Week-only match would strike every row in those weeks regardless of
+    product/store. Fails loudly instead.
+    """
+    key_cols = set(scope.columns) & set(removal_keys.columns)
+    join_on = [k for k in join_keys if k in key_cols and k not in ("Year", "Week")]
+    join_on += [k for k in ("Year", "Week") if k in key_cols]
+    if all(k in ("Year", "Week") for k in join_on):
+        raise ValueError(
+            f"scope adjustment removal join_keys={join_keys} share no usable non-time column "
+            f"with the resolved scope grain {sorted(scope.columns)}; check defined_scope.grain "
+            "is compatible with this adjustment's join_keys/store_col."
         )
-
-    if join_keys == ["product_id"]:
-        return scope.join(removal_keys.select("product_id").distinct(), on="product_id", how="left_anti")
-    if join_keys == ["store_id"]:
-        return scope.join(removal_keys.select("store_id").distinct(), on="store_id", how="left_anti")
-    if join_keys == ["product_id", "store_id"]:
-        return scope.join(removal_keys.select("product_id", "store_id").distinct(), on=["product_id", "store_id"], how="left_anti")
-    if set(join_keys) == set(["product_id", "store_id", "Year", "Week"]):
-        return scope.join(removal_keys.distinct(), on=join_keys, how="left_anti")
-    raise ValueError(f"Unsupported removal join_keys: {join_keys}")
+    return scope.join(removal_keys.select(*join_on).distinct(), on=join_on, how="left_anti")
 
 
 def apply_scope_adjustments(ctx: KPIContext, fund_paste: Optional[Callable[..., str]] = None) -> None:
