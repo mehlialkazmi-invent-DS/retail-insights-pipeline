@@ -6,6 +6,11 @@ consecutive-year link — e.g. comparing 2025 YTD vs 2026 YTD uses pairs present
 both 2024 and 2025 (a pair need not also be present in 2026 to count for that link). Isolates
 like-for-like movement from mix shifts caused by newly listed or closed pairs.
 
+Under a product-grain defined_scope (defined_scope.grain="product", no store_col anywhere), the
+same mechanism restricts by product_id alone instead of (product_id, store_id) -- the report's
+own scope is already store-agnostic there, so a comparable restriction on store identity would
+contradict that. See build_comparable_pairs's has_store / _restrict_frames's docstring.
+
 Comparable is YTD-only — there is no comparable YoY/QoQ/MoM/WoW. Pair-level data only exists for
 the current run window, so a comparable comparison is produced only when the window spans at least
 2 years. Gated by comparable_pairs.enabled — a no-op otherwise.
@@ -31,14 +36,27 @@ from kpi_pipeline.kpi_long import _filter_frames_for_dimension, _period_frames, 
 from kpi_pipeline.metrics import build_kpi_table
 
 _PAIR_KEYS = ["product_id", "store_id"]
+_PRODUCT_KEYS = ["product_id"]
 _RESTRICT_FRAMES = ("scoped_daily", "inst_data", "lost_base", "scope_pairs", "scope_pair_weeks")
 
 
-def _restrict_frames(period_frames: Dict[str, DataFrame], comparable_pairs: DataFrame) -> Dict[str, DataFrame]:
+def _restrict_frames(
+    period_frames: Dict[str, DataFrame], comparable_keys: DataFrame, join_keys: List[str]
+) -> Dict[str, DataFrame]:
+    """Restrict every frame to the years' common keys -- (product, store) pairs when the report's
+    own scope grain is store-level, or just products when it's product-grain (join_keys picked by
+    the caller from ctx.scope_keys, not per-frame). scoped_daily is always store-level under the
+    hood (straight from daily_data) regardless of grain, but under product-grain the report's own
+    semantics are store-agnostic (every store counts for an in-scope product, see
+    build_scoped_daily's has_store=False path) -- restricting it by product only, ignoring which
+    stores carried it in either year, keeps this comparable-pairs restriction consistent with
+    that same "don't care which store" intent, not a stricter pair match the rest of a
+    product-grain report never applies.
+    """
     out = dict(period_frames)
     for key in _RESTRICT_FRAMES:
         if key in out and out[key] is not None:
-            out[key] = out[key].join(comparable_pairs, on=_PAIR_KEYS, how="inner")
+            out[key] = out[key].join(comparable_keys, on=join_keys, how="inner")
     return out
 
 
@@ -148,6 +166,13 @@ def build_comparable_pairs(ctx: KPIContext) -> None:
     pf = _period_frames(ctx, ctx.hybrid_frames, "ytd")
     scoped_daily = pf["scoped_daily"]
 
+    # Join key for the year-over-year intersection follows the report's own scope grain
+    # (ctx.scope_keys), not scoped_daily's own (always store-level) columns -- see
+    # _restrict_frames's docstring for why product-grain needs product-only matching here too.
+    has_store = "store_id" in ctx.scope_keys
+    join_keys = _PAIR_KEYS if has_store else _PRODUCT_KEYS
+    unit = "pairs" if has_store else "products"
+
     years = sorted(r["Year"] for r in scoped_daily.select("Year").distinct().collect())
     if len(years) < 2:
         print("comparable pairs: ytd=n/a (<2 years in window)")
@@ -159,21 +184,23 @@ def build_comparable_pairs(ctx: KPIContext) -> None:
     counts: List[str] = []
 
     for prior_year, current_year in zip(years, years[1:]):
-        prior_pairs = scoped_daily.filter(F.col("Year") == prior_year).select(*_PAIR_KEYS).distinct()
-        current_pairs = scoped_daily.filter(F.col("Year") == current_year).select(*_PAIR_KEYS).distinct()
-        common_pairs = prior_pairs.intersect(current_pairs).cache()
-        pair_count = common_pairs.count()
+        prior_keys = scoped_daily.filter(F.col("Year") == prior_year).select(*join_keys).distinct()
+        current_keys = scoped_daily.filter(F.col("Year") == current_year).select(*join_keys).distinct()
+        common_keys = prior_keys.intersect(current_keys).cache()
+        pair_count = common_keys.count()
         if pair_count == 0:
-            common_pairs.unpersist()
-            counts.append(f"{prior_year}-{current_year}=0 common pairs")
+            common_keys.unpersist()
+            counts.append(f"{prior_year}-{current_year}=0 common {unit}")
             continue
 
-        restricted = _restrict_frames(pf, common_pairs)
+        restricted = _restrict_frames(pf, common_keys, join_keys)
         rows = _comparable_period_rows(ctx, restricted, [prior_year, current_year], metric_cols)
-        common_pairs.unpersist()
+        common_keys.unpersist()
 
         tagged = rows.copy()
         tagged.insert(0, "comparison_type", "ytd")
+        # Column name kept as comparable_pair_count for schema stability even under
+        # product-grain, where it's actually a product count (unit == "products" above).
         tagged["comparable_pair_count"] = pair_count
         tagged["link_prior_year"] = prior_year
         tagged["link_current_year"] = current_year
@@ -184,7 +211,7 @@ def build_comparable_pairs(ctx: KPIContext) -> None:
         if not disp.empty:
             display = disp  # latest link's overall display wins, full detail is in the save table
 
-        counts.append(f"{prior_year}-{current_year}={pair_count} pairs")
+        counts.append(f"{prior_year}-{current_year}={pair_count} {unit}")
 
     ctx.comparable_comparison_ytd = pd.concat(save_parts, ignore_index=True) if save_parts else pd.DataFrame()
     ctx.comparable_ytd_display = display

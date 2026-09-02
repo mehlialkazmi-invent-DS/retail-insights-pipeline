@@ -297,26 +297,25 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
     else:
         lost_sales_weekly = lost_sales_raw.join(scope_core, on=scope_keys, how="left_semi").cache()
 
+    # ls_has_store: whether lost_sales_weekly ended up with its own store_id -- independent of
+    # has_store (scope's own grain). Under has_store=True this is always True (native, or
+    # broadcast-attached from scope_core just above). Under has_store=False (product grain) it
+    # reflects lost_sales_source.store_col directly: True if lost_sales_source is genuinely
+    # per-store (store granularity comes FROM lost-sales, scope itself has none), False if
+    # lost_sales_source is ALSO store-less -- a legitimate, fully-supported pure product-grain
+    # combination (see the else branches of scope_pair_weeks/weekly_sales_for_lost/lost_base
+    # below), not an error: nothing downstream needs a store dimension when neither scope nor
+    # lost-sales has one.
+    ls_has_store = "store_id" in lost_sales_weekly.columns
     if has_store:
         scope_pair_weeks = scope_core.select("product_id", "store_id", "Year", "Week").distinct().cache()
         scope_pairs = scope_core.select("product_id", "store_id").distinct().cache()
-    else:
-        # Product-grain scope has no store dimension of its own, so lost_sales_weekly is the
-        # only place scope_pair_weeks/scope_pairs can get one -- that only works when
-        # lost_sales_source itself carries store_id (lost_sales_source.store_col set). It's a
-        # genuinely unsupported combination otherwise (no source of store granularity anywhere),
-        # so fail loudly and name the fix instead of crashing on the hardcoded select below.
-        if "store_id" not in lost_sales_weekly.columns:
-            raise ValueError(
-                "defined_scope.grain='product' needs lost_sales_source to carry its own "
-                "store_id (lost_sales_source.store_col set) to determine per-store coverage for "
-                "scope_pair_weeks/scope_pairs -- lost_sales_source.store_col is None here, so "
-                "there is no source of store granularity. Either use a store-level "
-                "defined_scope.grain (product_store/product_store_week), or point "
-                "lost_sales_source at a table with its own store_id column."
-            )
+    elif ls_has_store:
         scope_pair_weeks = lost_sales_weekly.select("product_id", "store_id", "Year", "Week").distinct().cache()
         scope_pairs = lost_sales_weekly.select("product_id", "store_id").distinct().cache()
+    else:
+        scope_pair_weeks = lost_sales_weekly.select("product_id", "Year", "Week").distinct().cache()
+        scope_pairs = lost_sales_weekly.select("product_id").distinct().cache()
 
     # Fall back to the fiscal week's day-count only when total_days can legitimately be missing
     # for reasons unrelated to instock_source (e.g. a null in the lost-sales table itself). Under
@@ -329,15 +328,12 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
         if ctx.settings.get("INSTOCK_SOURCE_ENABLED", False)
         else F.coalesce(F.col("total_days"), F.col("fiscal_week_days"))
     )
+    inst_select_cols = ["product_id", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Month"]
+    if ls_has_store:
+        inst_select_cols.insert(1, "store_id")
     inst_data = (
         lost_sales_weekly.select(
-            "product_id",
-            "store_id",
-            "Year",
-            "Week",
-            "Year_Week",
-            "Fiscal_Quarter",
-            "Fiscal_Month",
+            *inst_select_cols,
             F.col("in_stock_days").alias("stocked_pairs"),
             available_days_expr.alias("available_days"),
         )
@@ -349,13 +345,29 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
     weekly_pair = scoped_daily.groupBy("product_id", "store_id", "Year", "Week").agg(
         F.sum("sales_quantity").alias("weekly_sales")
     )
-    weekly_sales_for_lost = (
-        weekly_pair.join(scope_pair_weeks, on=["product_id", "store_id", "Year", "Week"], how="left_semi")
-        .select("product_id", "store_id", "Year", "Week", F.col("weekly_sales").alias("sales_quantity_weekly"))
-    )
+    lost_base_keys = ["product_id", "Year", "Week"]
+    lost_base_select_cols = ["product_id", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Month", "lost_sales"]
+    if ls_has_store:
+        lost_base_keys.insert(1, "store_id")
+        lost_base_select_cols.insert(1, "store_id")
+        weekly_sales_for_lost = (
+            weekly_pair.join(scope_pair_weeks, on=lost_base_keys, how="left_semi")
+            .select(*lost_base_keys, F.col("weekly_sales").alias("sales_quantity_weekly"))
+        )
+    else:
+        # No store dimension anywhere (scope AND lost_sales_source both store-less): roll
+        # weekly_pair (still per-store, straight from daily_data) UP to product-week first --
+        # summed across every store selling the product, since there's no per-store lost_sales
+        # figure to match against individually -- then restrict to the (product, week) combos
+        # lost_sales_weekly actually covers, same as the has-store left_semi above.
+        weekly_sales_for_lost = (
+            weekly_pair.groupBy("product_id", "Year", "Week")
+            .agg(F.sum("weekly_sales").alias("sales_quantity_weekly"))
+            .join(scope_pair_weeks, on=lost_base_keys, how="left_semi")
+        )
     lost_base = (
-        lost_sales_weekly.select("product_id", "store_id", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Month", "lost_sales")
-        .join(weekly_sales_for_lost, on=["product_id", "store_id", "Year", "Week"], how="left")
+        lost_sales_weekly.select(*lost_base_select_cols)
+        .join(weekly_sales_for_lost, on=lost_base_keys, how="left")
         .withColumn("sales_quantity_weekly", F.coalesce(F.col("sales_quantity_weekly"), F.lit(0.0)))
         .withColumn(
             "TY_sales_quantity_weekly_corrected_lost_sales",

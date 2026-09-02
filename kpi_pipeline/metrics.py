@@ -12,17 +12,25 @@ from kpi_pipeline.context import KPIContext
 
 
 def _restrict_to_scope_pair_weeks(ctx: KPIContext, df: DataFrame, scope_pair_weeks_in: DataFrame) -> DataFrame:
-    """Restrict scoped_daily to the (product, store, week) rows lost_sales_weekly actually has.
+    """Restrict scoped_daily to the (product[, store], week) rows lost_sales_weekly actually has.
 
     Only needed in the product-week (no store grain) fallback path: there, scope has no store
     dimension of its own, so scoped_daily keeps every store daily_data has for an in-scope
     (product, week) -- wider than scope_pair_weeks, which is derived from lost_sales_weekly's
-    own (narrower) store rows. In the store-grain path, scoped_daily is already restricted to
+    own (narrower) coverage. In the store-grain path, scoped_daily is already restricted to
     scope_pair_weeks, so this is a no-op skip.
+
+    scope_pair_weeks_in's own store_id presence (not ctx.scope_keys's) decides whether the join
+    key includes it: when lost_sales_source is ALSO store-less (pure product-grain, no store
+    anywhere -- see pipeline.build_pipeline_frames's ls_has_store), scope_pair_weeks_in is
+    product-week only, and restricting scoped_daily by (product, week) alone -- keeping every
+    store for each surviving product-week -- is the correct analogue.
     """
-    if "store_id" not in ctx.scope_keys:
+    if "store_id" in ctx.scope_keys:
+        return df
+    if "store_id" in scope_pair_weeks_in.columns:
         return df.join(scope_pair_weeks_in, on=["product_id", "store_id", "Year", "Week"], how="left_semi")
-    return df
+    return df.join(scope_pair_weeks_in, on=["product_id", "Year", "Week"], how="left_semi")
 
 
 def compute_kpis(
