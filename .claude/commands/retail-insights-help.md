@@ -262,12 +262,44 @@ Use this when a breakdown column does **not** live on the products table (e.g. N
 
 With `root_values: {"is_nvrout": {"yes": "nvrout"}}` and `slices.dimensions: ["brand"]`, `kpi_long` has: `overall`×`overall` (grand total), `overall`×`brand` (brand across everything), `nvrout`×`overall` (NVROUT total), `nvrout`×`brand` (brand within NVROUT only) — mirroring kpi-skill-toolkit's `overall_annual_segment` / `nvr_all_annual_brand` outputs. `kpi_long`, comparisons (`comparison_yoy`/`comparison_ytd`/`comparable_comparison_ytd` all carry a `"root"` column), and the HTML report (root becomes an outer tab when more than one root exists) are all root × cut aware. See §7 for the exact loop and §9 for `ctx.cut_dimensions`/`ctx.root_definitions`.
 
-**Scope vs. roots vs. cuts — three different knobs:**
+**Scope vs. roots vs. cuts vs. population filters — four different knobs:**
 | Need | Use | Effect |
 |------|-----|--------|
 | Include/exclude which (product, store, week) rows enter KPIs at all | `scope_adjustments` | Changes scope **membership** |
 | A named, fully-broken-out population tab (NVROUT vs COMP) | `dimension_sources[].root_values` | Adds a **root** |
 | Break any root's population out by a dimension (brand, SMW) | `slices` | Adds a **cut**, applied within every root |
+| Narrow ONE metric's own population, inside every root/cut | `metrics.population_filters` | Restricts that **metric only** (see §3.4d) |
+
+#### 3.4d — Metric population filters (restrict ONE metric's own population)
+
+`metrics.population_filters` narrows a single metric's product population without touching scope, roots, or any other metric — e.g. "in-stock rate should never count NON-COMP products, even inside `overall`" or "WOS without NVROUT." Applied **on top of** whatever root/cut is already in effect — a no-op inside a root that already restricts to the same value (e.g. filtering `IS_COMP` inside the `comp` root), the thing that actually changes a number inside `overall` (which applies no restriction of its own).
+
+```python
+"metrics": {
+    ...
+    "population_filters": {
+        "in_stock_rate":         {"IS_COMP": {"exclude": ["no"]}},
+        "weighted_instock_rate": {"IS_COMP": {"exclude": ["no"]}},
+        "WOS":                   {"IS_NVROUT": {"exclude": ["yes"]}},
+    },
+},
+```
+
+Shape: `{metric_col: {dim_col: value_filter_spec}}` — `dim_col` is any `dimension_sources`/`slices` column already joined onto products; `value_filter_spec` is the exact same list/dict shape as §3.4a's `slices.value_filters`.
+
+**Constraint — metric_cols computed in one shared aggregation pass (`kpi_pipeline/metrics.py`) can only be filtered TOGETHER**, per `kpi_pipeline/filters.py`'s `METRIC_FILTER_GROUPS`:
+
+| Group | metric_cols |
+|-------|-------------|
+| `sales` | `total_sales_quantity`, `total_sales_revenue`, `total_inventory`, `AUR`, `AUC`, `distinct_product_count`, `distinct_store_count`, `distinct_pair_count` |
+| `wos` | `WOS`, `wos_revenue`, `wos_cost` |
+| `mean_stock` | `mean_stock`, `mean_stock_retail`, `mean_stock_cost` |
+| `turnover` | `inventory_turnover_rate` |
+| `instock` | `in_stock_rate` |
+| `weighted_instock` | `weighted_instock_rate` |
+| `lost_sales` | `lost_sales_pct` |
+
+An entry on any one column in a group applies to the whole group; conflicting specs on two columns in the same group fail loudly at run time. A metric with no entry is unchanged — fully additive/opt-in. Validated in `materialize()` (unknown `metric_col`, or a malformed spec, fails loudly — same check `slices.value_filters` gets).
 
 ### 3.5 Output saves
 
@@ -507,6 +539,7 @@ Map raw lost-sales and instock table columns to canonical names, or read in-stoc
 | Add multiple external dimension sources / roots | add another dict to `dimension_sources` list |
 | Restrict a cut's values / drop NULL bucket | `slices.value_filters` |
 | Restrict/rename which values become their own root | `dimension_sources[].root_values` (omit for auto-discovery — see §3.4b) |
+| Narrow one metric's own population (e.g. instock without NON-COMP, WOS without NVROUT) | `metrics.population_filters` — see §3.4d |
 | Change a client's fiscal_cal upload column names | `fiscal_calendar.column_map` (`quarter_col`/`month_col`/`month_name_col`) |
 | Filter inputs | `input_filters.{defined_scope,lost_sales,daily_data}` |
 | Blend fast/slow-mover lost-sales models by product velocity | `lost_sales_ensemble.enabled: True` (+ `slow_path_segments`, `speed_cluster_path_segments`, `speed_cluster_format`, `speed_cluster_attribute_name`/`speed_cluster_value_col`, `fast_mover_clusters`) |
@@ -662,6 +695,8 @@ render_kpi_html → standalone HTML file
 | Scope debug counts don't match `kpi_long` per cut | The debug cell recomputes scope independently — re-run it after any config change (scope mode, adjustments, `value_filters`) so it matches Cell 3. NULL values show as `"NULL"` here vs blank/None in `kpi_long` — see §3.3a. Note scope debug reports all `active_slice_dimensions` (root columns included), not root-restricted like `kpi_long`. |
 | A root you expect is missing from the HTML report, or the root tab layer doesn't appear at all | The root tab only renders when more than one root exists in `kpi_long`. With a single root (`"overall"`, no root-producing `dimension_sources` enabled), the report renders exactly as before — this is expected, not a bug. Check `ctx.root_definitions` (or the "ROOTS:" print in the fiscal log) to confirm what was actually resolved. |
 | A metric looks right for `"overall"` but wrong/missing within a specific root | Confirm the root's `dim_col` actually has non-null values matching its `root_values` for the products you expect — a product missing that dimension_source's join key entirely gets `NULL` and never appears in any named root, only `"overall"` |
+| A metric (e.g. instock) is right in a named root but wrong in `"overall"` specifically | `"overall"` applies no population restriction of its own — if a segment (e.g. NON-COMP) should never count toward that metric even in `overall`, add a `metrics.population_filters` entry for it (see §3.4d) rather than trying to fix it via scope or roots |
+| `metrics.population_filters` entry silently doesn't seem to apply / applies to a sibling metric too | Check `METRIC_FILTER_GROUPS` in `kpi_pipeline/filters.py` (also §3.4d) — several metric_cols share one aggregation pass and can only be filtered together; setting it on any one column in the group is enough, but two columns in the same group with different specs fail loudly at run time |
 | Score backfills all weeks | Defined scope path wrong or defined scope table empty for the window |
 | `kpi_long is empty — run pipeline first` | Called `build_html_report` before `runner.run()`, or saved outputs missing in `html_only` mode |
 | HTML file not generated | `html_report.enabled` is False, or check the Cell 6 output for errors |

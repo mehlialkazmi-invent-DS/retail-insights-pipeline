@@ -520,6 +520,39 @@ CONFIG: Dict[str, Any] = {
             "distinct_pair_count": "Distinct pairs",
         },
         "pp_change_metrics": ["in_stock_rate", "weighted_instock_rate", "lost_sales_pct"],
+        # ---------------------------------------------------------------------------
+        # POPULATION FILTERS — restrict specific metrics to a narrower product population
+        # ---------------------------------------------------------------------------
+        # Optional. Excludes/includes products from ONE metric's calculation without touching
+        # scope, roots, or any other metric -- e.g. "in-stock rate should never count NON-COMP
+        # products, even in the Overall root" or "WOS without NVROUT". Applied ON TOP OF
+        # whatever root/cut is already in effect (so it's a no-op inside a root that already
+        # restricts to the same value, e.g. filtering IS_COMP inside the "comp" root).
+        #
+        # Shape: {metric_col: {dim_col: value_filter_spec}} -- dim_col is any dimension_sources
+        # or slices column already joined onto products (e.g. "IS_COMP", "IS_NVROUT", "brand").
+        # value_filter_spec is the SAME shape as slices.value_filters: a list (include-only) or
+        # a dict with include/exclude/keep_null.
+        #
+        # CONSTRAINT: metric_cols computed in one shared aggregation pass can only be filtered
+        # TOGETHER, not independently of each other -- see kpi_pipeline/filters.py's
+        # METRIC_FILTER_GROUPS for the exact groupings:
+        #   sales group:  total_sales_quantity, total_sales_revenue, total_inventory, AUR, AUC,
+        #                 distinct_product_count, distinct_store_count, distinct_pair_count
+        #   wos group:    WOS, wos_revenue, wos_cost
+        #   mean_stock group: mean_stock, mean_stock_retail, mean_stock_cost
+        #   (inventory_turnover_rate, in_stock_rate, weighted_instock_rate, lost_sales_pct are
+        #    each their own independent group.)
+        # Setting an entry on any one column in a group applies it to the whole group; setting
+        # conflicting specs on two columns in the same group fails loudly at runtime.
+        #
+        # Example -- exclude NON-COMP from both in-stock metrics, WOS without NVROUT:
+        #   "population_filters": {
+        #       "in_stock_rate":         {"IS_COMP": {"exclude": ["no"]}},
+        #       "weighted_instock_rate": {"IS_COMP": {"exclude": ["no"]}},
+        #       "WOS":                   {"IS_NVROUT": {"exclude": ["yes"]}},
+        #   },
+        "population_filters": {},
     },
     # =============================================================================
     # OUTPUT & REPORTING
@@ -579,6 +612,28 @@ def _validate_value_filters(value_filters: Dict[str, Any]) -> None:
             f"value_filters[{dim!r}] must be a list or a dict with include/exclude/keep_null; "
             f"got {type(spec).__name__}."
         )
+
+
+def _validate_population_filters(population_filters: Dict[str, Any], metric_cols: list) -> None:
+    """Fail loudly on a malformed metrics.population_filters entry.
+
+    Each key must be a real metric_col; each value must be a dict of {dim_col: value_filter_spec},
+    where value_filter_spec has the same shape _validate_value_filters already accepts (a list or
+    a dict with include/exclude/keep_null).
+    """
+    known = set(metric_cols)
+    for metric_col, dim_spec in population_filters.items():
+        if metric_col not in known:
+            raise ValueError(
+                f"metrics.population_filters has an entry for {metric_col!r}, which is not in "
+                f"metrics.metric_cols {sorted(known)}."
+            )
+        if not isinstance(dim_spec, dict):
+            raise ValueError(
+                f"metrics.population_filters[{metric_col!r}] must be a dict of "
+                f"{{dim_col: value_filter_spec}}; got {type(dim_spec).__name__}."
+            )
+        _validate_value_filters(dim_spec)
 
 
 def _parse_percentile(raw: str) -> float:
@@ -959,6 +1014,9 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         raise ValueError("output.save_mode must be one of: initial, incremental, full_refresh")
 
     metrics = cfg["metrics"]
+    population_filters = dict(metrics.get("population_filters", {}) or {})
+    _validate_population_filters(population_filters, metrics["metric_cols"])
+
     score_scope = cfg["score_scope"]
     min_pct = score_scope["min_percentile"]
     if min_pct > 1:
@@ -1019,6 +1077,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "SCOPE_DIFF_METRICS": metrics["scope_diff_metrics"],
         "METRIC_LABELS": metrics["labels"],
         "PP_CHANGE_METRICS": frozenset(metrics["pp_change_metrics"]),
+        "METRIC_POPULATION_FILTERS": population_filters,
         "SAVE_OUTPUTS": output_cfg["save_outputs"],
         "OUTPUT_SAVE_MODE": save_mode,
         "ALLOW_OVERWRITE_EXISTING": output_cfg.get("allow_overwrite_existing", False),
