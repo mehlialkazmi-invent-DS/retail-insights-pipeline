@@ -285,6 +285,7 @@ To exclude a set but keep the rest (e.g. a "not going forward" list that only li
 | Include/exclude which (product, store, week) rows enter the KPIs at all | `scope_adjustments` | Changes scope **membership** |
 | A named, fully-broken-out population tab (NVROUT vs COMP) | `dimension_sources[].root_values` | Adds a **root** |
 | Break any root's population out by a dimension (brand, SMW) | `slices` | Adds a **cut**, applied within every root |
+| Narrow ONE metric's own population, inside every root/cut | `metrics.population_filters` | Restricts that **metric only** (see [Metrics](#metrics)) |
 
 `scope_adjustments` decide *which rows exist at all*; roots decide *which population a report view covers*; cuts decide *how a population is broken down*. A typical setup uses all three: a scope addition, a root for a segment flag, and a cut for brand.
 
@@ -805,6 +806,39 @@ Every metric uses all scoped stores — there is no store-exclusion config key. 
 **WOS** = per-product per-fiscal-week WOS after summing daily inventory/sales across all scoped stores at product×date (`avg_daily_inventory / weekly_sales`), then rolled up to the reporting period using a sales-weighted average. Not computed at product×store×week grain.
 
 **Inventory Turnover Rate** = Sales Units ÷ Mean Stock for the same period grain. The HTML report labels it per-tab: **Annual**, **YTD**, **Quarterly**, **Monthly**, or **Weekly** Inventory Turnover Rate.
+
+### Population filters (restrict ONE metric's own population)
+
+`metrics.population_filters` narrows a single metric's product population without touching scope, roots, or any other metric — e.g. "in-stock rate should never count NON-COMP products, even inside the `overall` root" or "WOS without NVROUT." Applied **on top of** whatever root/cut is already in effect (so it's a no-op inside a root that already restricts to the same value — e.g. filtering `IS_COMP` inside the `comp` root changes nothing there, only inside `overall`).
+
+```python
+"metrics": {
+    ...
+    "population_filters": {
+        "in_stock_rate":         {"IS_COMP": {"exclude": ["no"]}},
+        "weighted_instock_rate": {"IS_COMP": {"exclude": ["no"]}},
+        "WOS":                   {"IS_NVROUT": {"exclude": ["yes"]}},
+    },
+},
+```
+
+Shape: `{metric_col: {dim_col: value_filter_spec}}`. `dim_col` is any `dimension_sources`/`slices` column already joined onto products (e.g. `IS_COMP`, `IS_NVROUT`, `brand`). `value_filter_spec` is the exact same list/dict shape as [`slices.value_filters`](#value-filters-restrict-cut-values--drop-the-null-bucket).
+
+**Constraint — metrics computed in one shared aggregation pass can only be filtered together**, not independently of each other (see `kpi_pipeline/filters.py`'s `METRIC_FILTER_GROUPS`):
+
+| Group | Metric cols |
+| ----- | ----------- |
+| `sales` | `total_sales_quantity`, `total_sales_revenue`, `total_inventory`, `AUR`, `AUC`, `distinct_product_count`, `distinct_store_count`, `distinct_pair_count` |
+| `wos` | `WOS`, `wos_revenue`, `wos_cost` |
+| `mean_stock` | `mean_stock`, `mean_stock_retail`, `mean_stock_cost` |
+| `turnover` | `inventory_turnover_rate` |
+| `instock` | `in_stock_rate` |
+| `weighted_instock` | `weighted_instock_rate` |
+| `lost_sales` | `lost_sales_pct` |
+
+Setting an entry on any one column in a group applies it to the whole group. Setting *conflicting* specs on two columns in the same group fails loudly at run time rather than silently picking one. A metric with no entry behaves exactly as before — this is fully additive and opt-in.
+
+Validated at `materialize()` time: an unknown `metric_col` key, or a malformed `value_filter_spec`, fails loudly (same validation `slices.value_filters` already gets).
 
 ## Programmatic use
 
