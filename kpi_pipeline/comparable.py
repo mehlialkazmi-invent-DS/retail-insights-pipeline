@@ -37,11 +37,15 @@ from kpi_pipeline.metrics import build_kpi_table
 
 _PAIR_KEYS = ["product_id", "store_id"]
 _PRODUCT_KEYS = ["product_id"]
+_DC_PAIR_KEYS = ["product_id", "warehouse_id"]
 _RESTRICT_FRAMES = ("scoped_daily", "inst_data", "lost_base", "scope_pairs", "scope_pair_weeks")
 
 
 def _restrict_frames(
-    period_frames: Dict[str, DataFrame], comparable_keys: DataFrame, join_keys: List[str]
+    period_frames: Dict[str, DataFrame],
+    comparable_keys: DataFrame,
+    join_keys: List[str],
+    dc_comparable_keys: DataFrame,
 ) -> Dict[str, DataFrame]:
     """Restrict every frame to the years' common keys -- (product, store) pairs when the report's
     own scope grain is store-level, or just products when it's product-grain (join_keys picked by
@@ -52,11 +56,19 @@ def _restrict_frames(
     stores carried it in either year, keeps this comparable-pairs restriction consistent with
     that same "don't care which store" intent, not a stricter pair match the rest of a
     product-grain report never applies.
+
+    dc_daily carries no store_id (DC/warehouse inventory has no store dimension at all), so it can
+    never share the join_keys above -- it gets its own independent (product_id, warehouse_id)
+    same-pairs restriction instead, exactly mirroring total_inventory_wos_ytd.ipynb's two
+    independent same-pairs design (product x store from daily-data, product x warehouse from
+    inventory_warehouse, each restricted on its own terms rather than one restriction forced onto
+    both).
     """
     out = dict(period_frames)
     for key in _RESTRICT_FRAMES:
         if key in out and out[key] is not None:
             out[key] = out[key].join(comparable_keys, on=join_keys, how="inner")
+    out["dc_daily"] = out["dc_daily"].join(dc_comparable_keys, on=_DC_PAIR_KEYS, how="inner")
     return out
 
 
@@ -183,6 +195,8 @@ def build_comparable_pairs(ctx: KPIContext) -> None:
     display = pd.DataFrame()
     counts: List[str] = []
 
+    dc_daily = pf["dc_daily"]
+
     for prior_year, current_year in zip(years, years[1:]):
         prior_keys = scoped_daily.filter(F.col("Year") == prior_year).select(*join_keys).distinct()
         current_keys = scoped_daily.filter(F.col("Year") == current_year).select(*join_keys).distinct()
@@ -193,9 +207,16 @@ def build_comparable_pairs(ctx: KPIContext) -> None:
             counts.append(f"{prior_year}-{current_year}=0 common {unit}")
             continue
 
-        restricted = _restrict_frames(pf, common_keys, join_keys)
+        # DC's own (product_id, warehouse_id) same-pairs universe, independent of the store-side
+        # common_keys above -- see _restrict_frames's docstring.
+        dc_prior_keys = dc_daily.filter(F.col("Year") == prior_year).select(*_DC_PAIR_KEYS).distinct()
+        dc_current_keys = dc_daily.filter(F.col("Year") == current_year).select(*_DC_PAIR_KEYS).distinct()
+        dc_common_keys = dc_prior_keys.intersect(dc_current_keys).cache()
+
+        restricted = _restrict_frames(pf, common_keys, join_keys, dc_common_keys)
         rows = _comparable_period_rows(ctx, restricted, [prior_year, current_year], metric_cols)
         common_keys.unpersist()
+        dc_common_keys.unpersist()
 
         tagged = rows.copy()
         tagged.insert(0, "comparison_type", "ytd")
