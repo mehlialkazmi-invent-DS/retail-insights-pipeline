@@ -55,6 +55,7 @@ def compute_kpis(
     scoped_daily_in: DataFrame,
     inst_in: DataFrame,
     scope_pair_weeks_in: DataFrame,
+    dc_daily_in: DataFrame,
     period_col: str,
     group_keys: Sequence[str] = (),
     period_filter=F.lit(True),
@@ -71,6 +72,7 @@ def compute_kpis(
     daily_sales = scoped_daily_in.filter(period_filter)
     daily_pair_scoped = _restrict_to_scope_pair_weeks(ctx, scoped_daily_in, scope_pair_weeks_in).filter(period_filter)
     inst = inst_in.filter(period_filter)
+    dc_daily = dc_daily_in.filter(period_filter)
 
     sales_pop = apply_group_population_filter(daily_sales, "sales", ctx.settings)
     sales = (
@@ -138,14 +140,68 @@ def compute_kpis(
             ),
         )
     )
+    # WOS_DC / WOS_TOTAL: twins of wos_units at the SAME product×fiscal-week grain -- reuse
+    # daily_data_week (and its weekly_sales_units) rather than recomputing sales separately.
+    # Left join a DC-inventory frame built at the identical week_keys+period_extra grain;
+    # weeks with no DC record fill to 0 (the product simply had no warehouse inventory that
+    # week), not dropped.
+    dc_wos_pop = apply_group_population_filter(dc_daily, "wos_dc_total", ctx.settings)
+    dc_daily_week = (
+        dc_wos_pop.groupBy(*week_keys, *period_extra, "date")
+        .agg(F.sum("inventory").alias("daily_dc_inventory"))
+        .groupBy(*week_keys, *period_extra)
+        .agg(F.avg("daily_dc_inventory").alias("avg_daily_dc_inventory"))
+    )
+    daily_data_week = (
+        daily_data_week.join(dc_daily_week, on=week_keys + period_extra, how="left")
+        .withColumn("avg_daily_dc_inventory", F.coalesce(F.col("avg_daily_dc_inventory"), F.lit(0.0)))
+        .withColumn(
+            "avg_daily_total_inventory_combined",
+            F.col("avg_daily_total_inventory") + F.col("avg_daily_dc_inventory"),
+        )
+        .withColumn(
+            "wos_dc",
+            F.when(F.col("weekly_sales_units") > 0, F.col("avg_daily_dc_inventory") / F.col("weekly_sales_units")).otherwise(
+                F.lit(None)
+            ),
+        )
+        .withColumn(
+            "wos_total",
+            F.when(
+                F.col("weekly_sales_units") > 0, F.col("avg_daily_total_inventory_combined") / F.col("weekly_sales_units")
+            ).otherwise(F.lit(None)),
+        )
+    )
     wos = daily_data_week.groupBy(*keys).agg(
         (F.sum(F.col("wos_units") * F.col("weekly_sales_units")) / F.sum("weekly_sales_units")).alias("WOS"),
         (F.sum(F.col("wos_revenue") * F.col("weekly_sales_revenue")) / F.sum("weekly_sales_revenue")).alias("wos_revenue"),
         (F.sum(F.col("wos_cost") * F.col("weekly_sales_cost")) / F.sum("weekly_sales_cost")).alias("wos_cost"),
+        (F.sum(F.col("wos_dc") * F.col("weekly_sales_units")) / F.sum("weekly_sales_units")).alias("WOS_DC"),
+        (F.sum(F.col("wos_total") * F.col("weekly_sales_units")) / F.sum("weekly_sales_units")).alias("WOS_TOTAL"),
     )
 
     mean_stock_pop = apply_group_population_filter(daily_pair_scoped, "mean_stock", ctx.settings)
     mean_stock = _mean_stock_frame(mean_stock_pop, keys)
+
+    # dc_mean_stock / total_mean_stock: plain per-day averages (not the WOS ratio), same shape
+    # as _mean_stock_frame, at the same `keys` grain.
+    dc_inv_pop = apply_group_population_filter(dc_daily, "dc_inventory", ctx.settings)
+    dc_mean_stock = (
+        dc_inv_pop.groupBy(*keys, "date")
+        .agg(F.sum("inventory").alias("daily_dc_inv"))
+        .groupBy(*keys)
+        .agg(F.avg("daily_dc_inv").alias("dc_mean_stock"))
+    )
+    total_store_pop = apply_group_population_filter(daily_pair_scoped, "dc_inventory", ctx.settings)
+    total_store_day = total_store_pop.groupBy(*keys, "date").agg(F.sum("inventory").alias("store_daily_inv"))
+    total_dc_day = dc_inv_pop.groupBy(*keys, "date").agg(F.sum("inventory").alias("dc_daily_inv"))
+    total_mean_stock = (
+        total_store_day.join(total_dc_day, on=[*keys, "date"], how="left")
+        .withColumn("dc_daily_inv", F.coalesce(F.col("dc_daily_inv"), F.lit(0.0)))
+        .withColumn("total_daily_inv", F.col("store_daily_inv") + F.col("dc_daily_inv"))
+        .groupBy(*keys)
+        .agg(F.avg("total_daily_inv").alias("total_mean_stock"))
+    )
 
     turnover_pop = apply_group_population_filter(daily_pair_scoped, "turnover", ctx.settings)
     turnover_mean_stock = _mean_stock_frame(turnover_pop, keys).select(*keys, "mean_stock")
@@ -192,6 +248,8 @@ def compute_kpis(
     return (
         sales.join(wos, on=keys, how="left")
         .join(mean_stock, on=keys, how="left")
+        .join(dc_mean_stock, on=keys, how="left")
+        .join(total_mean_stock, on=keys, how="left")
         .join(turnover, on=keys, how="left")
         .join(instock, on=keys, how="left")
         .join(weighted_instock, on=keys, how="left")
@@ -209,7 +267,14 @@ def build_kpi_table(
     group_keys = list(group_keys)
     keys = [period_col] + group_keys
     kpis = compute_kpis(
-        ctx, frames["scoped_daily"], frames["inst_data"], frames["scope_pair_weeks"], period_col, group_keys, period_filter
+        ctx,
+        frames["scoped_daily"],
+        frames["inst_data"],
+        frames["scope_pair_weeks"],
+        frames["dc_daily"],
+        period_col,
+        group_keys,
+        period_filter,
     )
     lost_base_pop = apply_group_population_filter(frames["lost_base"], "lost_sales", ctx.settings)
     lost_pct = (
