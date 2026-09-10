@@ -45,12 +45,14 @@ def _period_frames(ctx: KPIContext, frames: Dict[str, DataFrame], period_name: s
         out["scoped_daily"] = _with_period_key(frames["scoped_daily"])
         out["inst_data"] = _with_period_key(frames["inst_data"])
         out["lost_base"] = _with_period_key(frames["lost_base"])
+        out["dc_daily"] = _with_period_key(frames["dc_daily"])
         return out
     if period_name == "monthly":
         out = dict(frames)
         out["scoped_daily"] = _with_month_key(frames["scoped_daily"])
         out["inst_data"] = _with_month_key(frames["inst_data"])
         out["lost_base"] = _with_month_key(frames["lost_base"])
+        out["dc_daily"] = _with_month_key(frames["dc_daily"])
         return out
     if period_name == "ytd":
         # Only the fiscal quarters that have fully elapsed for the latest year (see
@@ -61,6 +63,7 @@ def _period_frames(ctx: KPIContext, frames: Dict[str, DataFrame], period_name: s
         out["scoped_daily"] = _with_ytd_filter(frames["scoped_daily"], available_quarters)
         out["inst_data"] = _with_ytd_filter(frames["inst_data"], available_quarters)
         out["lost_base"] = _with_ytd_filter(frames["lost_base"], available_quarters)
+        out["dc_daily"] = _with_ytd_filter(frames["dc_daily"], available_quarters)
         return out
     return frames
 
@@ -114,7 +117,7 @@ def trim_periods_to_recent(kpi_long: pd.DataFrame, ctx: KPIContext) -> pd.DataFr
 
 
 # Frames that carry the slice dimension columns and therefore get value-filtered.
-_VALUE_FILTERED_FRAMES = ("scoped_daily", "inst_data", "lost_base")
+_VALUE_FILTERED_FRAMES = ("scoped_daily", "inst_data", "lost_base", "dc_daily")
 
 
 def _filter_frames_for_dimension(

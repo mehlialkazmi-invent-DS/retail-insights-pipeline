@@ -66,3 +66,4 @@ class KPIContext:
 
     daily_data_raw: Optional[DataFrame] = None
     lost_sales_weekly_base: Optional[DataFrame] = None
+    inventory_warehouse_raw: Optional[DataFrame] = None

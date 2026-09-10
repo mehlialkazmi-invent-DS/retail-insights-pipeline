@@ -26,7 +26,7 @@ def _format_metric_value(metric: str, value) -> str:
         return f"{value / 1e6:.2f}M"
     if metric == "total_inventory":
         return f"{value / 1e6:.2f}M"
-    if metric in ("mean_stock",):
+    if metric in ("mean_stock", "dc_mean_stock", "total_mean_stock"):
         return f"{value / 1e6:.2f}M"
     if metric in ("mean_stock_retail", "mean_stock_cost"):
         return f"${value / 1e6:.1f}M"
@@ -38,7 +38,7 @@ def _format_metric_value(metric: str, value) -> str:
         return f"{value:.1f}%"
     if metric in _DISTINCT_METRICS:
         return f"{int(value):,}"
-    if metric in ("WOS", "wos_revenue", "wos_cost", "inventory_turnover_rate"):
+    if metric in ("WOS", "wos_revenue", "wos_cost", "inventory_turnover_rate", "WOS_DC", "WOS_TOTAL"):
         return f"{value:.1f}"
     return f"{value:,.2f}"
 

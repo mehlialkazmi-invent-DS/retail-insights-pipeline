@@ -12,6 +12,7 @@ from kpi_pipeline.context import KPIContext
 from kpi_pipeline.inputs import (
     DEFAULT_LOST_SALES_COLUMN_MAP,
     get_daily_data_raw,
+    get_inventory_warehouse_raw,
     read_instock_source,
     read_lost_sales_source,
     read_speed_cluster_source,
@@ -277,6 +278,33 @@ def build_scoped_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs_in: D
     )
 
 
+def build_dc_daily(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
+    """Daily DC (warehouse) inventory for the in-scope product population.
+
+    Unlike build_scoped_daily, there is no store join/semi-join here -- DC data has no
+    store_id at all. The only restriction that makes sense is product_id itself: left-semi
+    against scope_core's own in-scope products, the SAME product population every other
+    scoped frame for this scope/root is restricted to (not an independently-scoped universe).
+    """
+    s = ctx.settings
+    start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
+    scope_products = scope_core.select("product_id").distinct()
+
+    dc = (
+        get_inventory_warehouse_raw(ctx)
+        .select("product_id", "date", "inventory")
+        .withColumn("date", F.to_date(F.col("date")))
+        .filter(F.col("date").between(F.lit(start), F.lit(end)))
+        .join(scope_products, on="product_id", how="left_semi")
+        .join(broadcast(ctx.fiscal_cal.select("date", "Year", "Week")), on="date", how="inner")
+    )
+    return dc.join(ctx.product_dims, on="product_id", how="left").join(
+        broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Month")),
+        on=["Year", "Week"],
+        how="inner",
+    )
+
+
 def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, DataFrame]:
     """Build scoped_daily, inst_data, lost_base, and scope helper frames for one scope variant.
 
@@ -354,6 +382,7 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
     ).cache()
 
     scoped_daily = build_scoped_daily(ctx, scope_core, scope_pairs, has_store).cache()
+    dc_daily = build_dc_daily(ctx, scope_core).cache()
     weekly_pair = scoped_daily.groupBy("product_id", "store_id", "Year", "Week").agg(
         F.sum("sales_quantity").alias("weekly_sales")
     )
@@ -395,4 +424,5 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
         "scope_pairs": scope_pairs,
         "scope_pair_weeks": scope_pair_weeks,
         "lost_sales_weekly": lost_sales_weekly,
+        "dc_daily": dc_daily,
     }
