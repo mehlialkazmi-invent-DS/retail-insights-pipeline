@@ -44,9 +44,13 @@ _CAT: Dict[str, str] = {
     "mean_stock": "inventory",
     "mean_stock_retail": "inventory",
     "mean_stock_cost": "inventory",
+    "dc_mean_stock": "inventory",
+    "total_mean_stock": "inventory",
     "WOS": "inventory",
     "wos_revenue": "inventory",
     "wos_cost": "inventory",
+    "WOS_DC": "inventory",
+    "WOS_TOTAL": "inventory",
     "inventory_turnover_rate": "inventory",
     "total_inventory": "inventory",
     "distinct_product_count": "scale",
@@ -139,6 +143,42 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
         ),
         "store_scope": "All scoped stores",
         "formula": "Σ(weekly_wos × weekly_sales) ÷ Σ(weekly_sales)",
+    },
+    "dc_mean_stock": {
+        "label": "Daily DC Stock Avg (units)",
+        "definition": (
+            "Average of daily DC/warehouse inventory units, restricted to the same in-scope "
+            "product population as every other metric in this report."
+        ),
+        "store_scope": "DC/warehouse only",
+        "formula": "AVG over days of Σ_warehouse(daily_inventory_units)",
+    },
+    "total_mean_stock": {
+        "label": "Daily Total Stock Avg (units)",
+        "definition": "Average of daily store + DC combined inventory units, for the in-scope product population.",
+        "store_scope": "All scoped stores + DC/warehouse",
+        "formula": "AVG over days of (Σ_store(daily_inventory_units) + Σ_warehouse(daily_inventory_units))",
+    },
+    "WOS_DC": {
+        "label": "WOS (DC)",
+        "definition": (
+            "Weeks of Supply based on DC/warehouse inventory only. Same product×fiscal-week grain "
+            "and sales-weighted period rollup as WOS (units) — weekly DC WOS = avg daily DC "
+            "inventory ÷ weekly sales units, at product×fiscal week. Weeks with no DC record "
+            "contribute 0 DC inventory, not a dropped week."
+        ),
+        "store_scope": "DC/warehouse only",
+        "formula": "Σ(weekly_wos_dc × weekly_sales_units) ÷ Σ(weekly_sales_units)",
+    },
+    "WOS_TOTAL": {
+        "label": "WOS (Total)",
+        "definition": (
+            "Weeks of Supply based on store + DC combined inventory. Same product×fiscal-week "
+            "grain and sales-weighted period rollup as WOS (units); weekly total WOS = avg daily "
+            "(store + DC) inventory ÷ weekly sales units."
+        ),
+        "store_scope": "All scoped stores + DC/warehouse",
+        "formula": "Σ(weekly_wos_total × weekly_sales_units) ÷ Σ(weekly_sales_units)",
     },
     "wos_revenue": {
         "label": "WOS Revenue",
@@ -670,7 +710,7 @@ def _fmt(metric: str, value: Any) -> str:
         return f"{v / 1e6:.2f}M"
     if metric == "total_inventory":
         return f"{v / 1e6:.2f}M"
-    if metric == "mean_stock":
+    if metric in ("mean_stock", "dc_mean_stock", "total_mean_stock"):
         return f"{v / 1e6:.2f}M"
     if metric in ("mean_stock_retail", "mean_stock_cost"):
         return f"${v / 1e6:.1f}M"
@@ -682,7 +722,7 @@ def _fmt(metric: str, value: Any) -> str:
         return f"{v:.1f}%"
     if metric in ("distinct_product_count", "distinct_store_count", "distinct_pair_count"):
         return f"{int(v):,}"
-    if metric in ("WOS", "wos_revenue", "wos_cost", "inventory_turnover_rate"):
+    if metric in ("WOS", "wos_revenue", "wos_cost", "inventory_turnover_rate", "WOS_DC", "WOS_TOTAL"):
         return f"{v:.1f}"
     return f"{v:,.2f}"
 

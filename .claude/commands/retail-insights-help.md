@@ -73,8 +73,8 @@ kpi_pipeline/
   scope_debug.py   scope_universe_counts: pre-flight distinct product/store counts per slice
                    (all active_slice_dimensions, root-defining columns included — this is a
                    raw diagnostic, unaware of the root/cut split the KPI step applies)
-  pipeline.py      build_pipeline_frames: scoped_daily, inst_data, lost_base per scope
-  metrics.py       compute_kpis: sales, WOS, mean_stock, instock, weighted_instock_rate
+  pipeline.py      build_pipeline_frames: scoped_daily, inst_data, lost_base, dc_daily per scope
+  metrics.py       compute_kpis: sales, WOS, mean_stock, instock, weighted_instock_rate, WOS_DC/WOS_TOTAL, dc_mean_stock/total_mean_stock
   kpi_long.py      build_kpi_long: loops root × cut × annual/ytd/quarter/monthly/weekly →
                    pandas. Roots = "overall" + ctx.root_definitions; cuts = "overall" +
                    ctx.cut_dimensions, applied identically within every root. Reuses
@@ -293,7 +293,9 @@ Shape: `{metric_col: {dim_col: value_filter_spec}}` — `dim_col` is any `dimens
 |-------|-------------|
 | `sales` | `total_sales_quantity`, `total_sales_revenue`, `total_inventory`, `AUR`, `AUC`, `distinct_product_count`, `distinct_store_count`, `distinct_pair_count` |
 | `wos` | `WOS`, `wos_revenue`, `wos_cost` |
+| `wos_dc_total` | `WOS_DC`, `WOS_TOTAL` |
 | `mean_stock` | `mean_stock`, `mean_stock_retail`, `mean_stock_cost` |
+| `dc_inventory` | `dc_mean_stock`, `total_mean_stock` |
 | `turnover` | `inventory_turnover_rate` |
 | `instock` | `in_stock_rate` |
 | `weighted_instock` | `weighted_instock_rate` |
@@ -569,8 +571,10 @@ Map raw lost-sales and instock table columns to canonical names, or read in-stoc
 
 1. Add Spark aggregation to `compute_kpis` in `kpi_pipeline/metrics.py` (join to existing `keys`).
 2. Add to `CONFIG["metrics"]["metric_cols"]` and `CONFIG["metrics"]["labels"]`.
-3. Optionally add to `scope_diff_metrics` (scope diff) and `pp_change_metrics` (pp change instead of %).
-4. Optionally add a definition to `CONFIG["html_report"]["metric_definitions"]` for the Metric Details tab.
+3. Optionally add to `scope_diff_metrics` (scope diff) and `pp_change_metrics` (pp change instead of %) — mirror what an existing similar metric already does, don't add speculatively.
+4. Optionally add a definition to `CONFIG["html_report"]["metric_definitions"]` for the Metric Details tab (or `html_report.py`'s `DEFAULT_METRIC_DEFINITIONS`/`_CAT`/`_fmt` if it's a repo-level default metric, not a per-customer override).
+5. If the new metric shares an aggregation pass with existing columns, add it to the right group in `kpi_pipeline/filters.py`'s `METRIC_FILTER_GROUPS` (or a NEW group if it shouldn't inherit an existing group's population-filter config) so `metrics.population_filters` can target it.
+6. Update `comparisons.py`'s `_format_metric_value`/`_format_change` if the metric needs formatting different from the fallback (`f"{value:,.2f}"`).
 
 ### Add a new output table
 
@@ -582,6 +586,17 @@ Map raw lost-sales and instock table columns to canonical names, or read in-stoc
 ### Add a new scope source
 
 Add a path to `path_segments` in config, read in `fiscal.py` or a new module, and merge into `hybrid_scope_keys` in `scope.py` with a distinct `scope_origin` label.
+
+### Add a new input frame
+
+For a genuinely new source table (not just a new column off an existing frame) that needs its own scope restriction and its own metrics — e.g. `dc_daily` (DC/warehouse inventory) added for `dc_mean_stock`/`total_mean_stock`/`WOS_DC`/`WOS_TOTAL`:
+
+1. **`context.py`**: add a cached-raw-read field, e.g. `my_source_raw: Optional[DataFrame] = None`, mirroring `daily_data_raw`. Reset it in `runner.py`'s `_reset_run_caches`.
+2. **`inputs.py`**: add `read_my_source(...)` (Delta read + `_input_filters` + `_print_date_range`) and a cached accessor `get_my_source_raw(ctx)` mirroring `read_daily_data_source`/`get_daily_data_raw`.
+3. **`config.py`**: add a `path_segments` entry, resolve its `PATH_...` in `materialize()`'s `paths = {...}` dict, and add an `input_filters` entry.
+4. **`pipeline.py`**: add a `build_my_frame(ctx, scope_core, ...)` function that restricts the raw read to the SAME in-scope population as everything else for that scope/root (left-semi against `scope_core` or a projection of it — never an independently-scoped universe), joins `ctx.fiscal_cal`/`ctx.fiscal_week` for time-grain columns and `ctx.product_dims`/`ctx.products_attr` for slice dimensions. Call it from `build_pipeline_frames` and add the result to the returned dict under a new key.
+5. **`kpi_long.py`**: add the new key to `_period_frames`'s three branches (quarter/monthly/ytd) and to `_VALUE_FILTERED_FRAMES` so root/cut/slice filtering reaches it too.
+6. **`metrics.py`**: `compute_kpis`/`build_kpi_table` pass frames as explicit positional args (not a generic passthrough) — add a new explicit parameter to `compute_kpis` and thread `frames["my_frame"]` through `build_kpi_table`'s call to it.
 
 ---
 
@@ -607,6 +622,10 @@ Add a path to `path_segments` in config, read in `fiscal.py` or a new module, an
 | `in_stock_rate` | In-Stock Rate | All stores | Σ(in_stock_days) ÷ Σ(available_days); pp-change in comparisons |
 | `weighted_instock_rate` | Weighted In-Stock Rate | All stores | Sales-weighted average of weekly in-stock rates; pp-change in comparisons |
 | `lost_sales_pct` | Lost Sales % | All stores | 100×Σ(lost_sales)÷Σ(floor(sales+lost_sales)); pp-change |
+| `dc_mean_stock` | Daily DC Stock Avg (units) | DC/warehouse only | AVG of daily summed DC inventory, in-scope product population |
+| `total_mean_stock` | Daily Total Stock Avg (units) | All stores + DC | AVG of daily summed (store + DC) inventory |
+| `WOS_DC` | WOS (DC) | DC/warehouse only | product × fiscal week; DC-inventory-based rollup, same grain/weighting as WOS |
+| `WOS_TOTAL` | WOS (Total) | All stores + DC | product × fiscal week; (store + DC)-inventory-based rollup, same grain/weighting as WOS |
 
 **Critical formula constraints (never break):**
 - WOS grain is **product × fiscal week**, not product×store×week. Three steps: (1) sum daily inventory/sales across all scoped stores → product×date, (2) weekly WOS = `avg_daily_inventory / weekly_sales` at product×fiscal week, (3) sales-weighted rollup to the reporting period. Never divide period totals directly.
@@ -624,6 +643,18 @@ Scope is product×store×week, but WOS in `metrics.py` is **not** computed at th
 3. **period rollup** — sales-weighted average of weekly WOS values: `Σ(weekly_wos × weekly_sales) ÷ Σ(weekly_sales)`.
 
 Do not confuse scope grain (product×store×week) with WOS computation grain (product×fiscal week after store aggregation).
+
+### 6.1a WOS (DC) / WOS (Total)
+
+`WOS_DC` and `WOS_TOTAL` are twins of `WOS` (units) and follow the **identical** product-week-first, sales-weighted-rollup grain — this is deliberate, so nobody re-introduces the "sum everything into one group-total before dividing" bug a sibling repo had (see `metrics.py`'s module-level warnings). Implementation (`metrics.py`, `compute_kpis`):
+
+1. Reuses the SAME `daily_data_week` frame and `weekly_sales_units` column the store-side WOS already built — no separate sales recomputation.
+2. A new `dc_daily` frame (from `pipeline.build_dc_daily`, restricted to the same in-scope product population as every other frame) is aggregated to the identical `week_keys + period_extra` grain: `avg_daily_dc_inventory`.
+3. Left-joined onto `daily_data_week`; weeks with no DC record get `avg_daily_dc_inventory = 0` (filled, not dropped).
+4. `wos_dc = avg_daily_dc_inventory / weekly_sales_units`; `wos_total = (avg_daily_total_inventory + avg_daily_dc_inventory) / weekly_sales_units` — same `F.when(weekly_sales_units > 0, ...).otherwise(None)` null guard as `wos_units`.
+5. Period rollup: `Σ(wos_dc × weekly_sales_units) ÷ Σ(weekly_sales_units)` and the same shape for `wos_total` — sales-weighted, never a direct period-level division.
+
+`dc_mean_stock`/`total_mean_stock` are NOT WOS ratios — they mirror `mean_stock`'s plain per-day-average shape instead (see `_mean_stock_frame`), just built from `dc_daily` (+ store daily inventory, for the total variant).
 
 ### 6.2 Weighted In-Stock Rate grain
 
@@ -652,9 +683,15 @@ lost_sales_source (cached as lost_sales_weekly_base) — prints its source date 
      model matches the product's cluster
   └─ scoped to hybrid_scope_keys → lost_sales_weekly → inst_data, lost_base
 
-build_pipeline_frames(scope) → {scoped_daily, inst_data, lost_base, ...}
+inventory_warehouse_raw (cached Delta) — prints its source date range on read
+  └─ build_dc_daily → dc_daily (left-semi restricted to scope_core's in-scope products,
+     no store dimension; fiscal + product_dims joined)
+
+build_pipeline_frames(scope) → {scoped_daily, inst_data, lost_base, dc_daily, ...}
   └─ build_kpi_table(period, group_keys) → pandas
        └─ compute_kpis: sales | WOS (product×week, stores aggregated) | mean_stock | instock
+                        | WOS_DC/WOS_TOTAL (dc_daily left-joined onto the same WOS grain)
+                        | dc_mean_stock/total_mean_stock (mean_stock-shaped, dc_daily-based)
        └─ sort in pandas (.sort_values), not Spark orderBy
 
 build_kpi_long → kpi_long (period_type|period|root|dimension|dimension_value|metrics)

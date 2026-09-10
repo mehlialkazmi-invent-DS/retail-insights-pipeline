@@ -180,6 +180,10 @@ CONFIG: Dict[str, Any] = {
     "path_segments": {
         "fiscal": ["one_time_uploads", "fiscal_cal"],
         "daily_data": ["noob", "daily-data"],
+        # DC/warehouse daily inventory (product_id, warehouse_id, date, inventory) -- backs
+        # dc_mean_stock/total_mean_stock/WOS_DC/WOS_TOTAL. No column mapping needed (unlike
+        # lost_sales_source/instock_source): source columns are already canonical.
+        "inventory_warehouse": ["operation", "inventory_warehouse"],
         "products": ["master-data", "products"],
         # Add a model_id=... path segment here if your lost-sales table is partitioned by model.
         "lost_sales": ["noob", "lost-sales"],
@@ -197,6 +201,7 @@ CONFIG: Dict[str, Any] = {
         "defined_scope": [],
         "lost_sales": [],
         "daily_data": ["usable = 1"],
+        "inventory_warehouse": [],
     },
     # ---------------------------------------------------------------------------
     # LOST-SALES SOURCE — column mapping for the raw lost-sales table
@@ -356,9 +361,13 @@ CONFIG: Dict[str, Any] = {
             "mean_stock",
             "mean_stock_retail",
             "mean_stock_cost",
+            "dc_mean_stock",
+            "total_mean_stock",
             "WOS",
             "wos_revenue",
             "wos_cost",
+            "WOS_DC",
+            "WOS_TOTAL",
             "inventory_turnover_rate",
             "in_stock_rate",
             "weighted_instock_rate",
@@ -371,6 +380,8 @@ CONFIG: Dict[str, Any] = {
             "distinct_product_count",
             "distinct_pair_count",
             "WOS",
+            "WOS_DC",
+            "WOS_TOTAL",
             "in_stock_rate",
             "lost_sales_pct",
         ],
@@ -383,9 +394,13 @@ CONFIG: Dict[str, Any] = {
             "mean_stock": "Daily stock avg (M units)",
             "mean_stock_retail": "Daily stock avg retail (M $)",
             "mean_stock_cost": "Daily stock avg cost (M $)",
+            "dc_mean_stock": "Daily DC stock avg (units)",
+            "total_mean_stock": "Daily total stock avg (units)",
             "WOS": "WOS (units)",
             "wos_revenue": "WOS revenue",
             "wos_cost": "WOS cost",
+            "WOS_DC": "WOS (DC)",
+            "WOS_TOTAL": "WOS (Total)",
             "inventory_turnover_rate": "Inventory Turnover Rate",
             "in_stock_rate": "In-Stock Rate",
             "weighted_instock_rate": "Weighted In-Stock Rate",
@@ -415,7 +430,9 @@ CONFIG: Dict[str, Any] = {
         #   sales group:  total_sales_quantity, total_sales_revenue, total_inventory, AUR, AUC,
         #                 distinct_product_count, distinct_store_count, distinct_pair_count
         #   wos group:    WOS, wos_revenue, wos_cost
+        #   wos_dc_total group: WOS_DC, WOS_TOTAL
         #   mean_stock group: mean_stock, mean_stock_retail, mean_stock_cost
+        #   dc_inventory group: dc_mean_stock, total_mean_stock
         #   (inventory_turnover_rate, in_stock_rate, weighted_instock_rate, lost_sales_pct are
         #    each their own independent group.)
         # Setting an entry on any one column in a group applies it to the whole group; setting
@@ -718,6 +735,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     paths = {
         "PATH_FISCAL": fund_paste(bucket, *path_segments["fiscal"]),
         "PATH_DAILY_DATA": fund_paste(bucket, *path_segments["daily_data"]),
+        "PATH_INVENTORY_WAREHOUSE": fund_paste(bucket, *path_segments["inventory_warehouse"]),
         "PATH_PRODUCTS": fund_paste(bucket, *path_segments["products"]),
         "PATH_LOST_SALES": fund_paste(bucket, *path_segments["lost_sales"]),
         "PATH_DEFINED_SCOPE": fund_paste(bucket, *path_segments["defined_scope"]),

@@ -704,6 +704,23 @@ Maps raw lost-sales table columns to canonical names. Allows customers whose los
 
 **Mutually exclusive with `lost_sales_ensemble.enabled=True`.** When `lost_sales_ensemble.enabled=True`, the ensemble blends two lost-sales models and picks in-stock/total-days per row from whichever model was selected — this does not compose with `instock_source`'s separate-table override, which assumes a single lost-sales source. Only one of the two may be active; `materialize()` raises a `ValueError` if both are `True`.
 
+### `inventory_warehouse`
+
+DC/warehouse daily inventory table, backing `dc_mean_stock`, `total_mean_stock`, `WOS_DC`, and `WOS_TOTAL`. Simpler than `lost_sales_source`/`instock_source` — no column mapping, since the source table's columns are already canonical (`product_id`, `warehouse_id`, `date`, `inventory`):
+
+```python
+"path_segments": {
+    ...
+    "inventory_warehouse": ["operation", "inventory_warehouse"],
+},
+"input_filters": {
+    ...
+    "inventory_warehouse": [],
+},
+```
+
+Read via `read_inventory_warehouse_source` (mirrors `read_daily_data_source`) and cached per run as `ctx.inventory_warehouse_raw`. Built into `dc_daily` (`pipeline.build_dc_daily`) restricted by left-semi join to the SAME in-scope product population as every other frame for that scope/root — not an independently-scoped universe. DC data has no store dimension, so there is no store-exclusion config for it; filter unwanted warehouse rows via `input_filters.inventory_warehouse` instead.
+
 ### `output`
 
 See [Output saves](#output-saves) for full mode behaviour, merge keys, workflows, and caveats.
@@ -794,6 +811,7 @@ Default metrics (configurable in `CONFIG["metrics"]`):
 - Sales / inventory (all scoped stores): `total_sales_quantity`, `total_sales_revenue`, `AUR`, `AUC`, `total_inventory`
 - Coverage (all scoped stores): `distinct_product_count`, `distinct_store_count`, `distinct_pair_count`
 - Stock/service (all scoped stores): `mean_stock`, `mean_stock_retail`, `mean_stock_cost`, `WOS`, `wos_revenue`, `wos_cost`, `inventory_turnover_rate`, `in_stock_rate`, `weighted_instock_rate`, `lost_sales_pct`
+- DC/warehouse + combined inventory (requires `path_segments.inventory_warehouse`, see [`inventory_warehouse`](#inventory_warehouse) below): `dc_mean_stock`, `total_mean_stock`, `WOS_DC`, `WOS_TOTAL`
 
 Every metric uses all scoped stores — there is no store-exclusion config key. If a store should never contribute at all (e.g. an e-com fulfillment "store"), filter it out via `input_filters.daily_data`, or rely on your `lost_sales_source`/`instock_source` tables already excluding it upstream (see [Config reference](#config-reference)).
 
@@ -804,6 +822,8 @@ Every metric uses all scoped stores — there is no store-exclusion config key. 
 **Weighted In-Stock Rate** = sales-weighted average of weekly in-stock rates: each fiscal week's in-stock rate is weighted by that week's sales volume when rolling up to the reporting period. Weeks with higher sales carry more weight. Reported as pp-change in comparisons.
 
 **WOS** = per-product per-fiscal-week WOS after summing daily inventory/sales across all scoped stores at product×date (`avg_daily_inventory / weekly_sales`), then rolled up to the reporting period using a sales-weighted average. Not computed at product×store×week grain.
+
+**WOS (DC)** and **WOS (Total)** follow the identical product×fiscal-week grain and sales-weighted rollup as WOS — they reuse the SAME `daily_data_week` frame and `weekly_sales_units` column, left-joined with a DC-inventory frame built at the same grain (weeks with no DC record fill to 0, not dropped). `WOS_DC = avg_daily_dc_inventory / weekly_sales`; `WOS_TOTAL = (avg_daily_total_inventory + avg_daily_dc_inventory) / weekly_sales`. DC inventory is restricted to the same in-scope product population as every other metric in the report (see [`inventory_warehouse`](#inventory_warehouse)).
 
 **Inventory Turnover Rate** = Sales Units ÷ Mean Stock for the same period grain. The HTML report labels it per-tab: **Annual**, **YTD**, **Quarterly**, **Monthly**, or **Weekly** Inventory Turnover Rate.
 
@@ -830,7 +850,9 @@ Shape: `{metric_col: {dim_col: value_filter_spec}}`. `dim_col` is any `dimension
 | ----- | ----------- |
 | `sales` | `total_sales_quantity`, `total_sales_revenue`, `total_inventory`, `AUR`, `AUC`, `distinct_product_count`, `distinct_store_count`, `distinct_pair_count` |
 | `wos` | `WOS`, `wos_revenue`, `wos_cost` |
+| `wos_dc_total` | `WOS_DC`, `WOS_TOTAL` |
 | `mean_stock` | `mean_stock`, `mean_stock_retail`, `mean_stock_cost` |
+| `dc_inventory` | `dc_mean_stock`, `total_mean_stock` |
 | `turnover` | `inventory_turnover_rate` |
 | `instock` | `in_stock_rate` |
 | `weighted_instock` | `weighted_instock_rate` |

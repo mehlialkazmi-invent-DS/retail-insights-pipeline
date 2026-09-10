@@ -319,6 +319,28 @@ def get_daily_data_raw(ctx) -> DataFrame:
     return ctx.daily_data_raw
 
 
+def read_inventory_warehouse_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
+    """DC/warehouse daily inventory table -- plain product_id/warehouse_id/date/inventory
+    columns, no column-mapping needed (unlike lost_sales_source/instock_source)."""
+    path = settings["PATH_INVENTORY_WAREHOUSE"]
+    filters = _input_filters(settings, "inventory_warehouse")
+    if not quiet:
+        print(f"reading inventory_warehouse: {path}")
+    raw = spark.read.format("delta").load(path)
+    if filters and not quiet:
+        print(f"inventory_warehouse filters ({len(filters)}):")
+    out = apply_input_filters(raw, filters, "inventory_warehouse", quiet=quiet)
+    _print_date_range(out, "date", "inventory_warehouse")
+    return out
+
+
+def get_inventory_warehouse_raw(ctx) -> DataFrame:
+    """Cached inventory_warehouse read (config filters applied once per run)."""
+    if ctx.inventory_warehouse_raw is None:
+        ctx.inventory_warehouse_raw = read_inventory_warehouse_source(ctx.spark, ctx.settings, quiet=True).cache()
+    return ctx.inventory_warehouse_raw
+
+
 def preview_input_table(
     df: DataFrame,
     settings: Dict[str, Any],
