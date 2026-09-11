@@ -138,7 +138,9 @@ CONFIG: Dict[str, Any] = {
             "month_col": "Month",
             "month_name_col": "month_name",
         },
-        # Column-name map for the RAW noob/daily-data table -- only consulted on the CIVIL path
+        # Column-name map for the RAW noob/daily-data table. "date" is always required -- read
+        # unconditionally on both the fiscal and civil paths (kpi_pipeline/pipeline.py,
+        # kpi_pipeline/scope.py). "week" is only consulted on the CIVIL path
         # (use_fiscal_calendar=False, not tbretail's setting above). No "year" key: Year always
         # comes from `date` (F.year(date)), never a raw source year column -- that column can
         # carry the ISO week-year (late-December weeks labelled as the next year). See fiscal.py.
@@ -151,7 +153,9 @@ CONFIG: Dict[str, Any] = {
     # SCOPE & POPULATION
     # =============================================================================
     "score_scope": {
-        # Only consulted for the MISSING weeks under hybrid scope (see "scope" below).
+        # Used when scope.use_hybrid_scope=True (missing-week backfill under hybrid scope,
+        # see "scope" below) OR scope.run_scope_diff=True (defined-vs-score diagnostic) --
+        # either one alone triggers score-scope building (kpi_pipeline/scope.py's need_score).
         "min_percentile": 0.2,
         "min_weeks_for_filter": 2,
     },
@@ -653,6 +657,48 @@ def _validate_population_filters(population_filters: Dict[str, Any], metric_cols
         _validate_value_filters(dim_spec)
 
 
+def _validate_scope_diff_metrics(scope_diff_metrics: list, metric_cols: list) -> None:
+    """Fail loudly if metrics.scope_diff_metrics names anything outside metrics.metric_cols.
+
+    Unlike population_filters, nothing else validates this list -- build_scope_diff indexes
+    a DataFrame with it directly (kpi_pipeline/comparisons.py), so a stale/typo'd name here
+    would otherwise surface as a raw KeyError deep inside a scope.run_scope_diff=True run.
+    """
+    known = set(metric_cols)
+    unknown = [m for m in scope_diff_metrics if m not in known]
+    if unknown:
+        raise ValueError(
+            f"metrics.scope_diff_metrics has entr{'y' if len(unknown) == 1 else 'ies'} "
+            f"{unknown} not in metrics.metric_cols {sorted(known)}."
+        )
+
+
+def _validate_scope_adjustments(scope_adjustments_cfg: Dict[str, Any]) -> None:
+    """Fail loudly on an enabled scope_adjustments entry missing required fields.
+
+    Every other field on an addition/removal entry (product_col, store_col, date_col, ...)
+    is read via .get() with a default; join_keys and a source location are not -- they're
+    indexed directly in kpi_pipeline/scope.py, so a copy-pasted entry that forgot one of them
+    would otherwise KeyError deep inside scope building instead of failing at config load.
+    """
+    for section in ("additions", "removals"):
+        for entry in scope_adjustments_cfg.get(section, []) or []:
+            if not entry.get("enabled"):
+                continue
+            label = entry.get("label", f"scope_adjustments.{section}[unlabeled]")
+            join_keys = entry.get("join_keys")
+            if not join_keys or not isinstance(join_keys, (list, tuple)):
+                raise ValueError(
+                    f"scope_adjustments.{section} entry {label!r} is enabled but has no "
+                    f"non-empty join_keys list."
+                )
+            if not entry.get("path") and not entry.get("path_segments"):
+                raise ValueError(
+                    f"scope_adjustments.{section} entry {label!r} is enabled but has neither "
+                    f"'path' nor 'path_segments' set."
+                )
+
+
 def _parse_percentile(raw: str) -> float:
     value = float(raw)
     return value / 100.0 if value > 1 else value
@@ -1034,6 +1080,9 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     metrics = cfg["metrics"]
     population_filters = dict(metrics.get("population_filters", {}) or {})
     _validate_population_filters(population_filters, metrics["metric_cols"])
+    _validate_scope_diff_metrics(metrics["scope_diff_metrics"], metrics["metric_cols"])
+
+    _validate_scope_adjustments(cfg.get("scope_adjustments", {}) or {})
 
     score_scope = cfg["score_scope"]
     min_pct = score_scope["min_percentile"]
