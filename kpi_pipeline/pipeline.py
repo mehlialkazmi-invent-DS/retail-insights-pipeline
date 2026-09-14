@@ -292,7 +292,7 @@ def build_dc_daily(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
 
     dc = (
         get_inventory_warehouse_raw(ctx)
-        .select("product_id", "date", "inventory")
+        .select("product_id", "warehouse_id", "date", "inventory")
         .withColumn("date", F.to_date(F.col("date")))
         .filter(F.col("date").between(F.lit(start), F.lit(end)))
         .join(scope_products, on="product_id", how="left_semi")
