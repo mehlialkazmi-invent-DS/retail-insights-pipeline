@@ -16,7 +16,7 @@ Designed to run on **Databricks** against the customer Delta datastore (`/mnt/in
 | `kpi_long`                              | One tidy table: `period_type` (annual / **ytd** / quarter / monthly / weekly), `period`, `root`, `dimension`, `dimension_value`, plus all configured metrics. `root` is `"overall"` plus one per configured [dimension_source root](#roots-and-cuts-report-structure); `dimension`/`dimension_value` is the cut within that root. Filter this to reproduce any root/cut/period panel. |
 | `comparison_yoy / ytd`                  | Prior vs current period with formatted display columns, per root × cut. YoY is the last two annual periods; YTD compares the **same** elapsed-window **across years**, chained across every consecutive year pair present (see [Selecting which comparisons to run](#selecting-which-comparisons-to-run)). There is no separate QoQ/MoM/WoW comparison table — see the Quarter/Monthly/Weekly `kpi_long` period_type rows for recent-period value trends. Both are recomputed from the full merged kpi_long history on incremental saves. |
 | `scope_diff`                            | Side-by-side annual KPIs for **defined-only** vs **score-only** scope (optional sanity check). Only computed when `scope.run_scope_diff=True`. Compares scope **before** manual adjustments — intentional diagnostic of defined vs score coverage. |
-| `comparable_kpi_long` / `comparable_comparison_ytd` | Like-for-like YTD metrics over only the pairs present in both years of each consecutive-year link, per root × cut. Gated on `comparable_pairs.enabled=True`. |
+| `comparable_kpi_long` / `comparable_comparison_ytd` | Like-for-like YTD metrics over only the pairs present in every year of the run window (one shared universe across all consecutive-year links), per root × cut. Gated on `comparable_pairs.enabled=True`. |
 | **HTML report**                         | Standalone offline HTML with tabbed layout (an outer root tab when more than one root exists), Metric Details, and client/period info panel (see [HTML report](#html-report) section below). |
 
 
@@ -45,7 +45,7 @@ retail-insights-pipeline/
     ├── metrics.py      # KPI aggregation (sales, WOS, instock, lost sales %, …)
     ├── kpi_long.py     # Long-format output across periods and slices
     ├── comparisons.py  # YoY / YTD + defined vs score diff
-    ├── comparable.py   # Gated like-for-like YTD comparison (per-link pair restriction)
+    ├── comparable.py   # Gated like-for-like YTD comparison (all-years pair restriction)
     ├── io.py           # Incremental Delta saves + save plan preview
     ├── html_report.py  # Standalone HTML renderer (offline, tabbed report)
     └── context.py      # Shared runtime state (KPIContext)
@@ -291,7 +291,7 @@ To exclude a set but keep the rest (e.g. a "not going forward" list that only li
 
 ## Comparable pairs (like-for-like, YTD-only)
 
-**Gated, opt-in** (default off). When enabled, YTD metrics are recomputed over **only the `(product_id, store_id)` pairs present in both years of each consecutive-year link**, then compared. This isolates like-for-like movement from mix shifts caused by newly listed or closed pairs. There is no comparable YoY (or QoQ/MoM/WoW, which don't exist as comparison kinds at all — see [Selecting which comparisons to run](#selecting-which-comparisons-to-run)).
+**Gated, opt-in** (default off). When enabled, YTD metrics are recomputed over **only the `(product_id, store_id)` pairs present in EVERY year of the run window**, then compared. This isolates like-for-like movement from mix shifts caused by newly listed or closed pairs. There is no comparable YoY (or QoQ/MoM/WoW, which don't exist as comparison kinds at all — see [Selecting which comparisons to run](#selecting-which-comparisons-to-run)).
 
 ```python
 "comparable_pairs": {
@@ -301,18 +301,16 @@ To exclude a set but keep the rest (e.g. a "not going forward" list that only li
 
 Or set `KPI_COMPARABLE_PAIRS=true`. Requires `"ytd"` to also be in `comparisons.enabled` — otherwise comparable pairs is skipped with a log message, since there's nothing to restrict.
 
-**How it works — per link, not a fixed universe across the whole window**
+**How it works — one fixed universe across the whole window, shared by every link**
 
-Each consecutive-year link gets its **own** pair universe, computed from just that link's two years — not the intersection across every year in the run window. Concretely, with years 2024/2025/2026 all present:
-- The **2025-vs-2026** link's universe = pairs present in **both 2025 and 2026** (2024 is irrelevant to this link).
-- The **2024-vs-2025** link's universe = pairs present in **both 2024 and 2025** (2026 is irrelevant to this link).
+The pair universe is computed **once**, as the intersection across **every** year present in the run window — not per link. Concretely, with years 2024/2025/2026 all present, only pairs present in **2024 AND 2025 AND 2026** count. A pair present in 2025 and 2026 but *not* 2024 is excluded entirely, from every link — it does not count for the 2025-vs-2026 link either.
 
-A pair present in 2025 and 2026 but *not* 2024 still counts for the 2025-vs-2026 link, even though it would fail a "present in every year" test. Because each link's restriction is independent, the **same year's metric value can differ depending on which link it's paired with** — 2025's YTD revenue as the "current" value in the 2024-vs-2025 link (restricted to 2024∩2025 pairs) is generally not the same number as 2025's YTD revenue as the "prior" value in the 2025-vs-2026 link (restricted to 2025∩2026 pairs). This is expected, not a bug.
+That single population is then reused for both the 2024-vs-2025 link and the 2025-vs-2026 link, so the **same year now carries the same metric value in every link it participates in** — 2025's YTD revenue as the "current" value in the 2024-vs-2025 link and 2025's YTD revenue as the "prior" value in the 2025-vs-2026 link are computed over the identical all-years-restricted population.
 
-All metric frames (sales/inventory, in-stock, lost sales) are restricted to a link's pair set before metrics are computed, for **Overall and every slice**. Because each slice dimension is a product attribute, the single overall intersection grouped by slice equals a per-slice intersection.
+All metric frames (sales/inventory, in-stock, lost sales) are restricted to this one all-years pair set before metrics are computed, for **Overall and every slice**. Because each slice dimension is a product attribute, the single overall intersection grouped by slice equals a per-slice intersection.
 
 **Outputs**
-- `comparable_kpi_long` — per-link YTD metrics, tagged with `comparison_type="ytd"`, `comparable_pair_count` (that link's universe size), and `link_prior_year`/`link_current_year` (which link a row belongs to — needed because, as above, the same year can appear more than once with different values).
+- `comparable_kpi_long` — per-link YTD metrics, tagged with `comparison_type="ytd"`, `comparable_pair_count` (the shared universe size, same across every link), and `link_prior_year`/`link_current_year` (which link a row belongs to — kept only so incremental save's merge key doesn't collide across links, since the same year can appear in up to two links).
 - `comparable_comparison_ytd` — comparison rows (same schema as the regular `comparison_ytd` table).
 - HTML report — a second **"Comparable YTD"** comparison table beneath the standard one on the YTD panel only, stacked one mini-table per consecutive-year link when more than one exists.
 - Notebook — a "Comparable pairs (like-for-like, YTD-only)" cell.
