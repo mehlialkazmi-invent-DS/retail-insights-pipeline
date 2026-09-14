@@ -37,9 +37,10 @@
 #                         pipeline computes instock than the one computing lost sales).
 #                         Supports fallback_sources to backfill weeks a rolling-window
 #                         source's primary column-set doesn't reach (see README).
-#   comparable_pairs    — like-for-like YTD over pairs present in both years of each link;
-#                         requires 2+ years in the report window (run_min_date spanning that
-#                         far back) to have anything to compute.
+#   comparable_pairs    — like-for-like YTD over pairs present in EVERY year in the report
+#                         window (one shared universe across every consecutive-year link, not
+#                         a separate universe per link); requires 2+ years (run_min_date
+#                         spanning that far back) to have anything to compute.
 
 import copy
 import datetime
@@ -344,9 +345,10 @@ CONFIG: Dict[str, Any] = {
     },
     "comparable_pairs": {
         # OFF by default -- requires run_min_date to span at least 2 years (e.g. "2024-01-01"
-        # for a comparable 2024-vs-2025 link) to have anything to compute. Like-for-like YTD:
-        # recomputes YTD metrics over only the (product_id, store_id) pairs present in BOTH
-        # years of each consecutive-year link.
+        # to cover a 2024-vs-2025 link) to have anything to compute. Like-for-like YTD:
+        # recomputes YTD metrics over only the (product_id, store_id) pairs present in EVERY
+        # year of the run window -- one shared universe reused across every consecutive-year
+        # link, not a separate universe per link.
         "enabled": False,
     },
     # =============================================================================
