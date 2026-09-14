@@ -710,8 +710,10 @@ def _fmt(metric: str, value: Any) -> str:
         return f"{v / 1e6:.2f}M"
     if metric == "total_inventory":
         return f"{v / 1e6:.2f}M"
-    if metric in ("mean_stock", "dc_mean_stock", "total_mean_stock"):
+    if metric == "mean_stock":
         return f"{v / 1e6:.2f}M"
+    if metric in ("dc_mean_stock", "total_mean_stock"):
+        return f"{v:,.2f}"
     if metric in ("mean_stock_retail", "mean_stock_cost"):
         return f"${v / 1e6:.1f}M"
     if metric in ("AUR", "AUC"):
