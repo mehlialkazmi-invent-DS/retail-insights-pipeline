@@ -26,10 +26,8 @@ def _format_metric_value(metric: str, value) -> str:
         return f"{value / 1e6:.2f}M"
     if metric == "total_inventory":
         return f"{value / 1e6:.2f}M"
-    if metric == "mean_stock":
+    if metric in ("mean_stock", "dc_mean_stock", "total_mean_stock"):
         return f"{value / 1e6:.2f}M"
-    if metric in ("dc_mean_stock", "total_mean_stock"):
-        return f"{value:,.2f}"
     if metric in ("mean_stock_retail", "mean_stock_cost"):
         return f"${value / 1e6:.1f}M"
     if metric in ("AUR", "AUC"):
