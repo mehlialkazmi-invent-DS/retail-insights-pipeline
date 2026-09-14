@@ -92,7 +92,14 @@
 #                store_id exclusion to input_filters.daily_data if one is ever needed.
 #   Dimensions:  is_nvrout (NVROUT vs COMP), brand, SMW (KNG vs SMW)
 #   Comparisons: YoY / YTD
-#   Comparable:  like-for-like YTD over a per-link (consecutive-year-pair) pair universe
+#   Comparable:  like-for-like YTD over ONE pair universe shared across every consecutive-year
+#                link (pairs must be present in every year in the run window, not just the
+#                two years of a given link)
+#   DC/warehouse: dc_mean_stock/total_mean_stock/WOS_DC/WOS_TOTAL from operation/inventory_
+#                warehouse (path_segments.inventory_warehouse) — restricted to the same
+#                in-scope product population as every other metric, no separate DC-specific
+#                scope and no PDSR/shipment_type narrowing (see kpi_pipeline/pipeline.py's
+#                build_dc_daily).
 #   Report:      TBretail KPI Report HTML with all slices and comparable tables
 
 import copy
@@ -197,7 +204,7 @@ CONFIG: Dict[str, Any] = {
         # See SETUP CHECKLIST at the top of this file for how to create the CSV.
         "additions": [
             {
-                "enabled": True,  # flip to True after creating the CSV
+                "enabled": True,  # CSV already created; see SETUP CHECKLIST step 1 to refresh it
                 "label": "jab_products",
                 "source": "csv",
                 "path": (
@@ -225,7 +232,7 @@ CONFIG: Dict[str, Any] = {
             # not disable or "fix" this without checking, since it currently affects which
             # products count toward live production KPI numbers.
             {
-                "enabled": True,  # flip to True after creating the CSV
+                "enabled": True,  # CSV already created; see SETUP CHECKLIST step 2 to refresh it
                 "label": "NGF products",
                 "source": "csv",
                 "path": (
@@ -438,7 +445,7 @@ CONFIG: Dict[str, Any] = {
         # despite the source only covering one side of the split.
         # ---------------------------------------------------------------------------
         {
-            "enabled": True,  # flip to True after creating the CSV
+            "enabled": True,  # CSV already created; see SETUP CHECKLIST step 3 to refresh it
             "label": "ngf_comp_split",
             "source": "csv",
             "path": (
@@ -469,9 +476,10 @@ CONFIG: Dict[str, Any] = {
     },
     "comparable_pairs": {
         # Like-for-like YTD (comparable is YTD-only): recomputes YTD metrics over only the
-        # (product_id, store_id) pairs present in BOTH years of each consecutive-year link — the
-        # same concept as v4's _pairs_same_calendar_years / sameytd. Requires run_min_date to span
-        # at least 2 years (e.g. "2024-01-01" for a comparable 2024-vs-2025 link).
+        # (product_id, store_id) pairs present in EVERY year of the run window — one shared
+        # universe reused across every consecutive-year link, not a separate universe per link.
+        # Requires run_min_date to span at least 2 years (e.g. "2024-01-01" to cover a
+        # 2024-vs-2025 link).
         "enabled": True,
     },
     # =============================================================================
