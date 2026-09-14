@@ -79,9 +79,10 @@ TABLE_ROW_KEYS: Dict[str, Sequence[str]] = {
     "comparison_yoy": ("comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period"),
     "comparison_ytd": ("comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period"),
     "scope_diff": ("Year", "metric"),
-    # link_prior_year/link_current_year included: the same year's row can legitimately carry a
-    # different metric value per link it participates in (each link has its own pair
-    # restriction), so the link identifies which occurrence a given row is.
+    # link_prior_year/link_current_year included: the same year appears once per adjacent link
+    # it participates in (as "current" in one, "prior" in the next) even though every link now
+    # shares the same all-years-restricted pair population -- the link tag is what tells those
+    # two occurrences of the same year apart under this row key, not a value difference.
     "comparable_kpi_long": (
         "comparison_type", "period_type", "period", "root", "dimension", "dimension_value",
         "link_prior_year", "link_current_year",

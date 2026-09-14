@@ -87,10 +87,9 @@ kpi_pipeline/
                    _consecutive_year_pairs. No QoQ/MoM/WoW comparison table exists — the
                    Quarter/Monthly/Weekly period tabs show value trends only.
   comparable.py    build_comparable_pairs: like-for-like YTD metrics only, root × cut aware.
-                   Each consecutive-year link gets its OWN pair universe (intersection of just
-                   that link's two years, NOT restricted per root — computed once against the
-                   overall population), not a universe fixed across the whole window — see
-                   rebuild_comparable_ytd_from_saved_rows
+                   ONE pair universe (intersection across EVERY year in the window, NOT
+                   restricted per root — computed once against the overall population), shared
+                   by every consecutive-year link — see rebuild_comparable_ytd_from_saved_rows
   io.py            incremental Delta saves, save plan, load_saved_outputs (html_only),
                    recompute comparisons from merged kpi_long history. TABLE_ROW_KEYS now
                    includes "root" everywhere dimension/dimension_value appears.
@@ -340,7 +339,7 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — comparabl
 | `kpi_long` | `period_type`, `period`, `root`, `dimension`, `dimension_value` |
 | `comparison_yoy` / `comparison_ytd` | `comparison_type`, `root`, `dimension`, `dimension_value`, `metric_key`, `current_period` |
 | `scope_diff` | `Year`, `metric` |
-| `comparable_kpi_long` | `comparison_type`, `period_type`, `period`, `root`, `dimension`, `dimension_value`, `link_prior_year`, `link_current_year` (the link tag is required — the same year can carry a different value per link it's paired with) |
+| `comparable_kpi_long` | `comparison_type`, `period_type`, `period`, `root`, `dimension`, `dimension_value`, `link_prior_year`, `link_current_year` (the link tag is required — the same year appears once per adjacent link it participates in, even though every link now shares one all-years-restricted population) |
 | `comparable_comparison_ytd` | `comparison_type`, `root`, `dimension`, `dimension_value`, `metric_key`, `current_period` (same shape as `comparison_yoy`/`comparison_ytd` — no link tag needed here: `current_period` already embeds `current_year`, and each consecutive-year link has a distinct `current_year`, so it can't collide across links) |
 
 **Save modes:**
@@ -401,7 +400,7 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — comparabl
 
 ### 3.6 Comparable pairs (like-for-like, YTD-only)
 
-**Gated, opt-in** (default off). YTD metrics are recomputed over **only the `(product_id, store_id)` pairs present in both years of each consecutive-year link**, then compared. Isolates like-for-like movement from mix shifts caused by new/closed pairs. There is no comparable YoY/QoQ/MoM/WoW — comparable is YTD-only, and QoQ/MoM/WoW aren't comparison kinds at all (see §3.5.1).
+**Gated, opt-in** (default off). YTD metrics are recomputed over **only the `(product_id, store_id)` pairs present in EVERY year of the run window**, then compared. Isolates like-for-like movement from mix shifts caused by new/closed pairs. There is no comparable YoY/QoQ/MoM/WoW — comparable is YTD-only, and QoQ/MoM/WoW aren't comparison kinds at all (see §3.5.1).
 
 ```python
 "comparable_pairs": {
@@ -411,10 +410,10 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — comparabl
 
 Requires `"ytd"` in `comparisons.enabled` — otherwise a no-op (logged, not an error).
 
-**How it works — per link, not a fixed universe across the window:**
-Each consecutive-year link's pair universe is computed from just that link's two years. With 2024/2025/2026 all present: the 2025-vs-2026 link's universe = pairs present in **both 2025 and 2026** (2024 irrelevant to this link); the 2024-vs-2025 link's universe = pairs present in **both 2024 and 2025** (2026 irrelevant). A pair in 2025+2026 but not 2024 still counts for the 2025-vs-2026 link. Consequence: the **same year can carry a different metric value depending on which link it's in** — 2025 as "current" in the 2024-2025 link (restricted to 2024∩2025 pairs) generally differs from 2025 as "prior" in the 2025-2026 link (restricted to 2025∩2026 pairs). This is why `comparable_kpi_long` rows are tagged with `link_prior_year`/`link_current_year` (see §3.5 merge keys) — without the tag, two links' rows for the same year would collide under one merge key.
+**How it works — one fixed universe across the whole window, shared by every link:**
+The pair universe is computed ONCE, as the intersection across every year present in the run window (not per link). With 2024/2025/2026 all present: only pairs present in **2024 AND 2025 AND 2026** count — a pair present in 2025+2026 but missing from 2024 is excluded entirely, from every link. That same population is then used for both the 2024-vs-2025 link and the 2025-vs-2026 link, so **a given year now carries the same metric value in every link it appears in** — 2025 as "current" in the 2024-2025 link and 2025 as "prior" in the 2025-2026 link are computed over the identical restricted population. `comparable_kpi_long` rows still carry `link_prior_year`/`link_current_year` (see §3.5 merge keys) purely so incremental save's merge key doesn't collide across links — not because the values themselves differ by link anymore.
 
-All metric frames are restricted to a link's pair set and metrics recomputed for Overall and every slice (since slice dims are product attributes, no extra per-slice intersections needed).
+All metric frames are restricted to this one all-years pair set and metrics recomputed for Overall and every slice (since slice dims are product attributes, no extra per-slice intersections needed).
 
 **Outputs:**
 - `comparable_kpi_long` — per-link YTD metrics + `comparable_pair_count` + `link_prior_year`/`link_current_year`.
@@ -704,8 +703,8 @@ trim_periods_to_recent → produces ctx.kpi_long_display (HTML rendering ONLY) t
 build_comparisons → yoy/ytd pandas tables, per root × cut (ytd: one row set per year-pair,
                      chained across consecutive years). No qoq/mom/wow comparison table exists.
 build_comparable_pairs → comparable_kpi_long + comparable_comparison_ytd, per root × cut (when
-                          enabled; YTD-only, per-link pair restriction computed once against the
-                          overall population, not per root — see §3.6)
+                          enabled; YTD-only, ONE all-years pair restriction shared by every link,
+                          computed once against the overall population, not per root — see §3.6)
 build_scope_diff → scope_diff pandas table (defined vs score; only when run_scope_diff=True)
 save_outputs → kpi_long (incremental) → recompute comparisons from merged history → save all
 render_kpi_html → standalone HTML file
@@ -863,7 +862,7 @@ For a quick distinct product/store count of the final scope (overall + per slice
 11. **Speed-cluster table shape is config, not auto-detected** — `speed_cluster_format` must match the actual source table (`"long"` attribute_name/attribute_value vs `"wide"` a direct cluster column); pointing at the wrong shape fails loudly on read rather than silently returning nulls.
 12. **Comparisons recomputed from merged history** — under incremental, `comparison_*` tables reflect the full saved `kpi_long` history, not just the current run window.
 13. **`ctx.kpi_long` is never trimmed; only `ctx.kpi_long_display` is** — the HTML display trim (`*_display_*` settings) must only ever write to `kpi_long_display`. Trimming `ctx.kpi_long` itself would silently truncate what `save_outputs()` persists, since `main.ipynb` calls `runner.run(save=False)` then `save_outputs(ctx, ...)` separately in a later cell — this was a real, previously-shipped bug.
-14. **Comparable-pairs (YTD-only) restriction is per consecutive-year link, not fixed across the whole window** — each link's pair universe comes from just that link's two years; a pair need not be present in every year in the run window to count for a link it's genuinely common to. This means the same year's metric value can legitimately differ across the two links it participates in — `comparable_kpi_long` rows carry `link_prior_year`/`link_current_year` specifically so incremental merge doesn't collide two links' rows for the same year under one key.
+14. **Comparable-pairs (YTD-only) restriction is a single universe fixed across the whole window, shared by every consecutive-year link** — a pair/product must be present in EVERY year in the run window to count at all, computed once (not per link). This means the same year's metric value is now identical across every link it participates in — `comparable_kpi_long` rows still carry `link_prior_year`/`link_current_year`, but only so incremental merge doesn't collide two links' rows for the same year under one key, not because the values differ by link.
 15. **Dimension sources fail loudly** — unlike `slices.derived_dimensions` (skipped on error), an enabled `dimension_sources` entry always raises on bad path/column/expression.
 16. **`dimension_sources` columns are ALWAYS roots, never cuts** — mutually exclusive with `slices` by design. A dimension_source column is unconditionally excluded from `ctx.cut_dimensions` even if nothing lists it as a root explicitly (auto-discovery still applies); do not expect it to show up as a flat breakdown alongside brand/SMW.
 17. **A fiscal calendar's month/quarter NUMBER is not assumed to equal the real calendar month/quarter** — `fiscal_calendar.column_map` reads a client's own quarter/month columns when present, but the Monthly tab's *display label* is never derived by feeding a fiscal month number into a month-name table (a client's fiscal year can be offset from the civil calendar, e.g. tbretail's Feb–Jan year, so fiscal month 07 can span real August). The label is instead derived from the majority real calendar month by day count across each fiscal month's actual dates when `month_name_col` isn't configured — see §3.1.
