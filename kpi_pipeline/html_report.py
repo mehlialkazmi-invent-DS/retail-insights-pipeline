@@ -1403,7 +1403,12 @@ def render_kpi_html(
     if not roots:
         roots = ["overall"]
 
-    details_panel_html = f"<div class='top-panel top-panel-details'>{_metric_details_html(metric_cols, labels, defs)}</div>"
+    # Raw table markup, no top-panel wrapper of its own -- each call site below wraps it exactly
+    # once with whatever class its own CSS actually makes visible (see the multi-root bug this
+    # replaced: wrapping it here AND at the multi-root call site nested two .top-panel elements,
+    # and only the outer one's class had a display:block override, so the inner one's
+    # display:none from the base .top-panel rule was never lifted -- the tab looked empty).
+    metric_details_html = _metric_details_html(metric_cols, labels, defs)
 
     if len(roots) == 1:
         root = roots[0]
@@ -1412,7 +1417,7 @@ def render_kpi_html(
             kpi_long_root, root, period_types, dims, metric_cols, labels,
             _comp_df_for_root(comp_map, root), _comp_df_for_root(comparable_comp_map, root),
             week_start_by_period, month_display_by_period,
-            extra_tab=("details", "Metric Details", _metric_details_html(metric_cols, labels, defs)),
+            extra_tab=("details", "Metric Details", metric_details_html),
         )
         main_panel = f"<div class='panel'>{body}</div>"
     else:
@@ -1447,7 +1452,7 @@ def render_kpi_html(
             f"<div class='top-panel top-panel-root-{_safe_id(root)}'><div class='panel'>{body}</div></div>"
             for root, body in root_panels
         )
-        root_panels_html += f"<div class='top-panel top-panel-root-details'>{details_panel_html}</div>"
+        root_panels_html += f"<div class='top-panel top-panel-root-details'>{metric_details_html}</div>"
 
         root_css_lines: List[str] = []
         for root, _ in root_panels:
