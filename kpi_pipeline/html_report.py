@@ -145,7 +145,7 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "formula": "Σ(weekly_wos × weekly_sales) ÷ Σ(weekly_sales)",
     },
     "dc_mean_stock": {
-        "label": "Daily DC Stock Avg (units)",
+        "label": "Daily DC Stock Avg (M units)",
         "definition": (
             "Average of daily DC/warehouse inventory units, restricted to the same in-scope "
             "product population as every other metric in this report."
@@ -154,7 +154,7 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "formula": "AVG over days of Σ_warehouse(daily_inventory_units)",
     },
     "total_mean_stock": {
-        "label": "Daily Total Stock Avg (units)",
+        "label": "Daily Total Stock Avg (M units)",
         "definition": "Average of daily store + DC combined inventory units, for the in-scope product population.",
         "store_scope": "All scoped stores + DC/warehouse",
         "formula": "AVG over days of (Σ_store(daily_inventory_units) + Σ_warehouse(daily_inventory_units))",
@@ -710,10 +710,8 @@ def _fmt(metric: str, value: Any) -> str:
         return f"{v / 1e6:.2f}M"
     if metric == "total_inventory":
         return f"{v / 1e6:.2f}M"
-    if metric == "mean_stock":
+    if metric in ("mean_stock", "dc_mean_stock", "total_mean_stock"):
         return f"{v / 1e6:.2f}M"
-    if metric in ("dc_mean_stock", "total_mean_stock"):
-        return f"{v:,.2f}"
     if metric in ("mean_stock_retail", "mean_stock_cost"):
         return f"${v / 1e6:.1f}M"
     if metric in ("AUR", "AUC"):
