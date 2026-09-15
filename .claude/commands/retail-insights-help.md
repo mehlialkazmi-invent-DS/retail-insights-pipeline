@@ -402,6 +402,8 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — comparabl
 
 **Gated, opt-in** (default off). YTD metrics are recomputed over **only the `(product_id, store_id)` pairs present in EVERY year of the run window**, then compared. Isolates like-for-like movement from mix shifts caused by new/closed pairs. There is no comparable YoY/QoQ/MoM/WoW — comparable is YTD-only, and QoQ/MoM/WoW aren't comparison kinds at all (see §3.5.1).
 
+**Pair-level under every `defined_scope.grain`, `"product"` included.** `scoped_daily` carries `store_id` straight from daily-data whatever the scope grain, so comparable always requires the *same product-store pairs* in every year — it does not degrade to a product-only match when the report's own scope is store-agnostic. Don't "restore" a grain-conditional key here: a comparable universe that silently weakens with the scope configuration is the bug this replaced.
+
 ```python
 "comparable_pairs": {
     "enabled": True,   # default False
@@ -414,6 +416,11 @@ Requires `"ytd"` in `comparisons.enabled` — otherwise a no-op (logged, not an 
 The pair universe is computed ONCE, as the intersection across every year present in the run window (not per link). With 2024/2025/2026 all present: only pairs present in **2024 AND 2025 AND 2026** count — a pair present in 2025+2026 but missing from 2024 is excluded entirely, from every link. That same population is then used for both the 2024-vs-2025 link and the 2025-vs-2026 link, so **a given year now carries the same metric value in every link it appears in** — 2025 as "current" in the 2024-2025 link and 2025 as "prior" in the 2025-2026 link are computed over the identical restricted population. `comparable_kpi_long` rows still carry `link_prior_year`/`link_current_year` (see §3.5 merge keys) purely so incremental save's merge key doesn't collide across links — not because the values themselves differ by link anymore.
 
 All metric frames are restricted to this one all-years pair set and metrics recomputed for Overall and every slice (since slice dims are product attributes, no extra per-slice intersections needed).
+
+The restriction key is chosen **per frame**, from the columns that frame actually carries — not once globally:
+- `scoped_daily` → `(product_id, store_id)`, always.
+- `inst_data` / `lost_base` / `scope_pairs` / `scope_pair_weeks` → `(product_id, store_id)` when they have a store dimension (native `lost_sales_source.store_col`, or broadcast on from a store-grain scope); otherwise the pair universe's **distinct products**. Collapsing to distinct products first is load-bearing: joining a store-less frame straight onto pair keys would fan its rows out one-per-store and multiply lost sales. Those frames keep product-level values; only their product universe is made like-for-like.
+- `dc_daily` → its own independent `(product_id, warehouse_id)` all-years intersection. DC/warehouse inventory has no store dimension, so it can never share the store-side keys.
 
 **Outputs:**
 - `comparable_kpi_long` — per-link YTD metrics + `comparable_pair_count` + `link_prior_year`/`link_current_year`.
