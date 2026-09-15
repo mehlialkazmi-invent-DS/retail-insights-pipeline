@@ -322,10 +322,13 @@ CONFIG: Dict[str, Any] = {
     # and _map_product_agg_level_to_product_id's docstring (kpi_pipeline/inputs.py), which fails
     # loudly if neither is usable, or if product_agg_level_col is configured but not present.
     #
-    # CAUTION -- store_col=None: lost_sales is an absolute count; report_dfu has no store_id,
-    # so this pair-week's value gets broadcast across every scoped store of the product and
-    # OVER-COUNTS if later summed across stores (same risk documented on instock_source below,
-    # but that one is a ratio -- safe there, NOT safe here).
+    # store_col=None: report_dfu has no store_id, so the scope join collapses to this source's
+    # own grain -- store_id drops out of the join keys and one product-week stays one row (see
+    # pipeline.build_pipeline_frames). That is required because lost_sales is an ABSOLUTE count:
+    # fanning it out per scoped store would inflate every cross-store sum. instock_source below
+    # is a ratio, so broadcasting is safe there and it is handled the other way round. Residual
+    # limit: the value spans the product's whole store footprint, which a store-less source has
+    # no detail to narrow.
     "lost_sales_source": {
         "week_col": "TY_week_start_date",
         "product_col": "product_id",
