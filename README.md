@@ -293,6 +293,8 @@ To exclude a set but keep the rest (e.g. a "not going forward" list that only li
 
 **Gated, opt-in** (default off). When enabled, YTD metrics are recomputed over **only the `(product_id, store_id)` pairs present in EVERY year of the run window**, then compared. This isolates like-for-like movement from mix shifts caused by newly listed or closed pairs. There is no comparable YoY (or QoQ/MoM/WoW, which don't exist as comparison kinds at all — see [Selecting which comparisons to run](#selecting-which-comparisons-to-run)).
 
+**The pair universe is pair-level under every `defined_scope.grain`, including `"product"`.** `scoped_daily` carries `store_id` straight from `noob/daily-data` whatever the scope grain (a product-grain scope restricts by product but leaves every store's rows intact), so like-for-like always means the *same product-store pairs* in every year — it never weakens to a product-only match just because the report's own scope is store-agnostic.
+
 ```python
 "comparable_pairs": {
     "enabled": True,   # default False
@@ -308,6 +310,18 @@ The pair universe is computed **once**, as the intersection across **every** yea
 That single population is then reused for both the 2024-vs-2025 link and the 2025-vs-2026 link, so the **same year now carries the same metric value in every link it participates in** — 2025's YTD revenue as the "current" value in the 2024-vs-2025 link and 2025's YTD revenue as the "prior" value in the 2025-vs-2026 link are computed over the identical all-years-restricted population.
 
 All metric frames (sales/inventory, in-stock, lost sales) are restricted to this one all-years pair set before metrics are computed, for **Overall and every slice**. Because each slice dimension is a product attribute, the single overall intersection grouped by slice equals a per-slice intersection.
+
+The restriction key is picked **per frame**, from the columns that frame actually has:
+
+| Frame | Restricted on |
+|---|---|
+| `scoped_daily` | `(product_id, store_id)` — always, under every grain |
+| `inst_data`, `lost_base`, `scope_pairs`, `scope_pair_weeks` | `(product_id, store_id)` when they carry a store dimension; otherwise the pair universe's **distinct products** |
+| `dc_daily` | `(product_id, warehouse_id)` — its own independent same-pairs universe |
+
+In-stock and lost-sales frames only carry `store_id` when `lost_sales_source.store_col` is set (or when a store-grain scope broadcast one onto them). When that source is store-less, those frames are matched on the pair universe's distinct products — collapsed to distinct products first, so the join can't fan their rows out one-per-store — and their values stay product-level totals; only the product universe becomes like-for-like.
+
+DC/warehouse inventory has no store dimension at all, so `dc_daily` can never share the store-side keys. It gets its **own** `(product_id, warehouse_id)` all-years intersection, restricted independently — two same-pairs universes, each on its own terms, rather than one forced onto both.
 
 **Outputs**
 - `comparable_kpi_long` — per-link YTD metrics, tagged with `comparison_type="ytd"`, `comparable_pair_count` (the shared universe size, same across every link), and `link_prior_year`/`link_current_year` (which link a row belongs to — kept only so incremental save's merge key doesn't collide across links, since the same year can appear in up to two links).
