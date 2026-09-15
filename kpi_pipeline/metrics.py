@@ -12,33 +12,11 @@ from kpi_pipeline.context import KPIContext
 from kpi_pipeline.filters import apply_group_population_filter
 
 
-def _restrict_to_scope_pair_weeks(ctx: KPIContext, df: DataFrame, scope_pair_weeks_in: DataFrame) -> DataFrame:
-    """Restrict scoped_daily to the (product[, store], week) rows lost_sales_weekly actually has.
-
-    Only needed in the product-week (no store grain) fallback path: there, scope has no store
-    dimension of its own, so scoped_daily keeps every store daily_data has for an in-scope
-    (product, week) -- wider than scope_pair_weeks, which is derived from lost_sales_weekly's
-    own (narrower) coverage. In the store-grain path, scoped_daily is already restricted to
-    scope_pair_weeks, so this is a no-op skip.
-
-    scope_pair_weeks_in's own store_id presence (not ctx.scope_keys's) decides whether the join
-    key includes it: when lost_sales_source is ALSO store-less (pure product-grain, no store
-    anywhere -- see pipeline.build_pipeline_frames's ls_has_store), scope_pair_weeks_in is
-    product-week only, and restricting scoped_daily by (product, week) alone -- keeping every
-    store for each surviving product-week -- is the correct analogue.
-    """
-    if "store_id" in ctx.scope_keys:
-        return df
-    if "store_id" in scope_pair_weeks_in.columns:
-        return df.join(scope_pair_weeks_in, on=["product_id", "store_id", "Year", "Week"], how="left_semi")
-    return df.join(scope_pair_weeks_in, on=["product_id", "Year", "Week"], how="left_semi")
-
-
-def _mean_stock_frame(daily_pair_scoped: DataFrame, keys: Sequence[str]) -> DataFrame:
+def _mean_stock_frame(daily_scoped: DataFrame, keys: Sequence[str]) -> DataFrame:
     """mean_stock/mean_stock_retail/mean_stock_cost from a (possibly population-filtered)
-    daily_pair_scoped frame. Factored out so turnover can recompute its own mean-stock over its
+    daily_scoped frame. Factored out so turnover can recompute its own mean-stock over its
     own population override instead of reusing the public mean_stock metric's frame verbatim."""
-    seg_day = daily_pair_scoped.groupBy(*keys, "date").agg(
+    seg_day = daily_scoped.groupBy(*keys, "date").agg(
         F.sum("inventory").alias("daily_inv"),
         F.sum("inventory_retail").alias("daily_inv_retail"),
         F.sum("inventory_cost").alias("daily_inv_cost"),
@@ -54,7 +32,6 @@ def compute_kpis(
     ctx: KPIContext,
     scoped_daily_in: DataFrame,
     inst_in: DataFrame,
-    scope_pair_weeks_in: DataFrame,
     dc_daily_in: DataFrame,
     period_col: str,
     group_keys: Sequence[str] = (),
@@ -69,12 +46,15 @@ def compute_kpis(
     """
     group_keys = list(group_keys)
     keys = [period_col] + group_keys
-    daily_sales = scoped_daily_in.filter(period_filter)
-    daily_pair_scoped = _restrict_to_scope_pair_weeks(ctx, scoped_daily_in, scope_pair_weeks_in).filter(period_filter)
+    # ONE daily-data population for every daily-data metric -- sales, inventory, WOS, turnover and
+    # weighted-instock's sales weights all read the same rows, so a single output row can't
+    # describe two different populations. Lost sales and in-stock come from their own source and
+    # are restricted separately (inst/lost_base).
+    daily_scoped = scoped_daily_in.filter(period_filter)
     inst = inst_in.filter(period_filter)
     dc_daily = dc_daily_in.filter(period_filter)
 
-    sales_pop = apply_group_population_filter(daily_sales, "sales", ctx.settings)
+    sales_pop = apply_group_population_filter(daily_scoped, "sales", ctx.settings)
     sales = (
         sales_pop.groupBy(*keys)
         .agg(
@@ -102,7 +82,7 @@ def compute_kpis(
 
     week_keys = ["product_id", "Year", "Week"] + group_keys
     period_extra = [period_col] if period_col not in week_keys else []
-    wos_pop = apply_group_population_filter(daily_pair_scoped, "wos", ctx.settings)
+    wos_pop = apply_group_population_filter(daily_scoped, "wos", ctx.settings)
     daily_by_date = wos_pop.groupBy(*week_keys, *period_extra, "date").agg(
         F.sum("inventory").alias("daily_total_inventory"),
         F.sum("sales_quantity").alias("daily_sales_units"),
@@ -180,7 +160,7 @@ def compute_kpis(
         (F.sum(F.col("wos_total") * F.col("weekly_sales_units")) / F.sum("weekly_sales_units")).alias("WOS_TOTAL"),
     )
 
-    mean_stock_pop = apply_group_population_filter(daily_pair_scoped, "mean_stock", ctx.settings)
+    mean_stock_pop = apply_group_population_filter(daily_scoped, "mean_stock", ctx.settings)
     mean_stock = _mean_stock_frame(mean_stock_pop, keys)
 
     # dc_mean_stock / total_mean_stock: plain per-day averages (not the WOS ratio), same shape
@@ -192,7 +172,7 @@ def compute_kpis(
         .groupBy(*keys)
         .agg(F.avg("daily_dc_inv").alias("dc_mean_stock"))
     )
-    total_store_pop = apply_group_population_filter(daily_pair_scoped, "dc_inventory", ctx.settings)
+    total_store_pop = apply_group_population_filter(daily_scoped, "dc_inventory", ctx.settings)
     total_store_day = total_store_pop.groupBy(*keys, "date").agg(F.sum("inventory").alias("store_daily_inv"))
     total_dc_day = dc_inv_pop.groupBy(*keys, "date").agg(F.sum("inventory").alias("dc_daily_inv"))
     total_mean_stock = (
@@ -203,7 +183,7 @@ def compute_kpis(
         .agg(F.avg("total_daily_inv").alias("total_mean_stock"))
     )
 
-    turnover_pop = apply_group_population_filter(daily_pair_scoped, "turnover", ctx.settings)
+    turnover_pop = apply_group_population_filter(daily_scoped, "turnover", ctx.settings)
     turnover_mean_stock = _mean_stock_frame(turnover_pop, keys).select(*keys, "mean_stock")
     turnover = (
         turnover_pop.groupBy(*keys)
@@ -226,7 +206,7 @@ def compute_kpis(
     # ratio and its sales weight) apply the SAME "weighted_instock" population override, so the
     # numerator/denominator population and the weighting population never diverge.
     wi_pop_inst = apply_group_population_filter(inst, "weighted_instock", ctx.settings)
-    wi_pop_daily = apply_group_population_filter(daily_pair_scoped, "weighted_instock", ctx.settings)
+    wi_pop_daily = apply_group_population_filter(daily_scoped, "weighted_instock", ctx.settings)
     wi_week_keys = ["Year", "Week"] + group_keys
     wi_period_extra = [period_col] if period_col not in wi_week_keys else []
 
@@ -270,7 +250,6 @@ def build_kpi_table(
         ctx,
         frames["scoped_daily"],
         frames["inst_data"],
-        frames["scope_pair_weeks"],
         frames["dc_daily"],
         period_col,
         group_keys,
