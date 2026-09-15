@@ -319,7 +319,7 @@ The restriction key is picked **per frame**, from the columns that frame actuall
 | `inst_data`, `lost_base`, `scope_pairs`, `scope_pair_weeks` | `(product_id, store_id)` when they carry a store dimension; otherwise the pair universe's **distinct products** |
 | `dc_daily` | `(product_id, warehouse_id)` — its own independent same-pairs universe |
 
-In-stock and lost-sales frames only carry `store_id` when `lost_sales_source.store_col` is set (or when a store-grain scope broadcast one onto them). When that source is store-less, those frames are matched on the pair universe's distinct products — collapsed to distinct products first, so the join can't fan their rows out one-per-store — and their values stay product-level totals; only the product universe becomes like-for-like.
+In-stock and lost-sales frames carry `store_id` only when `lost_sales_source.store_col` is set — the scope join filters their rows but never attaches a store dimension the source lacked, whatever the scope grain. When that source is store-less, those frames are matched on the pair universe's distinct products — collapsed to distinct products first, so the join can't fan their rows out one-per-store — and their values stay product-level totals; only the product universe becomes like-for-like.
 
 DC/warehouse inventory has no store dimension at all, so `dc_daily` can never share the store-side keys. It gets its **own** `(product_id, warehouse_id)` all-years intersection, restricted independently — two same-pairs universes, each on its own terms, rather than one forced onto both.
 
@@ -654,7 +654,9 @@ Maps raw lost-sales table columns to canonical names. Allows customers whose los
 
 **`product_col` / `product_agg_level_col` — configure exactly one, never both.** If the source has a native `product_id`-level column, set `product_col` to it. If it doesn't (keyed by planning/DFU level instead, e.g. `reporting_inv_fc_dfu/report_dfu`), set `product_col: None` and set `product_agg_level_col` to that column's name instead — the pipeline left-joins it to `path_segments.product_planning_level` (renaming `planning_level_id` to this column) to backfill `product_id`, mirroring kpi-skill-toolkit's own fallback. **Precedence:** if `product_col` is set AND actually present on the source, it always wins — `product_agg_level_col` is only ever consulted when `product_col` is `None`/absent-from-source, even if both happen to be configured at once, so leaving both set is misleading rather than additive. Setting `product_col: None` with no `product_agg_level_col` configured fails loudly at read time.
 
-**`store_col: None`** (optional): for a source with no per-store dimension. `lost_sales` is an absolute count, not a ratio — a store-less value gets broadcast across every scoped store of that product, which **over-counts** if later summed across stores. This is safe for `instock_source`'s ratio fields (below), not safe here without an explicit per-store normalization — prefer a genuinely per-store source for `lost_sales_source` when one exists.
+**`store_col: None`** (optional): for a source with no per-store dimension. The scope join **collapses to the source's own grain** — `store_id` is dropped from the join keys and the (deduplicated) scope is semi-joined on `(product_id, Year, Week)` — so one product-week keeps exactly one row. This matters because `lost_sales` is an absolute count, not a ratio: fanning that single value out to one row per scoped store would inflate any later sum across stores by the store-count factor. The resulting `lost_base`/`inst_data` frames carry no `store_id`, and `lost_sales_pct` is computed against the product-week sales total (summed across scoped stores) so numerator and denominator describe the same population.
+
+Residual limitation, which no join can fix: the source's value covers the product's **entire** store footprint, which may be wider than a `product_store` scope that includes only some of its stores. A store-less source has no per-store detail to restrict. Prefer a genuinely per-store source when one exists — set `store_col` and you get a true per-store match end to end.
 
 ### `instock_source`
 
@@ -678,7 +680,7 @@ Maps raw lost-sales table columns to canonical names. Allows customers whose los
 
 **`product_col` / `product_agg_level_col`**: same "configure exactly one, `product_col` wins if present" rule as `lost_sales_source` above.
 
-**`store_col: None`** — for a source with no per-store dimension (e.g. `reporting_inv_fc_dfu/report_dfu`, aggregated to `product_agg_level` × week only). The join drops `store_id` from its condition and broadcasts the product-week value across every scoped store instead. This **is** safe here, unlike `lost_sales_source`: `in_stock_days`/`total_days` form a ratio, and summing the same broadcast value across a product's stores then dividing reproduces the original ratio exactly (numerator and denominator scale identically) — you just lose real per-store variation, which a store-less source never had anyway. A verified example for tbretail:
+**`store_col: None`** — for a source with no per-store dimension (e.g. `reporting_inv_fc_dfu/report_dfu`, aggregated to `product_agg_level` × week only). The join drops `store_id` from its condition and broadcasts the product-week value across the lost-sales frame's own per-store rows instead. Broadcasting **is** safe here, which is why this is handled differently from `lost_sales_source` (collapsed to its own grain rather than broadcast): `in_stock_days`/`total_days` form a ratio, and summing the same broadcast value across a product's stores then dividing reproduces the original ratio exactly (numerator and denominator scale identically) — you just lose real per-store variation, which a store-less source never had anyway. In the opposite case — a store-ful `instock_source` alongside a store-less `lost_sales_source` — instock is rolled **down** to product-week instead, so its store rows can't fan out lost sales. A verified example for tbretail:
 
 ```python
 "instock_source": {
@@ -826,6 +828,8 @@ Default metrics (configurable in `CONFIG["metrics"]`):
 - DC/warehouse + combined inventory (requires `path_segments.inventory_warehouse`, see [`inventory_warehouse`](#inventory_warehouse) below): `dc_mean_stock`, `total_mean_stock`, `WOS_DC`, `WOS_TOTAL`
 
 Every metric uses all scoped stores — there is no store-exclusion config key. If a store should never contribute at all (e.g. an e-com fulfillment "store"), filter it out via `input_filters.daily_data`, or rely on your `lost_sales_source`/`instock_source` tables already excluding it upstream (see [Config reference](#config-reference)).
+
+**One population per source.** Every metric read from `noob/daily-data` — sales, `total_inventory`, `mean_stock`, `WOS`, turnover, and weighted-instock's sales weights — is computed from the **same** rows, under every `defined_scope.grain`. Two metrics in the same output row can never describe different populations. Lost sales and in-stock come from their own source (`lost_sales_source`/`instock_source`) and are restricted separately, at that source's own grain; DC inventory likewise comes from `inventory_warehouse`, matched on `product_id`. Per-metric `population_filters` are the one deliberate exception, and only for the metrics you explicitly list.
 
 **Lost Sales %** = `100 × sum(lost_sales) / sum(floor(weekly_sales + lost_sales))` — denominator includes imputed lost demand.
 
