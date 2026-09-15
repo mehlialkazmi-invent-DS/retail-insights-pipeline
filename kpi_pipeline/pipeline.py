@@ -326,26 +326,26 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
     scope_core = scope_in.select(*scope_keys).distinct().cache()
 
     lost_sales_raw = read_lost_sales_weekly(ctx)
-    if has_store and "store_id" not in lost_sales_raw.columns:
-        # lost_sales_source has no per-store dimension (e.g. report_dfu, store_col=None) --
-        # left_semi can't attach a store_id column that was never on lost_sales_raw, so this
-        # broadcasts its product-week value across every scoped store instead: a regular join
-        # on the non-store keys fans lost_sales_raw's single row out to one row per matching
-        # (product, store, week) in scope_core, picking up store_id from scope_core's side.
-        broadcast_keys = [k for k in scope_keys if k != "store_id"]
-        lost_sales_weekly = lost_sales_raw.join(scope_core, on=broadcast_keys, how="inner").cache()
-    else:
-        lost_sales_weekly = lost_sales_raw.join(scope_core, on=scope_keys, how="left_semi").cache()
+    # Collapse scope to the source's own grain, never fan the source out to scope's: drop store_id
+    # from the join keys when lost_sales_raw has no per-store dimension (e.g. report_dfu,
+    # store_col=None), then left_semi against the collapsed scope. Joining scope_core's stores onto
+    # a store-less row instead would repeat lost_sales -- an ABSOLUTE count, unlike instock's
+    # ratio -- once per scoped store, inflating every later sum across stores by the store-count
+    # factor. Same roll-down rule read_lost_sales_weekly already applies when instock_source and
+    # lost-sales disagree about store grain.
+    ls_keys = [k for k in scope_keys if k != "store_id" or "store_id" in lost_sales_raw.columns]
+    lost_sales_weekly = lost_sales_raw.join(
+        scope_core.select(*ls_keys).distinct(), on=ls_keys, how="left_semi"
+    ).cache()
 
-    # ls_has_store: whether lost_sales_weekly ended up with its own store_id -- independent of
-    # has_store (scope's own grain). Under has_store=True this is always True (native, or
-    # broadcast-attached from scope_core just above). Under has_store=False (product grain) it
-    # reflects lost_sales_source.store_col directly: True if lost_sales_source is genuinely
-    # per-store (store granularity comes FROM lost-sales, scope itself has none), False if
-    # lost_sales_source is ALSO store-less -- a legitimate, fully-supported pure product-grain
-    # combination (see the else branches of scope_pair_weeks/weekly_sales_for_lost/lost_base
-    # below), not an error: nothing downstream needs a store dimension when neither scope nor
-    # lost-sales has one.
+    # ls_has_store: whether lost_sales_weekly has its own store_id. Purely a property of
+    # lost_sales_source.store_col -- the semi-join above only filters rows, it never attaches a
+    # store dimension the source lacked -- so it is independent of scope's grain in BOTH
+    # directions: a store-ful source under product grain keeps its own stores (store granularity
+    # comes FROM lost-sales, scope itself has none), and a store-less source under product_store
+    # grain stays store-less (see the else branches of scope_pair_weeks/weekly_sales_for_lost/
+    # lost_base below). Neither is an error: nothing downstream reads a store dimension off these
+    # frames -- distinct_store_count/distinct_pair_count come from daily-data, not from here.
     ls_has_store = "store_id" in lost_sales_weekly.columns
     if has_store:
         scope_pair_weeks = scope_core.select("product_id", "store_id", "Year", "Week").distinct().cache()
