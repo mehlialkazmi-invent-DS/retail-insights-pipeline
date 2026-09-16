@@ -282,21 +282,27 @@ def build_dc_daily(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
     """Daily DC (warehouse) inventory for the in-scope product population.
 
     Unlike build_scoped_daily, there is no store join/semi-join here -- DC data has no
-    store_id at all. The only restriction that makes sense is product_id itself: left-semi
-    against scope_core's own in-scope products, the SAME product population every other
-    scoped frame for this scope/root is restricted to (not an independently-scoped universe).
+    store_id at all. Restriction is on (product_id, Year, Week): left-semi against
+    scope_core's own in-scope product-weeks, the SAME population every other scoped frame
+    for this scope/root is restricted to (not an independently-scoped universe).
+
+    Year/Week must be attached to a DC row BEFORE the scope semi-join, not after -- scope_core
+    always carries Year/Week (ctx.scope_keys includes it for every grain), and for
+    product_store_week grain scope membership genuinely varies by week. Restricting on
+    product_id alone (dropping Year/Week first) would keep a product's DC inventory for
+    weeks it fell out of scope, since DC data itself has no notion of scope weeks.
     """
     s = ctx.settings
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
-    scope_products = scope_core.select("product_id").distinct()
+    scope_product_weeks = scope_core.select("product_id", "Year", "Week").distinct()
 
     dc = (
         get_inventory_warehouse_raw(ctx)
         .select("product_id", "warehouse_id", "date", "inventory")
         .withColumn("date", F.to_date(F.col("date")))
         .filter(F.col("date").between(F.lit(start), F.lit(end)))
-        .join(scope_products, on="product_id", how="left_semi")
         .join(broadcast(ctx.fiscal_cal.select("date", "Year", "Week")), on="date", how="inner")
+        .join(scope_product_weeks, on=["product_id", "Year", "Week"], how="left_semi")
     )
     return dc.join(ctx.product_dims, on="product_id", how="left").join(
         broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Month")),
