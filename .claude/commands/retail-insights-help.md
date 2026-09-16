@@ -601,6 +601,8 @@ For a genuinely new source table (not just a new column off an existing frame) t
 2. **`inputs.py`**: add `read_my_source(...)` (Delta read + `_input_filters` + `_print_date_range`) and a cached accessor `get_my_source_raw(ctx)` mirroring `read_daily_data_source`/`get_daily_data_raw`.
 3. **`config.py`**: add a `path_segments` entry, resolve its `PATH_...` in `materialize()`'s `paths = {...}` dict, and add an `input_filters` entry.
 4. **`pipeline.py`**: add a `build_my_frame(ctx, scope_core, ...)` function that restricts the raw read to the SAME in-scope population as everything else for that scope/root (left-semi against `scope_core` or a projection of it — never an independently-scoped universe), joins `ctx.fiscal_cal`/`ctx.fiscal_week` for time-grain columns and `ctx.product_dims`/`ctx.products_attr` for slice dimensions. Call it from `build_pipeline_frames` and add the result to the returned dict under a new key.
+
+   **If the source has no store dimension (like `inventory_warehouse`), don't collapse the semi-join key to `product_id` alone.** `scope_core` always carries `Year`/`Week` (`ctx.scope_keys` includes them for every grain), and under `product_store_week` grain, scope membership genuinely varies by week — a product can be in scope for some weeks and not others. Attach `Year`/`Week` to your new frame's rows (via the fiscal calendar join) **before** the scope semi-join, and restrict on `(product_id, Year, Week)`, not `product_id` alone — otherwise the new frame's data leaks into weeks the product was already out of scope. This exact bug existed in `build_dc_daily` (fixed 2026-09-16) — see §12.19.
 5. **`kpi_long.py`**: add the new key to `_period_frames`'s three branches (quarter/monthly/ytd) and to `_VALUE_FILTERED_FRAMES` so root/cut/slice filtering reaches it too.
 6. **`metrics.py`**: `compute_kpis`/`build_kpi_table` pass frames as explicit positional args (not a generic passthrough) — add a new explicit parameter to `compute_kpis` and thread `frames["my_frame"]` through `build_kpi_table`'s call to it.
 
@@ -657,7 +659,7 @@ Do not confuse scope grain (product×store×week) with WOS computation grain (pr
 `WOS_DC` and `WOS_TOTAL` are twins of `WOS` (units) and follow the **identical** product-week-first, sales-weighted-rollup grain — this is deliberate, so nobody re-introduces the "sum everything into one group-total before dividing" bug a sibling repo had (see the comment above the `WOS_DC`/`WOS_TOTAL` block in `metrics.py`). Implementation (`metrics.py`, `compute_kpis`):
 
 1. Reuses the SAME `daily_data_week` frame and `weekly_sales_units` column the store-side WOS already built — no separate sales recomputation.
-2. A new `dc_daily` frame (from `pipeline.build_dc_daily`, restricted to the same in-scope product population as every other frame) is aggregated to the identical `week_keys + period_extra` grain: `avg_daily_dc_inventory`.
+2. A new `dc_daily` frame (from `pipeline.build_dc_daily`, restricted to the same in-scope `(product_id, Year, Week)` population as every other frame) is aggregated to the identical `week_keys + period_extra` grain: `avg_daily_dc_inventory`.
 3. Left-joined onto `daily_data_week`; weeks with no DC record get `avg_daily_dc_inventory = 0` (filled, not dropped).
 4. `wos_dc = avg_daily_dc_inventory / weekly_sales_units`; `wos_total = (avg_daily_total_inventory + avg_daily_dc_inventory) / weekly_sales_units` — same `F.when(weekly_sales_units > 0, ...).otherwise(None)` null guard as `wos_units`.
 5. Period rollup: `Σ(wos_dc × weekly_sales_units) ÷ Σ(weekly_sales_units)` and the same shape for `wos_total` — sales-weighted, never a direct period-level division.
@@ -692,8 +694,8 @@ lost_sales_source (cached as lost_sales_weekly_base) — prints its source date 
   └─ scoped to hybrid_scope_keys → lost_sales_weekly → inst_data, lost_base
 
 inventory_warehouse_raw (cached Delta) — prints its source date range on read
-  └─ build_dc_daily → dc_daily (left-semi restricted to scope_core's in-scope products,
-     no store dimension; fiscal + product_dims joined)
+  └─ build_dc_daily → dc_daily (left-semi restricted to scope_core's in-scope
+     (product_id, Year, Week), no store dimension; fiscal + product_dims joined)
 
 build_pipeline_frames(scope) → {scoped_daily, inst_data, lost_base, dc_daily, ...}
   └─ build_kpi_table(period, group_keys) → pandas
@@ -876,3 +878,4 @@ For a quick distinct product/store count of the final scope (overall + per slice
 16. **`dimension_sources` columns are ALWAYS roots, never cuts** — mutually exclusive with `slices` by design. A dimension_source column is unconditionally excluded from `ctx.cut_dimensions` even if nothing lists it as a root explicitly (auto-discovery still applies); do not expect it to show up as a flat breakdown alongside brand/SMW.
 17. **A fiscal calendar's month/quarter NUMBER is not assumed to equal the real calendar month/quarter** — `fiscal_calendar.column_map` reads a client's own quarter/month columns when present, but the Monthly tab's *display label* is never derived by feeding a fiscal month number into a month-name table (a client's fiscal year can be offset from the civil calendar, e.g. tbretail's Feb–Jan year, so fiscal month 07 can span real August). The label is instead derived from the majority real calendar month by day count across each fiscal month's actual dates when `month_name_col` isn't configured — see §3.1.
 18. **No dedicated store-exclusion config key** — every metric uses all scoped stores. If a store should never contribute (e.g. e-com fulfillment), filter it via `input_filters.daily_data` (affects everything read from `daily_data`, not just specific metrics), or rely on `lost_sales_source`/`instock_source` tables that already exclude it upstream.
+19. **DC/warehouse scope restriction must include the week dimension, not just product_id** — `build_dc_daily` restricts on `(product_id, Year, Week)` against `scope_core`, attaching `Year`/`Week` to DC rows (via the fiscal calendar join) **before** the scope semi-join. Under `product_store_week` grain, scope membership varies by week; restricting on `product_id` alone (dropping `Year`/`Week` first) previously let a product's DC inventory leak into weeks it had fallen out of scope — inflating `WOS_DC`/`WOS_TOTAL`/`dc_mean_stock`/`total_mean_stock` for those weeks. Fixed 2026-09-16. No effect under `"product"`/`"product_store"` grain (scope is uniform across every week there already). Any new store-less input frame (§5 "Add a new input frame") must follow the same pattern.
