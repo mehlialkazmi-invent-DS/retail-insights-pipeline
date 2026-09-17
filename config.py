@@ -405,12 +405,11 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     # DC INSTOCK — gated: DC in-stock rate from an expanded dc_scope grid
     # ---------------------------------------------------------------------------
-    # OFF by default -- requires path_segments.dc_scope and path_segments.item_family to point
-    # at real tables. Every in-scope pair is back-applied across the full report window, which
+    # ON for tbretail. Every in-scope pair is back-applied across the full report window, which
     # biases early history down (see README's "dc_scope" section). When disabled, dc_in_stock_rate
     # is emitted as a literal null column so the output shape stays constant.
     "dc_instock": {
-        "enabled": False,
+        "enabled": True,
         "stock_threshold": 0,  # a day counts as "stocked" when inventory > stock_threshold
     },
     # ---------------------------------------------------------------------------
