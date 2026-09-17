@@ -67,3 +67,11 @@ class KPIContext:
     daily_data_raw: Optional[DataFrame] = None
     lost_sales_weekly_base: Optional[DataFrame] = None
     inventory_warehouse_raw: Optional[DataFrame] = None
+    # dc_scope_raw: gated by dc_instock.enabled, backs dc_in_stock_rate's scope grid.
+    # item_family_raw: read unconditionally whenever inventory_warehouse is configured -- also
+    # backs build_dc_daily's item-family rollup, not just dc_in_stock_rate.
+    dc_scope_raw: Optional[DataFrame] = None
+    item_family_raw: Optional[DataFrame] = None
+    # Parent-rolled inventory_warehouse: scope-independent, so built once and shared by
+    # build_dc_daily/build_dc_inst across every scope variant.
+    inventory_warehouse_rolled: Optional[DataFrame] = None

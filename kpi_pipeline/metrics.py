@@ -33,6 +33,7 @@ def compute_kpis(
     scoped_daily_in: DataFrame,
     inst_in: DataFrame,
     dc_daily_in: DataFrame,
+    dc_inst_in: DataFrame,
     period_col: str,
     group_keys: Sequence[str] = (),
     period_filter=F.lit(True),
@@ -53,6 +54,7 @@ def compute_kpis(
     daily_scoped = scoped_daily_in.filter(period_filter)
     inst = inst_in.filter(period_filter)
     dc_daily = dc_daily_in.filter(period_filter)
+    dc_inst = dc_inst_in.filter(period_filter)
 
     sales_pop = apply_group_population_filter(daily_scoped, "sales", ctx.settings)
     sales = (
@@ -201,6 +203,13 @@ def compute_kpis(
         F.greatest(F.lit(0.0), F.sum("stocked_pairs") / F.sum("available_days")).alias("in_stock_rate")
     )
 
+    # Mirrors the "instock" block above, from dc_inst's grid instead. When disabled, dc_inst is
+    # empty so this produces no rows and the later left join leaves dc_in_stock_rate null.
+    dc_instock_pop = apply_group_population_filter(dc_inst, "dc_instock", ctx.settings)
+    dc_instock = dc_instock_pop.groupBy(*keys).agg(
+        F.greatest(F.lit(0.0), F.sum("dc_stocked_days") / F.sum("dc_available_days")).alias("dc_in_stock_rate")
+    )
+
     # Sales-weighted in-stock rate: aggregate instock to Year×Week (+ slice group_keys), then
     # weight each week by its sales when rolling up to the reporting period. Both sides (instock
     # ratio and its sales weight) apply the SAME "weighted_instock" population override, so the
@@ -233,6 +242,7 @@ def compute_kpis(
         .join(turnover, on=keys, how="left")
         .join(instock, on=keys, how="left")
         .join(weighted_instock, on=keys, how="left")
+        .join(dc_instock, on=keys, how="left")
     )
 
 
@@ -251,6 +261,7 @@ def build_kpi_table(
         frames["scoped_daily"],
         frames["inst_data"],
         frames["dc_daily"],
+        frames["dc_inst"],
         period_col,
         group_keys,
         period_filter,

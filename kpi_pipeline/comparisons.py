@@ -14,7 +14,7 @@ import pandas as pd
 from kpi_pipeline.context import KPIContext
 
 _DISTINCT_METRICS = frozenset({"distinct_product_count", "distinct_store_count", "distinct_pair_count"})
-_FRACTIONAL_RATE_METRICS = frozenset({"in_stock_rate", "weighted_instock_rate"})
+_FRACTIONAL_RATE_METRICS = frozenset({"in_stock_rate", "weighted_instock_rate", "dc_in_stock_rate"})
 
 
 def _format_metric_value(metric: str, value) -> str:

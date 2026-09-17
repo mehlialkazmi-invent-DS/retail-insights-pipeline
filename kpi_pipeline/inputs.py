@@ -341,6 +341,58 @@ def get_inventory_warehouse_raw(ctx) -> DataFrame:
     return ctx.inventory_warehouse_raw
 
 
+def read_dc_scope_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
+    """DC/warehouse scope table -- backs dc_in_stock_rate's scope-derived denominator (see
+    README's "dc_scope" section). Renamed to canonical product_id/warehouse_id via
+    DC_SCOPE_COLUMN_MAP."""
+    path = settings["PATH_DC_SCOPE"]
+    col_map = settings["DC_SCOPE_COLUMN_MAP"]
+    filters = _input_filters(settings, "dc_scope")
+    if not quiet:
+        print(f"reading dc_scope: {path}")
+    raw = spark.read.format("delta").load(path)
+    if filters and not quiet:
+        print(f"dc_scope filters ({len(filters)}):")
+    filtered = apply_input_filters(raw, filters, "dc_scope", quiet=quiet)
+    renamed = rename_column_or_fail(filtered, col_map["product_col"], "product_id", "dc_scope_source.product_col")
+    renamed = rename_column_or_fail(renamed, col_map["warehouse_col"], "warehouse_id", "dc_scope_source.warehouse_col")
+    # Cast pinned so warehouse_id's type doesn't depend on the source column's own type.
+    return renamed.select("product_id", F.col("warehouse_id").cast("int").alias("warehouse_id"))
+
+
+def get_dc_scope_raw(ctx) -> DataFrame:
+    """Cached dc_scope read (config filters applied once per run)."""
+    if ctx.dc_scope_raw is None:
+        ctx.dc_scope_raw = read_dc_scope_source(ctx.spark, ctx.settings, quiet=True).cache()
+    return ctx.dc_scope_raw
+
+
+def read_item_family_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
+    """Parent/child item-family map -- rolls superseded child products (is_main=false) onto
+    their parent product_id (see README's "dc_scope" section). Read unconditionally whenever
+    inventory_warehouse is configured; is_main=false filtering happens downstream in pipeline.py."""
+    path = settings["PATH_ITEM_FAMILY"]
+    col_map = settings["ITEM_FAMILY_COLUMN_MAP"]
+    filters = _input_filters(settings, "item_family")
+    if not quiet:
+        print(f"reading item_family: {path}")
+    raw = spark.read.format("delta").load(path)
+    if filters and not quiet:
+        print(f"item_family filters ({len(filters)}):")
+    filtered = apply_input_filters(raw, filters, "item_family", quiet=quiet)
+    renamed = rename_column_or_fail(filtered, col_map["product_col"], "product_id", "item_family_source.product_col")
+    renamed = rename_column_or_fail(renamed, col_map["parent_col"], "parent_id", "item_family_source.parent_col")
+    renamed = rename_column_or_fail(renamed, col_map["is_main_col"], "is_main", "item_family_source.is_main_col")
+    return renamed.select("product_id", "parent_id", "is_main")
+
+
+def get_item_family_raw(ctx) -> DataFrame:
+    """Cached item_family read (config filters applied once per run)."""
+    if ctx.item_family_raw is None:
+        ctx.item_family_raw = read_item_family_source(ctx.spark, ctx.settings, quiet=True).cache()
+    return ctx.item_family_raw
+
+
 def preview_input_table(
     df: DataFrame,
     settings: Dict[str, Any],

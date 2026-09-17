@@ -9,8 +9,9 @@ Isolates like-for-like movement from mix shifts caused by newly listed or closed
 The (product_id, store_id) pair universe is used under EVERY defined_scope.grain, product-grain
 included: scoped_daily comes straight from daily-data and is store-level whatever the scope grain,
 so like-for-like always means the same pairs present in every year. Frames that carry no store_id
-of their own are restricted to that pair universe's distinct products instead, and DC keeps its
-own independent (product_id, warehouse_id) universe. See _restrict_frames's docstring.
+of their own are restricted to that pair universe's distinct products instead, and dc_daily/dc_inst
+each keep their own independent (product_id, warehouse_id) universe. See _restrict_frames's
+docstring.
 
 Comparable is YTD-only — there is no comparable YoY/QoQ/MoM/WoW. Pair-level data only exists for
 the current run window, so a comparable comparison is produced only when the window spans at least
@@ -46,6 +47,7 @@ def _restrict_frames(
     period_frames: Dict[str, DataFrame],
     comparable_keys: DataFrame,
     dc_comparable_keys: DataFrame,
+    dc_inst_comparable_keys: DataFrame,
 ) -> Dict[str, DataFrame]:
     """Restrict every frame to the years' common (product, store) pairs, and dc_daily to its own
     common (product, warehouse) pairs.
@@ -68,7 +70,10 @@ def _restrict_frames(
     same-pairs restriction instead, exactly mirroring total_inventory_wos_ytd.ipynb's two
     independent same-pairs design (product x store from daily-data, product x warehouse from
     inventory_warehouse, each restricted on its own terms rather than one restriction forced onto
-    both).
+    both). dc_inst shares dc_daily's (product_id, warehouse_id) grain and id space but still gets
+    its own all-years intersection: dc_daily's pairs come from inventory_warehouse rows, so a pair
+    in scope every year but never stocked is absent from it every year -- reusing dc_comparable_keys
+    would delete exactly the persistent stockouts dc_in_stock_rate exists to surface.
     """
     out = dict(period_frames)
     comparable_products = comparable_keys.select(*_PRODUCT_KEYS).distinct()
@@ -83,6 +88,7 @@ def _restrict_frames(
             how="inner",
         )
     out["dc_daily"] = out["dc_daily"].join(dc_comparable_keys, on=_DC_PAIR_KEYS, how="inner")
+    out["dc_inst"] = out["dc_inst"].join(dc_inst_comparable_keys, on=_DC_PAIR_KEYS, how="inner")
     return out
 
 
@@ -220,14 +226,24 @@ def build_comparable_pairs(ctx: KPIContext) -> None:
         dc_common_keys = dc_common_keys.intersect(frame)
     dc_common_keys = dc_common_keys.cache()
 
+    # dc_inst's own all-years intersection, built from dc_inst rather than dc_daily -- see
+    # _restrict_frames's docstring for why reusing dc_common_keys here would be wrong.
+    dc_inst = pf["dc_inst"]
+    dc_inst_year_key_frames = [dc_inst.filter(F.col("Year") == y).select(*_DC_PAIR_KEYS).distinct() for y in years]
+    dc_inst_common_keys = dc_inst_year_key_frames[0]
+    for frame in dc_inst_year_key_frames[1:]:
+        dc_inst_common_keys = dc_inst_common_keys.intersect(frame)
+    dc_inst_common_keys = dc_inst_common_keys.cache()
+
     if pair_count == 0:
         common_keys.unpersist()
         dc_common_keys.unpersist()
+        dc_inst_common_keys.unpersist()
         print(f"comparable pairs: 0 common pairs across all years {years}")
         return
 
     # Restricted once, reused for every link -- every link shares this same population.
-    restricted = _restrict_frames(pf, common_keys, dc_common_keys)
+    restricted = _restrict_frames(pf, common_keys, dc_common_keys, dc_inst_common_keys)
 
     kpi_parts: List[pd.DataFrame] = []
     save_parts: List[pd.DataFrame] = []
@@ -254,6 +270,7 @@ def build_comparable_pairs(ctx: KPIContext) -> None:
 
     common_keys.unpersist()
     dc_common_keys.unpersist()
+    dc_inst_common_keys.unpersist()
 
     ctx.comparable_comparison_ytd = pd.concat(save_parts, ignore_index=True) if save_parts else pd.DataFrame()
     ctx.comparable_ytd_display = display
