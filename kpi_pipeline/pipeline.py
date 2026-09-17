@@ -12,7 +12,9 @@ from kpi_pipeline.context import KPIContext
 from kpi_pipeline.inputs import (
     DEFAULT_LOST_SALES_COLUMN_MAP,
     get_daily_data_raw,
+    get_dc_scope_raw,
     get_inventory_warehouse_raw,
+    get_item_family_raw,
     read_instock_source,
     read_lost_sales_source,
     read_speed_cluster_source,
@@ -278,6 +280,45 @@ def build_scoped_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs_in: D
     )
 
 
+def _roll_to_item_family_parent(df: DataFrame, ctx: KPIContext) -> DataFrame:
+    """Maps product_id -> coalesce(parent_id, product_id). scope_core/defined_scope is already
+    parent-rolled, so DC frames must be rolled too or child-id inventory is silently dropped.
+    """
+    child_to_parent = broadcast(
+        get_item_family_raw(ctx).filter(~F.col("is_main")).select("product_id", "parent_id")
+    )
+    return (
+        df.join(child_to_parent, on="product_id", how="left")
+        .withColumn("product_id", F.coalesce(F.col("parent_id"), F.col("product_id")))
+        .drop("parent_id")
+    )
+
+
+def _get_inventory_warehouse_parent_rolled(ctx: KPIContext) -> DataFrame:
+    """inventory_warehouse for the report window, item-family-rolled to parent product_id and
+    re-aggregated so children sum rather than duplicate. Cached on ctx: scope-independent, so
+    both DC frames and every scope variant share one materialization.
+    """
+    if ctx.inventory_warehouse_rolled is not None:
+        return ctx.inventory_warehouse_rolled
+
+    s = ctx.settings
+    start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
+    ctx.inventory_warehouse_rolled = (
+        _roll_to_item_family_parent(
+            get_inventory_warehouse_raw(ctx)
+            .select("product_id", "warehouse_id", "date", "inventory")
+            .withColumn("date", F.to_date(F.col("date")))
+            .filter(F.col("date").between(F.lit(start), F.lit(end))),
+            ctx,
+        )
+        .groupBy("product_id", "warehouse_id", "date")
+        .agg(F.sum("inventory").alias("inventory"))
+        .cache()
+    )
+    return ctx.inventory_warehouse_rolled
+
+
 def build_dc_daily(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
     """Daily DC (warehouse) inventory for the in-scope product population.
 
@@ -291,20 +332,77 @@ def build_dc_daily(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
     product_store_week grain scope membership genuinely varies by week. Restricting on
     product_id alone (dropping Year/Week first) would keep a product's DC inventory for
     weeks it fell out of scope, since DC data itself has no notion of scope weeks.
+
+    Reads inventory_warehouse item-family-rolled to parent product_id (matching scope_core's own
+    id space), which changes dc_mean_stock/WOS_DC/WOS_TOTAL for families with inventory split
+    across old and current item codes.
     """
-    s = ctx.settings
-    start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
     scope_product_weeks = scope_core.select("product_id", "Year", "Week").distinct()
 
     dc = (
-        get_inventory_warehouse_raw(ctx)
-        .select("product_id", "warehouse_id", "date", "inventory")
-        .withColumn("date", F.to_date(F.col("date")))
-        .filter(F.col("date").between(F.lit(start), F.lit(end)))
+        _get_inventory_warehouse_parent_rolled(ctx)
         .join(broadcast(ctx.fiscal_cal.select("date", "Year", "Week")), on="date", how="inner")
         .join(scope_product_weeks, on=["product_id", "Year", "Week"], how="left_semi")
     )
     return dc.join(ctx.product_dims, on="product_id", how="left").join(
+        broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Month")),
+        on=["Year", "Week"],
+        how="inner",
+    )
+
+
+def build_dc_inst(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
+    """DC in-stock rate frame: dc_stocked_days / dc_available_days over dc_scope's coverage grid.
+    The denominator is scope-derived, not inventory-derived, so a never-stocked in-scope pair
+    reads 0% -- and back-applying the full report window to every pair biases early history down
+    (see README's "dc_scope" section).
+    """
+    s = ctx.settings
+    if not s.get("DC_INSTOCK_ENABLED", False):
+        # Disabled: empty, correctly-shaped frame so dc_in_stock_rate stays a literal-null column.
+        empty_base = (
+            scope_core.select("product_id", "Year", "Week")
+            .limit(0)
+            .withColumn("warehouse_id", F.lit(None).cast("int"))
+            .withColumn("dc_stocked_days", F.lit(None).cast("long"))
+            .withColumn("dc_available_days", F.lit(None).cast("long"))
+        )
+        return empty_base.join(ctx.product_dims, on="product_id", how="left").join(
+            broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Month")),
+            on=["Year", "Week"],
+            how="inner",
+        )
+
+    start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
+    threshold = s["DC_INSTOCK_STOCK_THRESHOLD"]
+
+    # Every in-scope pair gets the full report window; item-family-rolled first so it lands in
+    # scope_core's own id space.
+    pairs = (
+        _roll_to_item_family_parent(get_dc_scope_raw(ctx), ctx)
+        .select("product_id", "warehouse_id")
+        .distinct()
+    )
+    cal = broadcast(
+        ctx.fiscal_cal.select("date", "Year", "Week").filter(F.col("date").between(F.lit(start), F.lit(end)))
+    )
+    scope_product_weeks = scope_core.select("product_id", "Year", "Week").distinct()
+
+    # Cross-joining the calendar onto the pairs gives the (product_id, warehouse_id, date) grid
+    # and its Year/Week in one step -- restrict to scope_core before joining inventory, so the
+    # inventory join only runs over the in-scope rows.
+    grid = (
+        pairs.crossJoin(cal)
+        .join(scope_product_weeks, on=["product_id", "Year", "Week"], how="left_semi")
+        .join(_get_inventory_warehouse_parent_rolled(ctx), on=["product_id", "warehouse_id", "date"], how="left")
+        .withColumn("inventory", F.coalesce(F.col("inventory"), F.lit(0.0)))
+    )
+
+    dc_inst = grid.groupBy("product_id", "warehouse_id", "Year", "Week").agg(
+        F.sum((F.col("inventory") > F.lit(threshold)).cast("int")).alias("dc_stocked_days"),
+        F.count(F.lit(1)).alias("dc_available_days"),
+    )
+    return dc_inst.join(ctx.product_dims, on="product_id", how="left").join(
         broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Month")),
         on=["Year", "Week"],
         how="inner",
@@ -389,6 +487,7 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
 
     scoped_daily = build_scoped_daily(ctx, scope_core, scope_pairs, has_store).cache()
     dc_daily = build_dc_daily(ctx, scope_core).cache()
+    dc_inst = build_dc_inst(ctx, scope_core).cache()
     weekly_pair = scoped_daily.groupBy("product_id", "store_id", "Year", "Week").agg(
         F.sum("sales_quantity").alias("weekly_sales")
     )
@@ -431,4 +530,5 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
         "scope_pair_weeks": scope_pair_weeks,
         "lost_sales_weekly": lost_sales_weekly,
         "dc_daily": dc_daily,
+        "dc_inst": dc_inst,
     }

@@ -114,6 +114,7 @@ METRIC_FILTER_GROUPS: Dict[str, Tuple[str, ...]] = {
     "turnover": ("inventory_turnover_rate",),
     "instock": ("in_stock_rate",),
     "weighted_instock": ("weighted_instock_rate",),
+    "dc_instock": ("dc_in_stock_rate",),
     "lost_sales": ("lost_sales_pct",),
 }
 

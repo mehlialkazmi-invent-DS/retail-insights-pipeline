@@ -41,6 +41,17 @@
 #                         window (one shared universe across every consecutive-year link, not
 #                         a separate universe per link); requires 2+ years (run_min_date
 #                         spanning that far back) to have anything to compute.
+#   dc_instock          — DC in-stock rate (dc_in_stock_rate), gated, from an EXPANDED dc_scope
+#                         grid (product x warehouse x date) rather than inventory_warehouse's own
+#                         date coverage -- every in-scope pair gets the FULL report window, which
+#                         biases early history down. Requires path_segments.dc_scope +
+#                         path_segments.item_family. See README's "dc_scope" section.
+#
+#   NOTE: inventory_warehouse's product_id is item-family-rolled onto its parent
+#   (path_segments.item_family) before being restricted to scope_core, matching defined_scope's
+#   own already-parent-rolled id space -- required whenever inventory_warehouse is configured,
+#   not just when dc_instock.enabled=True. Changes dc_mean_stock/WOS_DC/WOS_TOTAL for families
+#   with inventory split across old and current item codes. See README's "dc_scope" section.
 
 import copy
 import datetime
@@ -185,10 +196,17 @@ CONFIG: Dict[str, Any] = {
     "path_segments": {
         "fiscal": ["one_time_uploads", "fiscal_cal"],
         "daily_data": ["noob", "daily-data"],
-        # DC/warehouse daily inventory (product_id, warehouse_id, date, inventory) -- backs
-        # dc_mean_stock/total_mean_stock/WOS_DC/WOS_TOTAL. No column mapping needed (unlike
-        # lost_sales_source/instock_source): source columns are already canonical.
+        # DC/warehouse daily inventory -- backs dc_mean_stock/total_mean_stock/WOS_DC/WOS_TOTAL.
+        # product_id is item-family-rolled onto its parent before restricting to scope_core
+        # (already parent-rolled) -- required whenever this is configured, not gated by
+        # dc_instock.enabled.
         "inventory_warehouse": ["operation", "inventory_warehouse"],
+        # DC/warehouse scope table -- backs dc_in_stock_rate's scope-derived denominator (see
+        # README's "dc_scope" section). Only read when dc_instock.enabled=True.
+        "dc_scope": ["operation", "scope"],
+        # Parent/child item-family map -- superseded/child products (is_main=false) roll up onto
+        # parent_id. Used by both inventory_warehouse and dc_scope rollups; read unconditionally.
+        "item_family": ["operation", "item_family"],
         "products": ["master-data", "products"],
         # Add a model_id=... path segment here if your lost-sales table is partitioned by model.
         "lost_sales": ["noob", "lost-sales"],
@@ -207,6 +225,9 @@ CONFIG: Dict[str, Any] = {
         "lost_sales": [],
         "daily_data": ["usable = 1"],
         "inventory_warehouse": [],
+        # DC-level replenishment scope only -- solution_id=22, location_type=1 (warehouse).
+        "dc_scope": ["solution_id = 22", "location_type = 1"],
+        "item_family": [],
     },
     # ---------------------------------------------------------------------------
     # LOST-SALES SOURCE — column mapping for the raw lost-sales table
@@ -266,6 +287,36 @@ CONFIG: Dict[str, Any] = {
         "total_days_col": "total_days",
         "product_agg_level_col": None,
         "fallback_sources": [],  # optional additional column-sets from the same table (see above)
+    },
+    # ---------------------------------------------------------------------------
+    # DC SCOPE SOURCE — column mapping for the DC/warehouse scope table
+    # ---------------------------------------------------------------------------
+    # Backs dc_in_stock_rate (see README's "dc_scope" section). Renamed to canonical
+    # product_id/warehouse_id at read time (read_dc_scope_source).
+    "dc_scope_source": {
+        "product_col": "product_id",
+        "warehouse_col": "location_id",
+    },
+    # ---------------------------------------------------------------------------
+    # ITEM FAMILY SOURCE — parent/child product rollup for every DC frame
+    # ---------------------------------------------------------------------------
+    # Maps a superseded/child product_id (is_main=false) to its current parent_id (see README's
+    # "dc_scope" section). Renamed to canonical product_id/parent_id/is_main at read time.
+    "item_family_source": {
+        "product_col": "product_id",
+        "parent_col": "parent_id",
+        "is_main_col": "is_main",
+    },
+    # ---------------------------------------------------------------------------
+    # DC INSTOCK — gated: DC in-stock rate from an expanded dc_scope grid
+    # ---------------------------------------------------------------------------
+    # OFF by default -- requires path_segments.dc_scope and path_segments.item_family to point
+    # at real tables. Every in-scope pair is back-applied across the full report window, which
+    # biases early history down (see README's "dc_scope" section). When disabled, dc_in_stock_rate
+    # is emitted as a literal null column so the output shape stays constant.
+    "dc_instock": {
+        "enabled": False,
+        "stock_threshold": 0,  # a day counts as "stocked" when inventory > stock_threshold
     },
     # ---------------------------------------------------------------------------
     # LOST-SALES ENSEMBLE — blend two lost-sales models by product sales speed
@@ -377,6 +428,7 @@ CONFIG: Dict[str, Any] = {
             "inventory_turnover_rate",
             "in_stock_rate",
             "weighted_instock_rate",
+            "dc_in_stock_rate",
             "lost_sales_pct",
         ],
         "scope_diff_metrics": [
@@ -389,6 +441,7 @@ CONFIG: Dict[str, Any] = {
             "WOS_DC",
             "WOS_TOTAL",
             "in_stock_rate",
+            "dc_in_stock_rate",
             "lost_sales_pct",
         ],
         "labels": {
@@ -410,12 +463,13 @@ CONFIG: Dict[str, Any] = {
             "inventory_turnover_rate": "Inventory Turnover Rate",
             "in_stock_rate": "In-Stock Rate",
             "weighted_instock_rate": "Weighted In-Stock Rate",
+            "dc_in_stock_rate": "DC In-Stock Rate",
             "lost_sales_pct": "Lost Sales %",
             "distinct_product_count": "Distinct products",
             "distinct_store_count": "Distinct stores",
             "distinct_pair_count": "Distinct pairs",
         },
-        "pp_change_metrics": ["in_stock_rate", "weighted_instock_rate", "lost_sales_pct"],
+        "pp_change_metrics": ["in_stock_rate", "weighted_instock_rate", "dc_in_stock_rate", "lost_sales_pct"],
         # ---------------------------------------------------------------------------
         # POPULATION FILTERS — restrict specific metrics to a narrower product population
         # ---------------------------------------------------------------------------
@@ -439,8 +493,8 @@ CONFIG: Dict[str, Any] = {
         #   wos_dc_total group: WOS_DC, WOS_TOTAL
         #   mean_stock group: mean_stock, mean_stock_retail, mean_stock_cost
         #   dc_inventory group: dc_mean_stock, total_mean_stock
-        #   (inventory_turnover_rate, in_stock_rate, weighted_instock_rate, lost_sales_pct are
-        #    each their own independent group.)
+        #   (inventory_turnover_rate, in_stock_rate, weighted_instock_rate, dc_in_stock_rate,
+        #    lost_sales_pct are each their own independent group.)
         # Setting an entry on any one column in a group applies it to the whole group; setting
         # conflicting specs on two columns in the same group fails loudly at runtime.
         #
@@ -784,6 +838,8 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "PATH_FISCAL": fund_paste(bucket, *path_segments["fiscal"]),
         "PATH_DAILY_DATA": fund_paste(bucket, *path_segments["daily_data"]),
         "PATH_INVENTORY_WAREHOUSE": fund_paste(bucket, *path_segments["inventory_warehouse"]),
+        "PATH_DC_SCOPE": fund_paste(bucket, *path_segments["dc_scope"]),
+        "PATH_ITEM_FAMILY": fund_paste(bucket, *path_segments["item_family"]),
         "PATH_PRODUCTS": fund_paste(bucket, *path_segments["products"]),
         "PATH_LOST_SALES": fund_paste(bucket, *path_segments["lost_sales"]),
         "PATH_DEFINED_SCOPE": fund_paste(bucket, *path_segments["defined_scope"]),
@@ -829,6 +885,23 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             for fb in instock_source_cfg.get("fallback_sources", []) or []
         ],
     }
+
+    dc_scope_source_cfg = cfg.get("dc_scope_source", {}) or {}
+    dc_scope_column_map = {
+        "product_col": dc_scope_source_cfg.get("product_col", "product_id"),
+        "warehouse_col": dc_scope_source_cfg.get("warehouse_col", "location_id"),
+    }
+
+    item_family_source_cfg = cfg.get("item_family_source", {}) or {}
+    item_family_column_map = {
+        "product_col": item_family_source_cfg.get("product_col", "product_id"),
+        "parent_col": item_family_source_cfg.get("parent_col", "parent_id"),
+        "is_main_col": item_family_source_cfg.get("is_main_col", "is_main"),
+    }
+
+    dc_instock_cfg = cfg.get("dc_instock", {}) or {}
+    dc_instock_enabled = bool(dc_instock_cfg.get("enabled", False))
+    dc_instock_stock_threshold = dc_instock_cfg.get("stock_threshold", 0)
 
     window = _resolve_report_window(
         datetime.date.fromisoformat(rw["as_of_date"]),
@@ -1008,6 +1081,10 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "LOST_SALES_COLUMN_MAP": lost_sales_column_map,
         "INSTOCK_SOURCE_ENABLED": instock_source_enabled,
         "INSTOCK_SOURCE_COLUMN_MAP": instock_source_column_map,
+        "DC_SCOPE_COLUMN_MAP": dc_scope_column_map,
+        "ITEM_FAMILY_COLUMN_MAP": item_family_column_map,
+        "DC_INSTOCK_ENABLED": dc_instock_enabled,
+        "DC_INSTOCK_STOCK_THRESHOLD": dc_instock_stock_threshold,
         **paths,
         "DEFINED_SCOPE": defined_scope,
         "INPUT_FILTERS": cfg.get("input_filters", {}),

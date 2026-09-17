@@ -40,6 +40,7 @@ _CAT: Dict[str, str] = {
     "AUC": "revenue",
     "in_stock_rate": "service",
     "weighted_instock_rate": "service",
+    "dc_in_stock_rate": "service",
     "lost_sales_pct": "service",
     "mean_stock": "inventory",
     "mean_stock_retail": "inventory",
@@ -179,6 +180,19 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
         ),
         "store_scope": "All scoped stores + DC/warehouse",
         "formula": "Σ(weekly_wos_total × weekly_sales_units) ÷ Σ(weekly_sales_units)",
+    },
+    "dc_in_stock_rate": {
+        "label": "DC In-Stock Rate",
+        "definition": (
+            "In-stock rate at DC/warehouse level, from an EXPANDED dc_scope grid (product x "
+            "warehouse x date, back-applied across the full report window) rather than "
+            "inventory_warehouse's own date coverage. Because the denominator is scope-derived, "
+            "a product/warehouse pair that is in scope but never actually stocked reads 0% here "
+            "-- it would instead be silently absent from dc_mean_stock/WOS_DC. Back-applying the "
+            "full window biases early history down for pairs ranged only partway through it."
+        ),
+        "store_scope": "DC/warehouse only",
+        "formula": "Σ(dc_stocked_days) ÷ Σ(dc_available_days)",
     },
     "wos_revenue": {
         "label": "WOS Revenue",
@@ -716,7 +730,7 @@ def _fmt(metric: str, value: Any) -> str:
         return f"${v / 1e6:.1f}M"
     if metric in ("AUR", "AUC"):
         return f"${v:.2f}"
-    if metric in ("in_stock_rate", "weighted_instock_rate"):
+    if metric in ("in_stock_rate", "weighted_instock_rate", "dc_in_stock_rate"):
         return f"{v * 100:.1f}%"
     if metric == "lost_sales_pct":
         return f"{v:.1f}%"

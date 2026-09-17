@@ -69,6 +69,9 @@ class KPIRunner:
         self.ctx.daily_data_raw = None
         self.ctx.lost_sales_weekly_base = None
         self.ctx.inventory_warehouse_raw = None
+        self.ctx.dc_scope_raw = None
+        self.ctx.item_family_raw = None
+        self.ctx.inventory_warehouse_rolled = None
 
     def print_config_summary(self) -> None:
         s = self.settings

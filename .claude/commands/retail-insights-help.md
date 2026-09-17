@@ -73,8 +73,10 @@ kpi_pipeline/
   scope_debug.py   scope_universe_counts: pre-flight distinct product/store counts per slice
                    (all active_slice_dimensions, root-defining columns included — this is a
                    raw diagnostic, unaware of the root/cut split the KPI step applies)
-  pipeline.py      build_pipeline_frames: scoped_daily, inst_data, lost_base, dc_daily per scope
-  metrics.py       compute_kpis: sales, WOS, mean_stock, instock, weighted_instock_rate, WOS_DC/WOS_TOTAL, dc_mean_stock/total_mean_stock
+  pipeline.py      build_pipeline_frames: scoped_daily, inst_data, lost_base, dc_daily, dc_inst
+                   per scope (dc_inst is dc_in_stock_rate's scope-expanded grid, gated by
+                   dc_instock.enabled -- see README's "dc_scope" config reference)
+  metrics.py       compute_kpis: sales, WOS, mean_stock, instock, weighted_instock_rate, WOS_DC/WOS_TOTAL, dc_mean_stock/total_mean_stock, dc_in_stock_rate
   kpi_long.py      build_kpi_long: loops root × cut × annual/ytd/quarter/monthly/weekly →
                    pandas. Roots = "overall" + ctx.root_definitions; cuts = "overall" +
                    ctx.cut_dimensions, applied identically within every root. Reuses
@@ -420,7 +422,7 @@ All metric frames are restricted to this one all-years pair set and metrics reco
 The restriction key is chosen **per frame**, from the columns that frame actually carries — not once globally:
 - `scoped_daily` → `(product_id, store_id)`, always.
 - `inst_data` / `lost_base` / `scope_pairs` / `scope_pair_weeks` → `(product_id, store_id)` when they have a store dimension (native `lost_sales_source.store_col`, or — for `scope_pairs`/`scope_pair_weeks` — a store-grain scope); otherwise the pair universe's **distinct products**. Collapsing to distinct products first is load-bearing: joining a store-less frame straight onto pair keys would fan its rows out one-per-store and multiply lost sales. Those frames keep product-level values; only their product universe is made like-for-like.
-- `dc_daily` → its own independent `(product_id, warehouse_id)` all-years intersection. DC/warehouse inventory has no store dimension, so it can never share the store-side keys.
+- `dc_daily` / `dc_inst` → each gets its OWN independent `(product_id, warehouse_id)` all-years intersection (two separate universes, not one shared). DC/warehouse inventory has no store dimension, so neither can ever share the store-side keys. Both are now item-family-rolled to parent `product_id` (same id space as `scope_core`), but `dc_inst` still doesn't reuse `dc_daily`'s universe: `dc_daily`'s pairs come from `inventory_warehouse` rows, so a pair in scope every year but never actually stocked is absent from it every year and would be deleted by that intersection — exactly the persistent stockout `dc_in_stock_rate` exists to surface. See README's "dc_scope" section.
 
 **Outputs:**
 - `comparable_kpi_long` — per-link YTD metrics + `comparable_pair_count` + `link_prior_year`/`link_current_year`.
@@ -556,6 +558,7 @@ Map raw lost-sales and instock table columns to canonical names, or read in-stoc
 | Add a scope addition from Delta | `scope_adjustments.additions` (multiple entries supported) |
 | Add a scope removal from CSV/Delta | `scope_adjustments.removals` (multiple entries supported) |
 | Enable comparable (like-for-like) pairs | `comparable_pairs.enabled: True` |
+| Enable DC in-stock rate (requires `path_segments.dc_scope` + `path_segments.item_family`) | `dc_instock.enabled: True` — see §6.1b / README's "dc_scope" |
 | Enable output saves | `output.save_outputs: True` |
 | Change output path | `output.path_segments` |
 | Change run_date partition | `output.run_date` (default `as_of_date`) |
@@ -634,8 +637,9 @@ For a genuinely new source table (not just a new column off an existing frame) t
 | `total_mean_stock` | Daily Total Stock Avg (units) | All stores + DC | AVG of daily summed (store + DC) inventory |
 | `WOS_DC` | WOS (DC) | DC/warehouse only | product × fiscal week; DC-inventory-based rollup, same grain/weighting as WOS |
 | `WOS_TOTAL` | WOS (Total) | All stores + DC | product × fiscal week; (store + DC)-inventory-based rollup, same grain/weighting as WOS |
+| `dc_in_stock_rate` | DC In-Stock Rate | DC/warehouse only | Gated (`dc_instock.enabled`); Σ(dc_stocked_days) ÷ Σ(dc_available_days) from an EXPANDED `operation/scope` grid (product×warehouse×date, item-family-rolled to parent, back-applied across the full report window), not from `inventory_warehouse` — a never-stocked in-scope pair reads 0%, unlike `dc_mean_stock`/`WOS_DC`; biases old history DOWN; `null` column when disabled |
 
-**One population per source (never break):** every daily-data metric — sales, `total_inventory`, `mean_stock`, `WOS`, turnover, weighted-instock's sales weights — is computed from a **single** `daily_scoped` frame in `compute_kpis`, under every `defined_scope.grain`, so two metrics in one output row can never describe different populations. `compute_kpis` previously built a second, narrower frame for the stock metrics (a leftover of a removed service-store exclusion); don't reintroduce one. Lost sales and in-stock come from their own source and are restricted separately at that source's grain; DC comes from `inventory_warehouse` on `product_id`. Per-metric `population_filters` are the only sanctioned exception.
+**One population per source (never break):** every daily-data metric — sales, `total_inventory`, `mean_stock`, `WOS`, turnover, weighted-instock's sales weights — is computed from a **single** `daily_scoped` frame in `compute_kpis`, under every `defined_scope.grain`, so two metrics in one output row can never describe different populations. `compute_kpis` previously built a second, narrower frame for the stock metrics (a leftover of a removed service-store exclusion); don't reintroduce one. Lost sales and in-stock come from their own source and are restricted separately at that source's grain; DC (`dc_daily`/`dc_inst`, backing `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL`/`dc_in_stock_rate`) comes from `inventory_warehouse`/`dc_scope`, both item-family-rolled onto parent `product_id` (via the shared `pipeline._roll_to_item_family_parent` helper) BEFORE restriction — same id space as `scope_core`, which is already parent-rolled at its own source. Per-metric `population_filters` are the only sanctioned exception.
 
 **Critical formula constraints (never break):**
 - WOS grain is **product × fiscal week**, not product×store×week. Three steps: (1) sum daily inventory/sales across all scoped stores → product×date, (2) weekly WOS = `avg_daily_inventory / weekly_sales` at product×fiscal week, (3) sales-weighted rollup to the reporting period. Never divide period totals directly.
@@ -666,6 +670,20 @@ Do not confuse scope grain (product×store×week) with WOS computation grain (pr
 
 `dc_mean_stock`/`total_mean_stock` are NOT WOS ratios — they mirror `mean_stock`'s plain per-day-average shape instead (see `_mean_stock_frame`), just built from `dc_daily` (+ store daily inventory, for the total variant).
 
+### 6.1b DC In-Stock Rate (`dc_in_stock_rate`)
+
+Gated by `dc_instock.enabled` (default `False`) — see README's "dc_scope" config reference for the full column-mapping/config surface. Unlike every other DC metric above (`dc_mean_stock`, `WOS_DC`, `WOS_TOTAL`), the denominator is **scope-derived, not inventory-derived**: it comes from `pipeline.build_dc_inst`, an expanded `operation/scope` grid (`product_id`×`warehouse_id`×`date`), not from `inventory_warehouse`'s own rows.
+
+1. Read `dc_scope` (`input_filters.dc_scope` already applied), item-family-roll it to parent `product_id` (`pipeline._roll_to_item_family_parent`), then take its distinct `(product_id, warehouse_id)` pairs. Every pair gets the FULL `[EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE]` window rather than its own coverage dates — trade-off: a pair ranged at a DC only partway through the window is judged on days before it was ever there, biasing historical `dc_in_stock_rate` DOWN (worse the further back the window reaches) — deliberate, for full-history YoY coverage.
+2. Cross-join the fiscal calendar (filtered to the report window) onto those pairs — produces the `(product_id, warehouse_id, date)` grid and its Year/Week in one step.
+3. Restrict to `scope_core`'s in-scope `(product_id, Year, Week)` — the identical left-semi `build_dc_daily` already applies.
+4. Left-join rolled-up `inventory_warehouse` (map to parent, sum — `pipeline._get_inventory_warehouse_parent_rolled`, shared with `build_dc_daily`, no second Delta scan) onto the grid, `F.coalesce(inventory, 0)`.
+5. Aggregate to `(product_id, warehouse_id, Year, Week)`: `dc_stocked_days = COUNT(inventory > stock_threshold)`, `dc_available_days = COUNT(*)`.
+
+`dc_in_stock_rate = F.greatest(0.0, Σ(dc_stocked_days) ÷ Σ(dc_available_days))` — mirrors the `in_stock_rate` block exactly (direct period-grain sum/sum, no sales-weighted rollup like WOS/weighted-instock). When `dc_instock.enabled=False`, `build_dc_inst` returns a correctly-shaped but empty frame, so the column is always present as a literal `null` rather than requiring special-casing downstream.
+
+**Also changes `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL` (non-gated, always-on metrics), not just `dc_in_stock_rate`.** `build_dc_daily`'s `inventory_warehouse` read now goes through the SAME item-family rollup as step 1 above (`pipeline._roll_to_item_family_parent`, unconditionally — NOT gated by `dc_instock.enabled`), fixing a real bug where DC inventory sitting on a superseded/child `product_id` was silently dropped by the old raw-id semi-join against `scope_core` (which was already parent-rolled). This means `path_segments.item_family` must point at a real table any time `path_segments.inventory_warehouse` does, and `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL` will show a step change for any product family with DC inventory split across old and current item codes — that's expected, not a data problem. See README's "dc_scope" / "inventory_warehouse" sections.
+
 ### 6.2 Weighted In-Stock Rate grain
 
 `weighted_instock_rate` is computed at `Year×Week + group_keys` (product-week grain after store aggregation), **not** product×store×week:
@@ -694,14 +712,38 @@ lost_sales_source (cached as lost_sales_weekly_base) — prints its source date 
   └─ scoped to hybrid_scope_keys → lost_sales_weekly → inst_data, lost_base
 
 inventory_warehouse_raw (cached Delta) — prints its source date range on read
+  └─ item_family_raw (cached Delta, read UNCONDITIONALLY whenever inventory_warehouse is
+     configured -- NOT gated by dc_instock.enabled) → _roll_to_item_family_parent maps
+     product_id -> coalesce(parent_id, product_id), then re-aggregated to
+     (product_id, warehouse_id, date): F.sum("inventory") after the mapping
+     (_get_inventory_warehouse_parent_rolled, shared with build_dc_inst below)
   └─ build_dc_daily → dc_daily (left-semi restricted to scope_core's in-scope
-     (product_id, Year, Week), no store dimension; fiscal + product_dims joined)
+     (product_id, Year, Week), no store dimension; fiscal + product_dims joined). Now in the
+     SAME parent-id space as scope_core -- previously restricted RAW product_id against an
+     already-parent-rolled scope_core, silently dropping DC inventory on superseded/child ids
+     (fixed 2026-09-17; see §12).
 
-build_pipeline_frames(scope) → {scoped_daily, inst_data, lost_base, dc_daily, ...}
+dc_scope_raw (cached Delta, ONLY read when dc_instock.enabled=True) — prints its source date
+range on read
+  └─ build_dc_inst → item-family-roll dc_scope to parent product_id (same item_family_raw +
+     helper as above) → distinct (product_id, warehouse_id) pairs, each given the FULL report
+     window (back-applied) — biases old history DOWN for a pair ranged only partway through the
+     window, deliberate trade-off for full-history YoY → cross-join the fiscal calendar (filtered
+     to the report window) onto those pairs, giving the (product_id, warehouse_id, date) grid and
+     its Year/Week in one step → left-semi restrict to scope_core (same population as dc_daily) →
+     left-join rolled-up inventory_warehouse_raw (coalesce 0) → aggregate to (product_id,
+     warehouse_id, Year, Week): dc_stocked_days/dc_available_days → dc_inst (fiscal + product_dims
+     joined, same shape as dc_daily). When enabled=False: a cheap empty-but-correctly-shaped
+     frame, no dc_scope/item_family Delta reads at all -- dc_in_stock_rate ends up a literal null
+     column (item_family_raw is STILL read for dc_daily above regardless of this flag).
+
+build_pipeline_frames(scope) → {scoped_daily, inst_data, lost_base, dc_daily, dc_inst, ...}
   └─ build_kpi_table(period, group_keys) → pandas
        └─ compute_kpis: sales | WOS (product×week, stores aggregated) | mean_stock | instock
                         | WOS_DC/WOS_TOTAL (dc_daily left-joined onto the same WOS grain)
                         | dc_mean_stock/total_mean_stock (mean_stock-shaped, dc_daily-based)
+                        | dc_in_stock_rate (dc_inst, mirrors the instock block — direct
+                          sum(dc_stocked_days)/sum(dc_available_days) at period grain)
        └─ sort in pandas (.sort_values), not Spark orderBy
 
 build_kpi_long → kpi_long (period_type|period|root|dimension|dimension_value|metrics)
@@ -757,6 +799,8 @@ render_kpi_html → standalone HTML file
 | Monthly tab empty or stops earlier than Quarterly/Annual tabs | Fiscal weeks in the reporting window have null `Fiscal_Month` in the fiscal calendar upload while `Fiscal_Quarter` and `Fiscal_Year` are complete — now raises a validation error listing affected weeks. Previously these dropped silently. Fix the fiscal calendar upload or use a narrower window. |
 | Unexpected extra year in Annual/YTD view (only sometimes) | When `use_fiscal_calendar=True`, `Year` comes directly from the fiscal calendar's own `Year` column. If the customer's fiscal year rolls over in late January/early February (not Jan 1), a `run_min_date` early in a calendar year can legitimately span two fiscal years per their calendar — this is correct. |
 | Saved `kpi_long` has far fewer periods than the run actually computed | Fixed — `ctx.kpi_long` was previously overwritten with the HTML-display-trimmed frame *before* `save_outputs()` ran (notably in the Cell 3 `runner.run(save=False)` → Cell 5 `save_outputs(ctx, ...)` workflow, where the trim happened inside Cell 3). Now trimming only ever writes to `ctx.kpi_long_display` (used solely by `render_kpi_html`); `ctx.kpi_long` — and therefore the Delta save — always stays the full computed window. See §9. |
+| `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL` shifted after upgrading, no config change made | Expected, one-time — `build_dc_daily` now item-family-rolls `inventory_warehouse` to parent `product_id` before restricting to `scope_core` (previously raw `product_id`, silently dropping DC inventory on a superseded/child item code). See §6.1b / §12.20. Also means `path_segments.item_family` must now be a real table any time `path_segments.inventory_warehouse` is. |
+| `dc_in_stock_rate` reads unexpectedly low in older history vs recent weeks | Expected — every in-scope pair is judged over the FULL report window, so a pair only ranged at a DC starting later reads as stockout for every earlier day. Deliberate, for full-history YoY coverage. See §6.1b / §12.21. |
 
 ---
 
@@ -879,3 +923,5 @@ For a quick distinct product/store count of the final scope (overall + per slice
 17. **A fiscal calendar's month/quarter NUMBER is not assumed to equal the real calendar month/quarter** — `fiscal_calendar.column_map` reads a client's own quarter/month columns when present, but the Monthly tab's *display label* is never derived by feeding a fiscal month number into a month-name table (a client's fiscal year can be offset from the civil calendar, e.g. tbretail's Feb–Jan year, so fiscal month 07 can span real August). The label is instead derived from the majority real calendar month by day count across each fiscal month's actual dates when `month_name_col` isn't configured — see §3.1.
 18. **No dedicated store-exclusion config key** — every metric uses all scoped stores. If a store should never contribute (e.g. e-com fulfillment), filter it via `input_filters.daily_data` (affects everything read from `daily_data`, not just specific metrics), or rely on `lost_sales_source`/`instock_source` tables that already exclude it upstream.
 19. **DC/warehouse scope restriction must include the week dimension, not just product_id** — `build_dc_daily` restricts on `(product_id, Year, Week)` against `scope_core`, attaching `Year`/`Week` to DC rows (via the fiscal calendar join) **before** the scope semi-join. Under `product_store_week` grain, scope membership varies by week; restricting on `product_id` alone (dropping `Year`/`Week` first) previously let a product's DC inventory leak into weeks it had fallen out of scope — inflating `WOS_DC`/`WOS_TOTAL`/`dc_mean_stock`/`total_mean_stock` for those weeks. Fixed 2026-09-16. No effect under `"product"`/`"product_store"` grain (scope is uniform across every week there already). Any new store-less input frame (§5 "Add a new input frame") must follow the same pattern.
+20. **DC/warehouse frames restrict against `scope_core` in the SAME id space they were built in — item-family-rolled to parent `product_id`, not raw.** `scope_core`/`defined_scope` is already parent-rolled at its own source (its producer maps `product_id -> coalesce(parent_id, product_id)` via `item_family`'s `is_main=false` rows before writing the scope table). `build_dc_daily`'s `inventory_warehouse` read and `build_dc_inst`'s `dc_scope` read both now go through the same shared `pipeline._roll_to_item_family_parent` helper before being restricted to `scope_core` — fixed 2026-09-17. Previously `build_dc_daily` restricted RAW `product_id` against the parent-rolled `scope_core`, silently dropping any DC inventory sitting on a superseded/child `product_id`. This is unconditional (NOT gated by `dc_instock.enabled`): `path_segments.item_family` must point at a real table any time `path_segments.inventory_warehouse` does, and `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL` will shift for any family with inventory split across old/current item codes. Any new DC-adjacent input frame (§5) must roll to parent `product_id` the same way before restricting to `scope_core`.
+21. **`dc_in_stock_rate` back-applies every in-scope pair's coverage window across the FULL report window — this trades early-history accuracy for full-history YoY coverage, and is a deliberate design choice, not a bug.** A pair ranged at a DC only partway through the window reads as 100% stockout for the days before it was ever there, biasing historical `dc_in_stock_rate` DOWN, worse the further back the window reaches. See README's "dc_scope" section.
