@@ -356,55 +356,9 @@ def get_inventory_warehouse_raw(ctx) -> DataFrame:
     return ctx.inventory_warehouse_raw
 
 
-def read_dc_scope_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
-    """DC/warehouse scope table -- backs dc_in_stock_rate's scope-derived denominator (see
-    README's "dc_scope" section). Renamed to canonical product_id/warehouse_id/start_date via
-    DC_SCOPE_COLUMN_MAP.
-
-    start_date: every (product_id, warehouse_id) pair present since the client's go-live is
-    stamped with that same go-live date as a data-availability artifact of the source table
-    itself, not a genuine per-pair "entered scope" signal -- rewriting exactly the rows sitting
-    at that shared floor value to EFFECTIVE_REPORT_START_DATE turns "everyone since go-live" into
-    "everyone since the report window's own start," while leaving every genuine (later) per-pair
-    start_date untouched. Consumed by build_dc_inst to bound each pair's own coverage grid
-    instead of back-applying the full report window to every pair.
-    """
-    path = settings["PATH_DC_SCOPE"]
-    col_map = settings["DC_SCOPE_COLUMN_MAP"]
-    filters = _input_filters(settings, "dc_scope")
-    if not quiet:
-        print(f"reading dc_scope: {path}")
-    raw = spark.read.format("delta").load(path)
-    if filters and not quiet:
-        print(f"dc_scope filters ({len(filters)}):")
-    filtered = apply_input_filters(raw, filters, "dc_scope", quiet=quiet)
-    renamed = rename_column_or_fail(filtered, col_map["product_col"], "product_id", "dc_scope_source.product_col")
-    renamed = rename_column_or_fail(renamed, col_map["warehouse_col"], "warehouse_id", "dc_scope_source.warehouse_col")
-    renamed = rename_column_or_fail(renamed, col_map["start_date_col"], "start_date", "dc_scope_source.start_date_col")
-    # Cast pinned so warehouse_id's type doesn't depend on the source column's own type.
-    selected = renamed.select(
-        "product_id",
-        F.col("warehouse_id").cast("int").alias("warehouse_id"),
-        F.to_date(F.col("start_date")).alias("start_date"),
-    )
-    go_live_floor = selected.agg(F.min("start_date")).collect()[0][0]
-    effective_start = settings["EFFECTIVE_REPORT_START_DATE"]
-    return selected.withColumn(
-        "start_date",
-        F.when(F.col("start_date") == F.lit(go_live_floor), F.lit(effective_start)).otherwise(F.col("start_date")),
-    )
-
-
-def get_dc_scope_raw(ctx) -> DataFrame:
-    """Cached dc_scope read (config filters applied once per run)."""
-    if ctx.dc_scope_raw is None:
-        ctx.dc_scope_raw = read_dc_scope_source(ctx.spark, ctx.settings, quiet=True).cache()
-    return ctx.dc_scope_raw
-
-
 def read_item_family_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
     """Parent/child item-family map -- rolls superseded child products (is_main=false) onto
-    their parent product_id (see README's "dc_scope" section). Read unconditionally whenever
+    their parent product_id (see README's "dc_instock" section). Read unconditionally whenever
     inventory_warehouse is configured; is_main=false filtering happens downstream in pipeline.py."""
     path = settings["PATH_ITEM_FAMILY"]
     col_map = settings["ITEM_FAMILY_COLUMN_MAP"]
