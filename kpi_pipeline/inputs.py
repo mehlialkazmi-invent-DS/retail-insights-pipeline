@@ -323,6 +323,13 @@ def get_daily_data_raw(ctx) -> DataFrame:
     function's call sites) since every consumer (build_scoped_daily, scope.py's
     read_daily_for_scope, fiscal.py) should see the same parent-rolled id space scope_core
     itself is already in.
+
+    Deliberately does NOT re-aggregate after the mapping, unlike
+    pipeline._get_inventory_warehouse_parent_rolled: a child and its parent both having a row on
+    one date is harmless here, since every consumer either sums those rows (sales, inventory
+    totals) or groups by date before averaging (metrics._mean_stock_frame) or uses countDistinct.
+    inventory_warehouse must re-aggregate because build_dc_inst joins it onto a per-pair date grid,
+    where a duplicate key would fan out grid rows and inflate dc_available_days.
     """
     if ctx.daily_data_raw is None:
         raw = read_daily_data_source(ctx.spark, ctx.settings, quiet=True)
