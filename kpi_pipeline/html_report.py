@@ -184,12 +184,12 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
     "dc_in_stock_rate": {
         "label": "DC In-Stock Rate",
         "definition": (
-            "In-stock rate at DC/warehouse level, from an EXPANDED dc_scope grid (product x "
-            "warehouse x date, back-applied across the full report window) rather than "
-            "inventory_warehouse's own date coverage. Because the denominator is scope-derived, "
-            "a product/warehouse pair that is in scope but never actually stocked reads 0% here "
-            "-- it would instead be silently absent from dc_mean_stock/WOS_DC. Back-applying the "
-            "full window biases early history down for pairs ranged only partway through it."
+            "In-stock rate at DC/warehouse level, over an EXPANDED inventory_warehouse grid "
+            "(product x warehouse x date). Each pair's grid runs from its own first stocked day "
+            "to the end of the report window, with every gap 0-filled and counted as a stockout "
+            "-- so a pair that stops being stocked keeps accruing stockout days here, where "
+            "dc_mean_stock/WOS_DC simply go quiet for it. A pair never stocked inside the window "
+            "has no row to anchor a grid to and is absent from all of them alike."
         ),
         "store_scope": "DC/warehouse only",
         "formula": "Σ(dc_stocked_days) ÷ Σ(dc_available_days)",
@@ -947,19 +947,23 @@ def _kpi_table_html(
     )
 
 
-def _comparison_html(
+def _comparison_wide_html(
     comp_df: Optional[pd.DataFrame],
     dimension: str,
     dimension_value: str,
+    metric_cols: List[str],
+    labels: Dict[str, str],
     comp_label: str,
-    labels: Optional[Dict[str, str]] = None,
     period_type: Optional[str] = None,
 ) -> str:
-    """Render one comparison mini-table per distinct (prior_period, current_period) pair present.
-
-    YoY always has exactly one pair. YTD can carry multiple pairs (one per consecutive year-pair
-    present) — each gets its own stacked mini-table, labeled with its own period pair, in
-    ascending year order.
+    """One consolidated YoY/YTD comparison table: a Metric column plus one delta column per
+    consecutive-period link present in ``comp_df`` -- YoY always has exactly one link; YTD can
+    chain several (e.g. 2024->2025 and 2025->2026 when 3+ years are in the report window). Same
+    Delta-column layout _comparable_wide_html established for the comparable-pairs path, minus
+    its value columns -- the value trend for these same periods is already the table directly
+    above this one on the panel (see _value_panel_content), so repeating it here would just be
+    the same numbers twice. Replaces the old per-link stacked mini-tables (one 4-column
+    Metric/prior/current/Change table per link) with this single table.
     """
     if comp_df is None or comp_df.empty:
         return ""
@@ -970,48 +974,41 @@ def _comparison_html(
     if sub.empty:
         return ""
 
-    labels = labels or {}
-    multi_pairs = sub["current_period"].nunique() > 1 if "current_period" in sub.columns else False
-    sections: List[str] = []
-    for (prior_col, current_col), grp in sub.groupby(["prior_period", "current_period"], sort=False):
-        prior_col, current_col = str(prior_col), str(current_col)
-        head = (
-            f"<thead><tr>"
-            f"<th>Metric</th>"
-            f"<th>{_esc(prior_col)}</th>"
-            f"<th>{_esc(current_col)}</th>"
-            f"<th>Change</th>"
-            f"</tr></thead>"
+    links = sub[["prior_period", "current_period"]].drop_duplicates().sort_values("current_period")
+    link_pairs = list(zip(links["prior_period"], links["current_period"]))
+
+    delta_ths = "".join(f"<th>&Delta; {_esc(current)}</th>" for _, current in link_pairs)
+    head = f"<thead><tr><th class='cell-kpi'>Metric</th>{delta_ths}</tr></thead>"
+
+    rows: List[str] = []
+    for metric in metric_cols:
+        metric_rows = sub[sub["metric_key"] == metric]
+        if metric_rows.empty:
+            continue
+        cat = _CAT.get(metric, "general")
+        label = _metric_display_label(metric, labels, period_type)
+        delta_cells: List[str] = []
+        for prior, current in link_pairs:
+            link_row = metric_rows[
+                (metric_rows["prior_period"] == prior) & (metric_rows["current_period"] == current)
+            ]
+            chg = str(link_row.iloc[0]["change_display"]) if not link_row.empty else "—"
+            delta_cells.append(f"<td class='{_esc(_chg_class(chg))}'>{_esc(chg)}</td>")
+        rows.append(
+            f"<tr class='cat-{_esc(cat)}'>"
+            f"<td class='cell-kpi'>{_esc(label)}</td>"
+            f"{''.join(delta_cells)}"
+            f"</tr>"
         )
 
-        rows: List[str] = []
-        for _, row in grp.iterrows():
-            chg = str(row.get("change_display", "—"))
-            metric_key = row.get("metric_key")
-            if metric_key and period_type:
-                kpi_label = _metric_display_label(str(metric_key), labels, period_type)
-            else:
-                kpi_label = str(row.get("KPI", "—"))
-            rows.append(
-                f"<tr>"
-                f"<td>{_esc(kpi_label)}</td>"
-                f"<td>{_esc(str(row.get('prior_display', '—')))}</td>"
-                f"<td>{_esc(str(row.get('current_display', '—')))}</td>"
-                f"<td class='{_esc(_chg_class(chg))}'>{_esc(chg)}</td>"
-                f"</tr>"
-            )
-
-        section_label = f"{comp_label} Comparison — {current_col}" if multi_pairs else f"{comp_label} Comparison"
-        sections.append(
-            "<div class='cmp-section'>"
-            f"<p class='cmp-label'>{_esc(section_label)}</p>"
-            "<div class='table-wrap'>"
-            f"<table class='cmp-table'>{head}<tbody>{''.join(rows)}</tbody></table>"
-            "</div>"
-            "</div>"
-        )
-
-    return "".join(sections)
+    return (
+        "<div class='cmp-section'>"
+        f"<p class='cmp-label'>{_esc(comp_label)} Comparison</p>"
+        "<div class='table-wrap'>"
+        f"<table class='cmp-table'>{head}<tbody>{''.join(rows)}</tbody></table>"
+        "</div>"
+        "</div>"
+    )
 
 
 def _comparable_wide_html(
@@ -1028,12 +1025,10 @@ def _comparable_wide_html(
     """One consolidated comparable-pairs (like-for-like) YTD table: N value columns (one per
     year in the report window, from comparable_kpi_long -- reuses _pivot_single_value, the same
     wide-value pattern _kpi_table_html renders) plus N-1 delta columns (one per consecutive-year
-    link, from comparable_comparison_ytd's own per-link change_display -- same grouping
-    _comparison_html uses) laid out side by side in ONE table, instead of N-1 separate 2-column
-    stacked tables.
-
-    This replaces _comparison_html only for the comparable path -- the regular (non-comparable)
-    YoY/YTD comparison rendering is untouched (still _comparison_html, see _value_panel_content).
+    link, from comparable_comparison_ytd's own per-link change_display) laid out side by side in
+    ONE table, instead of N-1 separate 2-column stacked tables. Value columns are included here
+    (unlike _comparison_wide_html's regular-comparison table) because comparable_kpi_long is a
+    separate restricted population that isn't shown anywhere else on the panel.
     """
     if comparable_comp_df is None or comparable_comp_df.empty:
         return ""
@@ -1053,8 +1048,8 @@ def _comparable_wide_html(
     value_grp = value_sub.set_index("period")
 
     # One delta column per consecutive-year link present for this dimension/value, ascending by
-    # the link's current (later) year -- mirrors _comparison_html's own groupby(["prior_period",
-    # "current_period"]) grouping, just laid out as columns instead of stacked sections.
+    # the link's current (later) year -- same grouping _comparison_wide_html uses below, just
+    # alongside the value columns here instead of on its own.
     links = comp_sub[["prior_period", "current_period"]].drop_duplicates().sort_values("current_period")
     link_pairs = list(zip(links["prior_period"], links["current_period"]))
 
@@ -1120,7 +1115,7 @@ def _value_panel_content(
         week_start_by_period,
     )
     table = _kpi_table_html(sub, periods, metric_cols, labels, period_type, month_display_by_period)
-    cmp = _comparison_html(comp_df, dimension, dimension_value, comp_label, labels, period_type)
+    cmp = _comparison_wide_html(comp_df, dimension, dimension_value, metric_cols, labels, comp_label, period_type)
     comparable_cmp = _comparable_wide_html(
         comparable_kpi_long, comparable_comp_df, dimension, dimension_value, metric_cols, labels,
         comparable_label, period_type, month_display_by_period,
