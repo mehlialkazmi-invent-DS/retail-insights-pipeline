@@ -41,17 +41,16 @@
 #                         window (one shared universe across every consecutive-year link, not
 #                         a separate universe per link); requires 2+ years (run_min_date
 #                         spanning that far back) to have anything to compute.
-#   dc_instock          — DC in-stock rate (dc_in_stock_rate), gated, from an EXPANDED dc_scope
-#                         grid (product x warehouse x date) rather than inventory_warehouse's own
-#                         date coverage -- every in-scope pair gets the FULL report window, which
-#                         biases early history down. Requires path_segments.dc_scope +
-#                         path_segments.item_family. See README's "dc_scope" section.
+#   dc_instock          — DC in-stock rate (dc_in_stock_rate), gated. Expands inventory_warehouse
+#                         into a daily product x warehouse grid running from each pair's own first
+#                         stocked day to the report window's end, 0-filling the gaps as stockouts.
+#                         Requires path_segments.item_family. See README's "dc_instock" section.
 #
 #   NOTE: inventory_warehouse's product_id is item-family-rolled onto its parent
 #   (path_segments.item_family) before being restricted to scope_core, matching defined_scope's
 #   own already-parent-rolled id space -- required whenever inventory_warehouse is configured,
 #   not just when dc_instock.enabled=True. Changes dc_mean_stock/WOS_DC/WOS_TOTAL for families
-#   with inventory split across old and current item codes. See README's "dc_scope" section.
+#   with inventory split across old and current item codes. See README's "dc_instock" section.
 
 import copy
 import datetime
@@ -201,11 +200,8 @@ CONFIG: Dict[str, Any] = {
         # (already parent-rolled) -- required whenever this is configured, not gated by
         # dc_instock.enabled.
         "inventory_warehouse": ["operation", "inventory_warehouse"],
-        # DC/warehouse scope table -- backs dc_in_stock_rate's scope-derived denominator (see
-        # README's "dc_scope" section). Only read when dc_instock.enabled=True.
-        "dc_scope": ["operation", "scope"],
         # Parent/child item-family map -- superseded/child products (is_main=false) roll up onto
-        # parent_id. Used by both inventory_warehouse and dc_scope rollups; read unconditionally.
+        # parent_id. Used by the inventory_warehouse rollup; read unconditionally.
         "item_family": ["operation", "item_family"],
         "products": ["master-data", "products"],
         # Add a model_id=... path segment here if your lost-sales table is partitioned by model.
@@ -225,8 +221,6 @@ CONFIG: Dict[str, Any] = {
         "lost_sales": [],
         "daily_data": ["usable = 1"],
         "inventory_warehouse": [],
-        # DC-level replenishment scope only -- solution_id=22, location_type=1 (warehouse).
-        "dc_scope": ["solution_id = 22", "location_type = 1"],
         "item_family": [],
     },
     # ---------------------------------------------------------------------------
@@ -289,24 +283,10 @@ CONFIG: Dict[str, Any] = {
         "fallback_sources": [],  # optional additional column-sets from the same table (see above)
     },
     # ---------------------------------------------------------------------------
-    # DC SCOPE SOURCE — column mapping for the DC/warehouse scope table
-    # ---------------------------------------------------------------------------
-    # Backs dc_in_stock_rate (see README's "dc_scope" section). Renamed to canonical
-    # product_id/warehouse_id at read time (read_dc_scope_source).
-    "dc_scope_source": {
-        "product_col": "product_id",
-        "warehouse_col": "location_id",
-        # Backs the DC in-stock min-date fix (see README's "dc_scope" section /
-        # kpi_pipeline.pipeline.build_dc_inst): the scope table's own per-pair start_date, used
-        # to bound each pair's coverage grid instead of the full report window. See
-        # read_dc_scope_source for how a shared go-live-floor value is normalized away.
-        "start_date_col": "start_date",
-    },
-    # ---------------------------------------------------------------------------
     # ITEM FAMILY SOURCE — parent/child product rollup for every DC frame
     # ---------------------------------------------------------------------------
     # Maps a superseded/child product_id (is_main=false) to its current parent_id (see README's
-    # "dc_scope" section). Renamed to canonical product_id/parent_id/is_main at read time.
+    # "dc_instock" section). Renamed to canonical product_id/parent_id/is_main at read time.
     "item_family_source": {
         "product_col": "product_id",
         "parent_col": "parent_id",
@@ -315,27 +295,26 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     # ITEM FAMILY ROLLUP — per-source toggle for the child->parent product_id rollup
     # ---------------------------------------------------------------------------
-    # inventory_warehouse/dc_scope default ON (preserves today's always-on behaviour).
+    # inventory_warehouse defaults ON (preserves today's always-on behaviour).
     # daily_data defaults ON too -- build_scoped_daily's own join to already-parent-rolled
     # scope_core/ctx.products_attr otherwise silently DROPS any daily-data row still carrying a
     # child/superseded product_id (a pre-existing bug; this toggle fixes it by default). Turning
     # it on can shift historical numbers for any product with a supersede history.
     # lost_sales defaults OFF -- report_dfu already does its own supersede substitution upstream,
     # so a second rollup here would likely be a no-op; kept available as an opt-in safety net.
-    # Requires path_segments.item_family whenever any of the four is True.
+    # Requires path_segments.item_family whenever any of the three is True.
     "item_family_rollup": {
         "daily_data": True,
         "lost_sales": False,
         "inventory_warehouse": True,
-        "dc_scope": True,
     },
     # ---------------------------------------------------------------------------
-    # DC INSTOCK — gated: DC in-stock rate from an expanded dc_scope grid
+    # DC INSTOCK — gated: DC in-stock rate from an expanded inventory_warehouse grid
     # ---------------------------------------------------------------------------
-    # OFF by default -- requires path_segments.dc_scope and path_segments.item_family to point
-    # at real tables. Every in-scope pair is back-applied across the full report window, which
-    # biases early history down (see README's "dc_scope" section). When disabled, dc_in_stock_rate
-    # is emitted as a literal null column so the output shape stays constant.
+    # OFF by default -- requires path_segments.item_family to point at a real table. Each pair's
+    # grid starts at its own first stocked day, so a pair ranged at a DC but never once stocked is
+    # absent rather than reading 0% (see README's "dc_instock" section). When disabled,
+    # dc_in_stock_rate is emitted as a literal null column so the output shape stays constant.
     "dc_instock": {
         "enabled": False,
         "stock_threshold": 0,  # a day counts as "stocked" when inventory > stock_threshold
@@ -760,8 +739,6 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
         ifr["lost_sales"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_LOST_SALES"])
     if "KPI_ITEM_FAMILY_ROLLUP_INVENTORY_WAREHOUSE" in os.environ:
         ifr["inventory_warehouse"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_INVENTORY_WAREHOUSE"])
-    if "KPI_ITEM_FAMILY_ROLLUP_DC_SCOPE" in os.environ:
-        ifr["dc_scope"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_DC_SCOPE"])
 
     op = out.setdefault("output", {})
     if "KPI_SAVE_OUTPUTS" in os.environ:
@@ -870,7 +847,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "PATH_FISCAL": fund_paste(bucket, *path_segments["fiscal"]),
         "PATH_DAILY_DATA": fund_paste(bucket, *path_segments["daily_data"]),
         "PATH_INVENTORY_WAREHOUSE": fund_paste(bucket, *path_segments["inventory_warehouse"]),
-        "PATH_DC_SCOPE": fund_paste(bucket, *path_segments["dc_scope"]),
         "PATH_ITEM_FAMILY": fund_paste(bucket, *path_segments["item_family"]),
         "PATH_PRODUCTS": fund_paste(bucket, *path_segments["products"]),
         "PATH_LOST_SALES": fund_paste(bucket, *path_segments["lost_sales"]),
@@ -918,13 +894,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         ],
     }
 
-    dc_scope_source_cfg = cfg.get("dc_scope_source", {}) or {}
-    dc_scope_column_map = {
-        "product_col": dc_scope_source_cfg.get("product_col", "product_id"),
-        "warehouse_col": dc_scope_source_cfg.get("warehouse_col", "location_id"),
-        "start_date_col": dc_scope_source_cfg.get("start_date_col", "start_date"),
-    }
-
     item_family_source_cfg = cfg.get("item_family_source", {}) or {}
     item_family_column_map = {
         "product_col": item_family_source_cfg.get("product_col", "product_id"),
@@ -937,7 +906,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "daily_data": bool(item_family_rollup_cfg.get("daily_data", True)),
         "lost_sales": bool(item_family_rollup_cfg.get("lost_sales", False)),
         "inventory_warehouse": bool(item_family_rollup_cfg.get("inventory_warehouse", True)),
-        "dc_scope": bool(item_family_rollup_cfg.get("dc_scope", True)),
     }
 
     dc_instock_cfg = cfg.get("dc_instock", {}) or {}
@@ -1122,7 +1090,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "LOST_SALES_COLUMN_MAP": lost_sales_column_map,
         "INSTOCK_SOURCE_ENABLED": instock_source_enabled,
         "INSTOCK_SOURCE_COLUMN_MAP": instock_source_column_map,
-        "DC_SCOPE_COLUMN_MAP": dc_scope_column_map,
         "ITEM_FAMILY_COLUMN_MAP": item_family_column_map,
         "ITEM_FAMILY_ROLLUP": item_family_rollup,
         "DC_INSTOCK_ENABLED": dc_instock_enabled,

@@ -70,10 +70,12 @@ def _restrict_frames(
     same-pairs restriction instead, exactly mirroring total_inventory_wos_ytd.ipynb's two
     independent same-pairs design (product x store from daily-data, product x warehouse from
     inventory_warehouse, each restricted on its own terms rather than one restriction forced onto
-    both). dc_inst shares dc_daily's (product_id, warehouse_id) grain and id space but still gets
-    its own all-years intersection: dc_daily's pairs come from inventory_warehouse rows, so a pair
-    in scope every year but never stocked is absent from it every year -- reusing dc_comparable_keys
-    would delete exactly the persistent stockouts dc_in_stock_rate exists to surface.
+    both). dc_inst shares dc_daily's (product_id, warehouse_id) grain, id space and inventory
+    source but still gets its own all-years intersection: dc_inst 0-fills every day from a pair's
+    first stocked day to the report window's end, so a pair that stopped being stocked partway
+    through still has rows (all of them stockouts) in the later years where dc_daily has none.
+    Its per-year universe is therefore a superset of dc_daily's, and reusing dc_comparable_keys
+    would delete exactly the sustained stockouts dc_in_stock_rate exists to surface.
     """
     out = dict(period_frames)
     comparable_products = comparable_keys.select(*_PRODUCT_KEYS).distinct()
