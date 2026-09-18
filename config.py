@@ -1214,10 +1214,15 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "COMPARABLE_PAIRS_ENABLED": cfg.get("comparable_pairs", {}).get("enabled", False),
         "COMPARISON_KINDS": comparison_kinds,
         "SCOPE_ADJUSTMENTS": cfg.get("scope_adjustments", {}),
-        "LOST_SALES_ENSEMBLE_ENABLED": lse["enabled"],
-        "FAST_MOVER_CLUSTERS": list(lse["fast_mover_clusters"]),
+        # .get() throughout, matching what the validators above actually require: they only
+        # demand fast_mover_clusters when enabled=True, and speed_cluster_attribute_name when
+        # format="long". Indexing these directly raised KeyError on configs the validators had
+        # deliberately just accepted -- e.g. any format="wide" config omitting the unused
+        # attribute-name key.
+        "LOST_SALES_ENSEMBLE_ENABLED": lse.get("enabled", False),
+        "FAST_MOVER_CLUSTERS": list(lse.get("fast_mover_clusters") or [1, 2, 3]),
         "SPEED_CLUSTER_FORMAT": lse.get("speed_cluster_format", "long"),
-        "SPEED_CLUSTER_ATTRIBUTE_NAME": lse["speed_cluster_attribute_name"],
+        "SPEED_CLUSTER_ATTRIBUTE_NAME": lse.get("speed_cluster_attribute_name"),
         "SPEED_CLUSTER_VALUE_COL": lse.get("speed_cluster_value_col", "product_speed_cluster"),
         "LOST_SALES_COLUMN_MAP": lost_sales_column_map,
         "INSTOCK_SOURCE_ENABLED": instock_source_enabled,
