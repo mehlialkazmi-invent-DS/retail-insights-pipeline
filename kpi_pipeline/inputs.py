@@ -313,9 +313,24 @@ def read_daily_data_source(spark: SparkSession, settings: Dict[str, Any], quiet:
 
 
 def get_daily_data_raw(ctx) -> DataFrame:
-    """Cached daily-data read (config filters applied once per run)."""
+    """Cached daily-data read (config filters applied once per run), item-family-rolled to
+    parent product_id when ITEM_FAMILY_ROLLUP["daily_data"] is True (default -- see config.py).
+
+    Without this, build_scoped_daily's own join to already-parent-rolled scope_core/
+    ctx.products_attr (pipeline.py) silently DROPS any daily-data row still carrying a
+    child/superseded product_id, since the join has no matching parent-only key for it -- a
+    pre-existing bug this default-on rollup fixes. Applied once here (not at each of this
+    function's call sites) since every consumer (build_scoped_daily, scope.py's
+    read_daily_for_scope, fiscal.py) should see the same parent-rolled id space scope_core
+    itself is already in.
+    """
     if ctx.daily_data_raw is None:
-        ctx.daily_data_raw = read_daily_data_source(ctx.spark, ctx.settings, quiet=True).cache()
+        raw = read_daily_data_source(ctx.spark, ctx.settings, quiet=True)
+        if ctx.settings["ITEM_FAMILY_ROLLUP"]["daily_data"]:
+            from kpi_pipeline.pipeline import _roll_to_item_family_parent
+
+            raw = _roll_to_item_family_parent(raw, ctx)
+        ctx.daily_data_raw = raw.cache()
     return ctx.daily_data_raw
 
 

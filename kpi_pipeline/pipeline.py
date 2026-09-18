@@ -48,12 +48,20 @@ def _aggregate_lost_sales_pairweek(ctx: KPIContext, raw: DataFrame, start, end) 
     (see config.py's lost_sales_source). in_stock/total_days are skipped here entirely
     when INSTOCK_SOURCE_ENABLED — they come from the separate instock_source table
     instead (see read_lost_sales_weekly).
+
+    Item-family-rolled to parent product_id right before aggregation when
+    ITEM_FAMILY_ROLLUP["lost_sales"] is True (see config.py) — OFF by default, since
+    report_dfu already does its own supersede substitution upstream and a second rollup here
+    would likely be a no-op; available as an opt-in safety net. The groupBy below then combines
+    any child+parent rows landing in the same (product_id[, store_id], week_start_date) bucket.
     """
     col_map = ctx.settings.get("LOST_SALES_COLUMN_MAP") or DEFAULT_LOST_SALES_COLUMN_MAP
     filtered = (
         raw.withColumn("week_start_date", F.to_date("week_start_date"))
         .filter(F.col("week_start_date").between(F.lit(start), F.lit(end)))
     )
+    if ctx.settings["ITEM_FAMILY_ROLLUP"]["lost_sales"]:
+        filtered = _roll_to_item_family_parent(filtered, ctx)
     agg_exprs = [F.sum(F.col(col_map["lost_sales_col"]).cast("double")).alias("lost_sales")]
     if not ctx.settings.get("INSTOCK_SOURCE_ENABLED", False):
         agg_exprs.append(F.sum(F.col(col_map["in_stock_col"]).cast("double")).alias("in_stock_days"))
@@ -87,11 +95,17 @@ def _aggregate_instock_pairweek(ctx: KPIContext, raw: DataFrame, start, end) -> 
     instead of requiring an exact (product, store, week) match. Safe here: in_stock_days/
     total_days are a ratio, and summing the same broadcast value across a product's stores then
     dividing reproduces the original ratio (numerator and denominator scale identically).
+
+    Item-family-rolled to parent product_id right before aggregation when
+    ITEM_FAMILY_ROLLUP["lost_sales"] is True (see config.py) -- same toggle and reasoning as
+    _aggregate_lost_sales_pairweek's own rollup, applied here for instock_source's own rows.
     """
     filtered = (
         raw.withColumn("week_start_date", F.to_date("week_start_date"))
         .filter(F.col("week_start_date").between(F.lit(start), F.lit(end)))
     )
+    if ctx.settings["ITEM_FAMILY_ROLLUP"]["lost_sales"]:
+        filtered = _roll_to_item_family_parent(filtered, ctx)
     agg_exprs = [
         F.sum(F.col("in_stock").cast("double")).alias("in_stock_days"),
         F.sum(F.col("total_days").cast("double")).alias("total_days"),
@@ -295,24 +309,26 @@ def _roll_to_item_family_parent(df: DataFrame, ctx: KPIContext) -> DataFrame:
 
 
 def _get_inventory_warehouse_parent_rolled(ctx: KPIContext) -> DataFrame:
-    """inventory_warehouse for the report window, item-family-rolled to parent product_id and
-    re-aggregated so children sum rather than duplicate. Cached on ctx: scope-independent, so
-    both DC frames and every scope variant share one materialization.
+    """inventory_warehouse for the report window, item-family-rolled to parent product_id
+    (gated by ITEM_FAMILY_ROLLUP["inventory_warehouse"], default True -- preserves today's
+    always-on behaviour) and re-aggregated so children sum rather than duplicate. Cached on ctx:
+    scope-independent, so both DC frames and every scope variant share one materialization.
     """
     if ctx.inventory_warehouse_rolled is not None:
         return ctx.inventory_warehouse_rolled
 
     s = ctx.settings
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
+    base = (
+        get_inventory_warehouse_raw(ctx)
+        .select("product_id", "warehouse_id", "date", "inventory")
+        .withColumn("date", F.to_date(F.col("date")))
+        .filter(F.col("date").between(F.lit(start), F.lit(end)))
+    )
+    if s["ITEM_FAMILY_ROLLUP"]["inventory_warehouse"]:
+        base = _roll_to_item_family_parent(base, ctx)
     ctx.inventory_warehouse_rolled = (
-        _roll_to_item_family_parent(
-            get_inventory_warehouse_raw(ctx)
-            .select("product_id", "warehouse_id", "date", "inventory")
-            .withColumn("date", F.to_date(F.col("date")))
-            .filter(F.col("date").between(F.lit(start), F.lit(end))),
-            ctx,
-        )
-        .groupBy("product_id", "warehouse_id", "date")
+        base.groupBy("product_id", "warehouse_id", "date")
         .agg(F.sum("inventory").alias("inventory"))
         .cache()
     )
@@ -377,15 +393,15 @@ def build_dc_inst(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
     threshold = s["DC_INSTOCK_STOCK_THRESHOLD"]
 
-    # Every in-scope pair, item-family-rolled first so it lands in scope_core's own id space,
-    # collapsed to one start_date per (product_id, warehouse_id) -- the EARLIEST of any
+    # Every in-scope pair, item-family-rolled first (gated by ITEM_FAMILY_ROLLUP["dc_scope"],
+    # default True -- preserves today's always-on behaviour) so it lands in scope_core's own id
+    # space, collapsed to one start_date per (product_id, warehouse_id) -- the EARLIEST of any
     # constituent child/parent item's own start_date, since rolling children onto a shared parent
     # must never narrow the pair's true coverage window.
-    pairs = (
-        _roll_to_item_family_parent(get_dc_scope_raw(ctx), ctx)
-        .groupBy("product_id", "warehouse_id")
-        .agg(F.min("start_date").alias("start_date"))
-    )
+    dc_scope_raw = get_dc_scope_raw(ctx)
+    if s["ITEM_FAMILY_ROLLUP"]["dc_scope"]:
+        dc_scope_raw = _roll_to_item_family_parent(dc_scope_raw, ctx)
+    pairs = dc_scope_raw.groupBy("product_id", "warehouse_id").agg(F.min("start_date").alias("start_date"))
     cal = broadcast(
         ctx.fiscal_cal.select("date", "Year", "Week").filter(F.col("date").between(F.lit(start), F.lit(end)))
     )

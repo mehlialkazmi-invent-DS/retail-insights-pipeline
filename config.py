@@ -408,6 +408,23 @@ CONFIG: Dict[str, Any] = {
         "is_main_col": "is_main",
     },
     # ---------------------------------------------------------------------------
+    # ITEM FAMILY ROLLUP — per-source toggle for the child->parent product_id rollup
+    # ---------------------------------------------------------------------------
+    # inventory_warehouse/dc_scope default ON (preserves today's always-on behaviour).
+    # daily_data defaults ON too -- build_scoped_daily's own join to already-parent-rolled
+    # scope_core/ctx.products_attr otherwise silently DROPS any daily-data row still carrying a
+    # child/superseded product_id (a pre-existing bug; this toggle fixes it by default). Turning
+    # it on can shift historical numbers for any product with a supersede history.
+    # lost_sales defaults OFF -- report_dfu already does its own supersede substitution upstream,
+    # so a second rollup here would likely be a no-op; kept available as an opt-in safety net.
+    # Requires path_segments.item_family whenever any of the four is True.
+    "item_family_rollup": {
+        "daily_data": True,
+        "lost_sales": False,
+        "inventory_warehouse": True,
+        "dc_scope": True,
+    },
+    # ---------------------------------------------------------------------------
     # DC INSTOCK — gated: DC in-stock rate from an expanded dc_scope grid
     # ---------------------------------------------------------------------------
     # ON for tbretail. Every in-scope pair is back-applied across the full report window, which
@@ -865,6 +882,16 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if "KPI_INSTOCK_TOTAL_DAYS_COL" in os.environ:
         ins["total_days_col"] = os.environ["KPI_INSTOCK_TOTAL_DAYS_COL"].strip()
 
+    ifr = out.setdefault("item_family_rollup", {})
+    if "KPI_ITEM_FAMILY_ROLLUP_DAILY_DATA" in os.environ:
+        ifr["daily_data"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_DAILY_DATA"])
+    if "KPI_ITEM_FAMILY_ROLLUP_LOST_SALES" in os.environ:
+        ifr["lost_sales"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_LOST_SALES"])
+    if "KPI_ITEM_FAMILY_ROLLUP_INVENTORY_WAREHOUSE" in os.environ:
+        ifr["inventory_warehouse"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_INVENTORY_WAREHOUSE"])
+    if "KPI_ITEM_FAMILY_ROLLUP_DC_SCOPE" in os.environ:
+        ifr["dc_scope"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_DC_SCOPE"])
+
     op = out.setdefault("output", {})
     if "KPI_SAVE_OUTPUTS" in os.environ:
         op["save_outputs"] = _parse_bool(os.environ["KPI_SAVE_OUTPUTS"])
@@ -1032,6 +1059,14 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "product_col": item_family_source_cfg.get("product_col", "product_id"),
         "parent_col": item_family_source_cfg.get("parent_col", "parent_id"),
         "is_main_col": item_family_source_cfg.get("is_main_col", "is_main"),
+    }
+
+    item_family_rollup_cfg = cfg.get("item_family_rollup", {}) or {}
+    item_family_rollup = {
+        "daily_data": bool(item_family_rollup_cfg.get("daily_data", True)),
+        "lost_sales": bool(item_family_rollup_cfg.get("lost_sales", False)),
+        "inventory_warehouse": bool(item_family_rollup_cfg.get("inventory_warehouse", True)),
+        "dc_scope": bool(item_family_rollup_cfg.get("dc_scope", True)),
     }
 
     dc_instock_cfg = cfg.get("dc_instock", {}) or {}
@@ -1218,6 +1253,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "INSTOCK_SOURCE_COLUMN_MAP": instock_source_column_map,
         "DC_SCOPE_COLUMN_MAP": dc_scope_column_map,
         "ITEM_FAMILY_COLUMN_MAP": item_family_column_map,
+        "ITEM_FAMILY_ROLLUP": item_family_rollup,
         "DC_INSTOCK_ENABLED": dc_instock_enabled,
         "DC_INSTOCK_STOCK_THRESHOLD": dc_instock_stock_threshold,
         **paths,
