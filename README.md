@@ -649,6 +649,7 @@ Maps raw lost-sales table columns to canonical names. Allows customers whose los
     "in_stock_col": "in_stock",           # default
     "total_days_col": "details.total_days",  # default; supports dotted nested-struct paths
     "product_agg_level_col": None,        # set when the source is keyed by product_agg_level, not product_id
+    "sales_filter": [],                   # narrows ONLY lost_sales_pct's sales denominator (see below)
 }
 ```
 
@@ -659,6 +660,21 @@ Maps raw lost-sales table columns to canonical names. Allows customers whose los
 **`store_col: None`** (optional): for a source with no per-store dimension. The scope join **collapses to the source's own grain** — `store_id` is dropped from the join keys and the (deduplicated) scope is semi-joined on `(product_id, Year, Week)` — so one product-week keeps exactly one row. This matters because `lost_sales` is an absolute count, not a ratio: fanning that single value out to one row per scoped store would inflate any later sum across stores by the store-count factor. The resulting `lost_base`/`inst_data` frames carry no `store_id`, and `lost_sales_pct` is computed against the product-week sales total (summed across scoped stores) so numerator and denominator describe the same population.
 
 Residual limitation, which no join can fix: the source's value covers the product's **entire** store footprint, which may be wider than a `product_store` scope that includes only some of its stores. A store-less source has no per-store detail to restrict. Prefer a genuinely per-store source when one exists — set `store_col` and you get a true per-store match end to end.
+
+**`sales_filter`** (optional, list of Spark SQL expressions): narrows the **daily-data sales** that form the other half of `lost_sales_pct`'s denominator — `lost_sales / (sales + lost_sales)` — and nothing else. `total_sales_quantity`, `mean_stock`, `WOS`, `in_stock_rate` and every other metric keep the full population.
+
+Set it when the lost-sales table covers a **narrower population than `daily_data`**, which otherwise puts the two halves of that ratio on different populations. The common case is a lost-sales model built to exclude e-commerce (e.g. tbretail's `model_id=top_down_excluding_ecom`, reached either directly or via `report_dfu`): the numerator carries no ecom lost sales, while `daily_data`'s sales still carry ecom revenue. The denominator is inflated relative to the numerator, so `lost_sales_pct` reads **low** — and the gap grows with the ecom share. Excluding the same stores here puts both halves back on one population:
+
+```python
+"lost_sales_source": {
+    ...
+    "sales_filter": ["store_id NOT IN (9001, 9002)"],   # the ecom fulfilment "stores"
+},
+```
+
+Any column present on `daily_data` can be used, and expressions are ANDed (same convention as [`input_filters`](#input_filters)). Applied to `scoped_daily` in `build_pipeline_frames` before the weekly sales rollup, so it narrows the rows *inside* the scope rather than changing the scope itself. Empty (default) = no narrowing, byte-identical to previous behaviour.
+
+**Why not the other two knobs.** `input_filters.daily_data` would fix the ratio but applies to **every** daily-data metric, so ecom would also vanish from `total_sales_quantity`/`mean_stock`/`WOS` — usually not what you want, since those legitimately include ecom. `metrics.population_filters` can't reach it at all: it is applied to `lost_base`, which is already at product-week grain with store sales summed in, so the ecom contribution is baked in before that filter ever runs (and it takes dimension/value specs, not SQL).
 
 ### `instock_source`
 
@@ -874,11 +890,11 @@ Default metrics (configurable in `CONFIG["metrics"]`):
 - DC/warehouse + combined inventory (requires `path_segments.inventory_warehouse`, see [`inventory_warehouse`](#inventory_warehouse) below): `dc_mean_stock`, `total_mean_stock`, `WOS_DC`, `WOS_TOTAL`
 - DC in-stock (gated, `dc_instock.enabled`, requires `path_segments.item_family`, see [`dc_instock`](#dc_instock) below): `dc_in_stock_rate`
 
-Every metric uses all scoped stores — there is no store-exclusion config key. If a store should never contribute at all (e.g. an e-com fulfillment "store"), filter it out via `input_filters.daily_data`, or rely on your `lost_sales_source`/`instock_source` tables already excluding it upstream (see [Config reference](#config-reference)).
+Every metric uses all scoped stores — there is no global store-exclusion config key. If a store should never contribute to anything (e.g. an e-com fulfillment "store"), filter it out via `input_filters.daily_data`, or rely on your `lost_sales_source`/`instock_source` tables already excluding it upstream. To exclude it from **`lost_sales_pct` only** — because the lost-sales table itself excludes it and the ratio would otherwise mix populations — use [`lost_sales_source.sales_filter`](#lost_sales_source) instead (see [Config reference](#config-reference)).
 
-**One population per source.** Every metric read from `noob/daily-data` — sales, `total_inventory`, `mean_stock`, `WOS`, turnover, and weighted-instock's sales weights — is computed from the **same** rows, under every `defined_scope.grain`. Two metrics in the same output row can never describe different populations. Lost sales and in-stock come from their own source (`lost_sales_source`/`instock_source`) and are restricted separately, at that source's own grain; DC inventory likewise comes from `inventory_warehouse`, item-family-rolled onto parent `product_id` (same id space as `scope_core` — see [`dc_instock`](#dc_instock)) before matching. `dc_in_stock_rate` reads that same frame but expands it into a per-pair daily grid rather than consuming its rows directly — see [`dc_instock`](#dc_instock). Per-metric `population_filters` are the one deliberate exception, and only for the metrics you explicitly list.
+**One population per source.** Every metric read from `noob/daily-data` — sales, `total_inventory`, `mean_stock`, `WOS`, turnover, and weighted-instock's sales weights — is computed from the **same** rows, under every `defined_scope.grain`. Two metrics in the same output row can never describe different populations. Lost sales and in-stock come from their own source (`lost_sales_source`/`instock_source`) and are restricted separately, at that source's own grain; DC inventory likewise comes from `inventory_warehouse`, item-family-rolled onto parent `product_id` (same id space as `scope_core` — see [`dc_instock`](#dc_instock)) before matching. `dc_in_stock_rate` reads that same frame but expands it into a per-pair daily grid rather than consuming its rows directly — see [`dc_instock`](#dc_instock). There are exactly two deliberate exceptions: per-metric `population_filters`, and `lost_sales_source.sales_filter` — which narrows the sales half of `lost_sales_pct`'s denominator so it matches a lost-sales source covering a narrower population than `daily_data` (see [`lost_sales_source`](#lost_sales_source)). Both apply only where you explicitly configure them.
 
-**Lost Sales %** = `100 × sum(lost_sales) / sum(floor(weekly_sales + lost_sales))` — denominator includes imputed lost demand.
+**Lost Sales %** = `100 × sum(lost_sales) / sum(floor(weekly_sales + lost_sales))` — denominator includes imputed lost demand. `weekly_sales` comes from `daily_data` while `lost_sales` comes from `lost_sales_source`, so if that source covers a narrower population (an ecom-excluding model, say) the two halves describe different populations and the ratio reads low — see [`lost_sales_source.sales_filter`](#lost_sales_source).
 
 **In-Stock Rate** = `sum(in_stock_days) / sum(available_days)` from top-down lost-sales output.
 
@@ -976,6 +992,7 @@ If you see slow runs, check: (1) scope table path is correct so defined scope is
 
 | Symptom                     | Likely cause                                                                |
 | --------------------------- | --------------------------------------------------------------------------- |
+| `lost_sales_pct` reads lower than expected | Numerator and denominator are on different populations — the lost-sales source excludes something `daily_data` still carries (classically e-commerce), inflating the denominator. Narrow the sales half with [`lost_sales_source.sales_filter`](#lost_sales_source) |
 | `initial save blocked`      | Output tables already exist — switch to `incremental` or `full_refresh` (see [Output saves](#output-saves)) |
 | Overlapping periods skipped | Expected with `incremental` + `allow_overwrite_existing=False` — set `True` to replace |
 | Saved Delta stale vs notebook | Incremental skip kept old rows on disk while notebook shows fresh `kpi_long` — enable overwrite or use `full_refresh` |
