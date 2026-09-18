@@ -354,8 +354,9 @@ def build_dc_daily(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
 def build_dc_inst(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
     """DC in-stock rate frame: dc_stocked_days / dc_available_days over dc_scope's coverage grid.
     The denominator is scope-derived, not inventory-derived, so a never-stocked in-scope pair
-    reads 0% -- and back-applying the full report window to every pair biases early history down
-    (see README's "dc_scope" section).
+    reads 0% -- and each pair's grid is bounded to its OWN coverage window (see below), not the
+    full report window, so early history isn't judged on days before the pair actually entered
+    scope (see README's "dc_scope" section).
     """
     s = ctx.settings
     if not s.get("DC_INSTOCK_ENABLED", False):
@@ -376,23 +377,39 @@ def build_dc_inst(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
     threshold = s["DC_INSTOCK_STOCK_THRESHOLD"]
 
-    # Every in-scope pair gets the full report window; item-family-rolled first so it lands in
-    # scope_core's own id space.
+    # Every in-scope pair, item-family-rolled first so it lands in scope_core's own id space,
+    # collapsed to one start_date per (product_id, warehouse_id) -- the EARLIEST of any
+    # constituent child/parent item's own start_date, since rolling children onto a shared parent
+    # must never narrow the pair's true coverage window.
     pairs = (
         _roll_to_item_family_parent(get_dc_scope_raw(ctx), ctx)
-        .select("product_id", "warehouse_id")
-        .distinct()
+        .groupBy("product_id", "warehouse_id")
+        .agg(F.min("start_date").alias("start_date"))
     )
     cal = broadcast(
         ctx.fiscal_cal.select("date", "Year", "Week").filter(F.col("date").between(F.lit(start), F.lit(end)))
     )
     scope_product_weeks = scope_core.select("product_id", "Year", "Week").distinct()
 
-    # Cross-joining the calendar onto the pairs gives the (product_id, warehouse_id, date) grid
-    # and its Year/Week in one step -- restrict to scope_core before joining inventory, so the
-    # inventory join only runs over the in-scope rows.
+    # Per-pair bounded date sequence -- GREATEST(the pair's own start_date, the report window's
+    # own start) through the report window's end -- instead of a flat calendar cross-join shared
+    # by every pair regardless of when it actually entered scope. A go-live-floor start_date has
+    # already been rewritten onto EFFECTIVE_REPORT_START_DATE at read time (read_dc_scope_source),
+    # so only a genuinely later per-pair start_date ever narrows this window. Mirrors
+    # daily_data_expanded's own F.explode(F.sequence(min_date, max_date)) per-row grid pattern
+    # (customer-analysis-tbretail's 05_future_visibility_data_prep.py) -- one row space per pair
+    # bounded by its own start, not a flat calendar cross-join. Restrict to scope_core before
+    # joining inventory, so the inventory join only runs over the in-scope rows.
     grid = (
-        pairs.crossJoin(cal)
+        pairs.withColumn(
+            "date",
+            F.explode(F.sequence(
+                F.greatest(F.col("start_date"), F.lit(start)),
+                F.lit(end),
+                F.expr("interval 1 day"),
+            )),
+        )
+        .join(cal, on="date", how="inner")
         .join(scope_product_weeks, on=["product_id", "Year", "Week"], how="left_semi")
         .join(_get_inventory_warehouse_parent_rolled(ctx), on=["product_id", "warehouse_id", "date"], how="left")
         .withColumn("inventory", F.coalesce(F.col("inventory"), F.lit(0.0)))
