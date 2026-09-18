@@ -1014,6 +1014,92 @@ def _comparison_html(
     return "".join(sections)
 
 
+def _comparable_wide_html(
+    comparable_kpi_long: Optional[pd.DataFrame],
+    comparable_comp_df: Optional[pd.DataFrame],
+    dimension: str,
+    dimension_value: str,
+    metric_cols: List[str],
+    labels: Dict[str, str],
+    comp_label: str,
+    period_type: Optional[str] = None,
+    month_display_by_period: Optional[Dict[str, str]] = None,
+) -> str:
+    """One consolidated comparable-pairs (like-for-like) YTD table: N value columns (one per
+    year in the report window, from comparable_kpi_long -- reuses _pivot_single_value, the same
+    wide-value pattern _kpi_table_html renders) plus N-1 delta columns (one per consecutive-year
+    link, from comparable_comparison_ytd's own per-link change_display -- same grouping
+    _comparison_html uses) laid out side by side in ONE table, instead of N-1 separate 2-column
+    stacked tables.
+
+    This replaces _comparison_html only for the comparable path -- the regular (non-comparable)
+    YoY/YTD comparison rendering is untouched (still _comparison_html, see _value_panel_content).
+    """
+    if comparable_comp_df is None or comparable_comp_df.empty:
+        return ""
+    comp_sub = comparable_comp_df[
+        (comparable_comp_df["dimension"] == dimension)
+        & (comparable_comp_df["dimension_value"].astype(str) == str(dimension_value))
+    ]
+    if comp_sub.empty:
+        return ""
+
+    value_sub, periods = _pivot_single_value(
+        comparable_kpi_long if comparable_kpi_long is not None else pd.DataFrame(),
+        "ytd", dimension, dimension_value, metric_cols,
+    )
+    if value_sub.empty or not periods:
+        return '<p style="color:#64748b;font-size:.875rem">No data for this selection.</p>'
+    value_grp = value_sub.set_index("period")
+
+    # One delta column per consecutive-year link present for this dimension/value, ascending by
+    # the link's current (later) year -- mirrors _comparison_html's own groupby(["prior_period",
+    # "current_period"]) grouping, just laid out as columns instead of stacked sections.
+    links = comp_sub[["prior_period", "current_period"]].drop_duplicates().sort_values("current_period")
+    link_pairs = list(zip(links["prior_period"], links["current_period"]))
+
+    value_ths = "".join(
+        f"<th>{_esc(_period_th_label(p, period_type, month_display_by_period))}</th>" for p in periods
+    )
+    delta_ths = "".join(f"<th>&Delta; {_esc(current)}</th>" for _, current in link_pairs)
+    head = f"<thead><tr><th class='cell-kpi'>Metric</th>{value_ths}{delta_ths}</tr></thead>"
+
+    rows: List[str] = []
+    for metric in metric_cols:
+        if metric not in value_grp.columns:
+            continue
+        cat = _CAT.get(metric, "general")
+        label = _metric_display_label(metric, labels, period_type)
+        value_cells = "".join(
+            f"<td>{_esc(_fmt(metric, value_grp.at[p, metric]) if p in value_grp.index else '—')}</td>"
+            for p in periods
+        )
+        delta_cells: List[str] = []
+        for prior, current in link_pairs:
+            link_row = comp_sub[
+                (comp_sub["prior_period"] == prior)
+                & (comp_sub["current_period"] == current)
+                & (comp_sub["metric_key"] == metric)
+            ]
+            chg = str(link_row.iloc[0]["change_display"]) if not link_row.empty else "—"
+            delta_cells.append(f"<td class='{_esc(_chg_class(chg))}'>{_esc(chg)}</td>")
+        rows.append(
+            f"<tr class='cat-{_esc(cat)}'>"
+            f"<td class='cell-kpi'>{_esc(label)}</td>"
+            f"{value_cells}{''.join(delta_cells)}"
+            f"</tr>"
+        )
+
+    return (
+        "<div class='cmp-section'>"
+        f"<p class='cmp-label'>{_esc(comp_label)} Comparison</p>"
+        "<div class='table-wrap'>"
+        f"<table class='cmp-table'>{head}<tbody>{''.join(rows)}</tbody></table>"
+        "</div>"
+        "</div>"
+    )
+
+
 def _value_panel_content(
     kpi_long: pd.DataFrame,
     period_type: str,
@@ -1027,6 +1113,7 @@ def _value_panel_content(
     comparable_comp_df: Optional[pd.DataFrame] = None,
     comparable_label: str = "",
     month_display_by_period: Optional[Dict[str, str]] = None,
+    comparable_kpi_long: Optional[pd.DataFrame] = None,
 ) -> str:
     sub, periods = _pivot_single_value(
         kpi_long, period_type, dimension, dimension_value, metric_cols,
@@ -1034,8 +1121,9 @@ def _value_panel_content(
     )
     table = _kpi_table_html(sub, periods, metric_cols, labels, period_type, month_display_by_period)
     cmp = _comparison_html(comp_df, dimension, dimension_value, comp_label, labels, period_type)
-    comparable_cmp = _comparison_html(
-        comparable_comp_df, dimension, dimension_value, comparable_label, labels, period_type
+    comparable_cmp = _comparable_wide_html(
+        comparable_kpi_long, comparable_comp_df, dimension, dimension_value, metric_cols, labels,
+        comparable_label, period_type, month_display_by_period,
     )
     return table + cmp + comparable_cmp
 
@@ -1053,6 +1141,7 @@ def _value_tabs_html(
     comparable_label: str = "",
     month_display_by_period: Optional[Dict[str, str]] = None,
     root: str = "overall",
+    comparable_kpi_long: Optional[pd.DataFrame] = None,
 ) -> str:
     values = _dimension_values(kpi_long, period_type, dimension)
     if not values:
@@ -1061,7 +1150,7 @@ def _value_tabs_html(
         return _value_panel_content(
             kpi_long, period_type, dimension, values[0],
             metric_cols, labels, comp_df, comp_label, week_start_by_period,
-            comparable_comp_df, comparable_label, month_display_by_period,
+            comparable_comp_df, comparable_label, month_display_by_period, comparable_kpi_long,
         )
 
     radios = "".join(
@@ -1078,7 +1167,7 @@ def _value_tabs_html(
 
     panels = "".join(
         f"<div class='value-panel value-panel-{_safe_id(root, period_type, dimension, str(i))}'>"
-        f"{_value_panel_content(kpi_long, period_type, dimension, v, metric_cols, labels, comp_df, comp_label, week_start_by_period, comparable_comp_df, comparable_label, month_display_by_period)}"
+        f"{_value_panel_content(kpi_long, period_type, dimension, v, metric_cols, labels, comp_df, comp_label, week_start_by_period, comparable_comp_df, comparable_label, month_display_by_period, comparable_kpi_long)}"
         f"</div>"
         for i, v in enumerate(values)
     )
@@ -1107,6 +1196,7 @@ def _period_tab_html(
     comparable_label: str = "",
     month_display_by_period: Optional[Dict[str, str]] = None,
     root: str = "overall",
+    comparable_kpi_long: Optional[pd.DataFrame] = None,
 ) -> str:
     pt_id = _safe_id(root, period_type)
 
@@ -1132,13 +1222,14 @@ def _period_tab_html(
             content = _value_panel_content(
                 kpi_long, period_type, "overall", dval,
                 metric_cols, labels, comp_df, comp_label, week_start_by_period,
-                comparable_comp_df, comparable_label, month_display_by_period,
+                comparable_comp_df, comparable_label, month_display_by_period, comparable_kpi_long,
             )
         else:
             content = _value_tabs_html(
                 kpi_long, period_type, dim, metric_cols, labels,
                 comp_df, comp_label, week_start_by_period,
                 comparable_comp_df, comparable_label, month_display_by_period, root,
+                comparable_kpi_long,
             )
         panels.append(f"<div class='kpi-dim-panel dim-panel-{dim_id}'>{content}</div>")
 
@@ -1167,6 +1258,7 @@ def _build_root_period_tabs(
     week_start_by_period: Dict[str, Any],
     month_display_by_period: Dict[str, str],
     extra_tab: Optional[Tuple[str, str, str]] = None,
+    comparable_kpi_long_map: Optional[Dict[str, Optional[pd.DataFrame]]] = None,
 ) -> Tuple[str, str]:
     """Build (css, body_html) for one root's Annual/Quarter/Month/YTD/Weekly tab group, already
     filtered to that root's rows. `extra_tab` (id, label, panel_html) -- used for "Metric Details"
@@ -1191,9 +1283,10 @@ def _build_root_period_tabs(
         f"<label for='kpi-tab-{_safe_id(root, pt)}' class='top-tab'>{_esc(_PERIOD_LABELS.get(pt, pt.title()))}</label>"
         for pt in period_types
     )
+    comparable_kpi_long_map = comparable_kpi_long_map or {}
     period_panels = "".join(
         f"<div class='top-panel top-panel-{_safe_id(root, pt)}'>"
-        f"{_period_tab_html(kpi_long_root, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period, comparable_comp_map.get(pt), _COMPARABLE_LABELS.get(pt, ''), month_display_by_period, root)}"
+        f"{_period_tab_html(kpi_long_root, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period, comparable_comp_map.get(pt), _COMPARABLE_LABELS.get(pt, ''), month_display_by_period, root, comparable_kpi_long_map.get(pt))}"
         f"</div>"
         for pt in period_types
     )
@@ -1385,12 +1478,21 @@ def render_kpi_html(
         "weekly": None,
     }
 
-    # Gated comparable (like-for-like) comparison table — YTD-only — rendered as a second
-    # comparison table on the YTD panel when comparable_pairs was enabled and data is present
-    # (else _comparison_html is a no-op on the empty/None frame).
+    # Gated comparable (like-for-like) comparison table — YTD-only — rendered as a consolidated
+    # wide value+delta table on the YTD panel when comparable_pairs was enabled and data is
+    # present (else _comparable_wide_html is a no-op on the empty/None frame). comparable_kpi_long
+    # supplies the wide table's own value columns (see _comparable_wide_html); comparable_comp_map
+    # supplies its delta columns, same as before.
     comparable_comp_map: Dict[str, Optional[pd.DataFrame]] = {
         "annual": None,
         "ytd": getattr(ctx, "comparable_comparison_ytd", None),
+        "quarter": None,
+        "monthly": None,
+        "weekly": None,
+    }
+    comparable_kpi_long_map: Dict[str, Optional[pd.DataFrame]] = {
+        "annual": None,
+        "ytd": getattr(ctx, "comparable_kpi_long", None),
         "quarter": None,
         "monthly": None,
         "weekly": None,
@@ -1432,6 +1534,7 @@ def render_kpi_html(
             _comp_df_for_root(comp_map, root), _comp_df_for_root(comparable_comp_map, root),
             week_start_by_period, month_display_by_period,
             extra_tab=("details", "Metric Details", metric_details_html),
+            comparable_kpi_long_map=_comp_df_for_root(comparable_kpi_long_map, root),
         )
         main_panel = f"<div class='panel'>{body}</div>"
     else:
@@ -1443,6 +1546,7 @@ def render_kpi_html(
                 kpi_long_root, root, period_types, dims, metric_cols, labels,
                 _comp_df_for_root(comp_map, root), _comp_df_for_root(comparable_comp_map, root),
                 week_start_by_period, month_display_by_period,
+                comparable_kpi_long_map=_comp_df_for_root(comparable_kpi_long_map, root),
             )
             css_parts.append(css)
             root_panels.append((root, body))
