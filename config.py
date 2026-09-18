@@ -296,6 +296,11 @@ CONFIG: Dict[str, Any] = {
     "dc_scope_source": {
         "product_col": "product_id",
         "warehouse_col": "location_id",
+        # Backs the DC in-stock min-date fix (see README's "dc_scope" section /
+        # kpi_pipeline.pipeline.build_dc_inst): the scope table's own per-pair start_date, used
+        # to bound each pair's coverage grid instead of the full report window. See
+        # read_dc_scope_source for how a shared go-live-floor value is normalized away.
+        "start_date_col": "start_date",
     },
     # ---------------------------------------------------------------------------
     # ITEM FAMILY SOURCE — parent/child product rollup for every DC frame
@@ -890,6 +895,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     dc_scope_column_map = {
         "product_col": dc_scope_source_cfg.get("product_col", "product_id"),
         "warehouse_col": dc_scope_source_cfg.get("warehouse_col", "location_id"),
+        "start_date_col": dc_scope_source_cfg.get("start_date_col", "start_date"),
     }
 
     item_family_source_cfg = cfg.get("item_family_source", {}) or {}
