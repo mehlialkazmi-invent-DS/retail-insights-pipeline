@@ -242,6 +242,17 @@ CONFIG: Dict[str, Any] = {
         "in_stock_col": "in_stock",
         "total_days_col": "details.total_days",  # supports a dotted nested-struct path
         "product_agg_level_col": None,
+        # Spark SQL expressions narrowing the DAILY-DATA sales that form the OTHER half of
+        # lost_sales_pct's denominator (lost_sales / (sales + lost_sales)). Applies to nothing
+        # else -- total_sales_quantity, mean_stock, WOS and friends keep the full population.
+        #
+        # Set this when the lost-sales table covers a NARROWER population than daily_data does.
+        # A model built to exclude e-commerce, for example, gives a numerator with no ecom while
+        # daily_data's sales still carry it, inflating the denominator and reading lost_sales_pct
+        # LOW. Excluding the same stores here puts both halves on one population, e.g.:
+        #   "sales_filter": ["store_id NOT IN (9001, 9002)"]
+        # Any column present on daily_data can be used. Empty = no narrowing.
+        "sales_filter": [],
     },
     # ---------------------------------------------------------------------------
     # INSTOCK SOURCE — optional override to read in-stock days from a DIFFERENT table
@@ -866,6 +877,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "total_days_col": lost_sales_source_cfg.get("total_days_col", "details.total_days"),
         "product_agg_level_col": lost_sales_source_cfg.get("product_agg_level_col"),
     }
+    lost_sales_sales_filter = list(lost_sales_source_cfg.get("sales_filter") or [])
 
     instock_source_cfg = cfg.get("instock_source", {}) or {}
     instock_source_enabled = bool(instock_source_cfg.get("enabled", False))
@@ -1093,6 +1105,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "SPEED_CLUSTER_ATTRIBUTE_NAME": lse.get("speed_cluster_attribute_name"),
         "SPEED_CLUSTER_VALUE_COL": lse.get("speed_cluster_value_col", "product_speed_cluster"),
         "LOST_SALES_COLUMN_MAP": lost_sales_column_map,
+        "LOST_SALES_SALES_FILTER": lost_sales_sales_filter,
         "INSTOCK_SOURCE_ENABLED": instock_source_enabled,
         "INSTOCK_SOURCE_COLUMN_MAP": instock_source_column_map,
         "ITEM_FAMILY_COLUMN_MAP": item_family_column_map,

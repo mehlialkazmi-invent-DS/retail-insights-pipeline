@@ -11,6 +11,7 @@ from pyspark.sql.functions import broadcast
 from kpi_pipeline.context import KPIContext
 from kpi_pipeline.inputs import (
     DEFAULT_LOST_SALES_COLUMN_MAP,
+    apply_input_filters,
     get_daily_data_raw,
     get_inventory_warehouse_raw,
     get_item_family_raw,
@@ -511,7 +512,16 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
     scoped_daily = build_scoped_daily(ctx, scope_core, scope_pairs, has_store).cache()
     dc_daily = build_dc_daily(ctx, scope_core).cache()
     dc_inst = build_dc_inst(ctx, scope_core).cache()
-    weekly_pair = scoped_daily.groupBy("product_id", "store_id", "Year", "Week").agg(
+    # lost_sales_source.sales_filter narrows ONLY the sales half of lost_sales_pct's denominator,
+    # for when the lost-sales table covers a narrower population than daily_data (e.g. a model
+    # that excludes e-commerce, whose numerator would otherwise be divided by a denominator that
+    # still carries ecom sales). .get() so a customer config vendoring an older copy of
+    # materialize() still loads -- same reason DEFAULT_LOST_SALES_COLUMN_MAP exists in inputs.py.
+    ls_sales_filter = ctx.settings.get("LOST_SALES_SALES_FILTER") or []
+    daily_for_lost = apply_input_filters(
+        scoped_daily, ls_sales_filter, "lost_sales_source.sales_filter", quiet=not ls_sales_filter
+    )
+    weekly_pair = daily_for_lost.groupBy("product_id", "store_id", "Year", "Week").agg(
         F.sum("sales_quantity").alias("weekly_sales")
     )
     lost_base_keys = ["product_id", "Year", "Week"]
@@ -525,7 +535,7 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
         )
     else:
         # No store dimension anywhere (scope AND lost_sales_source both store-less): roll
-        # weekly_pair (still per-store, straight from daily_data) UP to product-week first --
+        # weekly_pair (still per-store, from daily_for_lost) UP to product-week first --
         # summed across every store selling the product, since there's no per-store lost_sales
         # figure to match against individually -- then restrict to the (product, week) combos
         # lost_sales_weekly actually covers, same as the has-store left_semi above.
