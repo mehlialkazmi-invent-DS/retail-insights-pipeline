@@ -28,19 +28,41 @@ def _window_weeks(ctx: KPIContext) -> DataFrame:
 
 
 def _defined_scope_pairs(ctx: KPIContext, raw: DataFrame) -> DataFrame:
-    """Distinct scope universe at the configured grain, without any time column."""
+    """Distinct scope universe at the configured grain, without any time column.
+
+    Item-family-rolled to parent product_id when ITEM_FAMILY_ROLLUP["defined_scope"] is True
+    (see config.py) -- OFF by default, since a client's scope source may already be rolled
+    upstream (as tbretail's is); available as an opt-in safety net for a client whose isn't.
+    """
     config = ctx.settings["DEFINED_SCOPE"]
     sel = [F.col(config["product_col"]).alias("product_id")]
     if "store_id" in ctx.scope_keys:
         sel.append(F.col(config["store_col"]).alias("store_id"))
-    return raw.select(*sel).distinct()
+    pairs = raw.select(*sel).distinct()
+    if ctx.settings["ITEM_FAMILY_ROLLUP"]["defined_scope"]:
+        from kpi_pipeline.pipeline import _roll_to_item_family_parent
+
+        pairs = _roll_to_item_family_parent(pairs, ctx).distinct()
+    return pairs
 
 
 def _defined_scope_weekly(ctx: KPIContext, raw: DataFrame) -> DataFrame:
-    """Honour the scope table's own (product, store, Year, Week) rows, window-filtered.
+    """Honour the scope table's own (product, store, Year, Week) rows, window-filtered, with a
+    leading-gap backfill applied on top.
 
     Used for the ``product_store_week`` grain. Weeks are resolved from ``date_col`` via
-    fiscal_cal, or from native ``year_col``/``week_col``.
+    fiscal_cal, or from native ``year_col``/``week_col``. Item-family-rolled to parent
+    product_id when ITEM_FAMILY_ROLLUP["defined_scope"] is True (see config.py and
+    _defined_scope_pairs above -- same toggle and reasoning).
+
+    Leading-gap backfill: if a pair's own earliest recorded scope week starts later than the
+    report window's own start, the scope table simply has no row for that gap -- so the pair
+    would otherwise be out of scope for those early weeks. Assume the pair was in scope for the
+    whole window instead, same "min date in window" principle build_dc_inst's per-pair grid uses
+    (pipeline.py) -- never a hardcoded floor date, just whatever the window's own start already
+    is. Only the LEADING gap is filled: any real weeks the source provides (a later start with no
+    gap, a mid-window gap, an end date) are honoured exactly as recorded. product/product_store
+    grains are unaffected -- they already apply every scoped pair to the whole window.
     """
     config = ctx.settings["DEFINED_SCOPE"]
     sel = [
@@ -66,8 +88,29 @@ def _defined_scope_weekly(ctx: KPIContext, raw: DataFrame) -> DataFrame:
             F.col(year_col).cast("int").alias("Year"),
             F.col(week_col).cast("int").alias("Week"),
         ).distinct()
-    window_yw = _window_weeks(ctx).select("Year", "Week").distinct()
-    return keyed.join(broadcast(window_yw), on=["Year", "Week"], how="inner").select(*ctx.scope_keys).distinct()
+
+    if ctx.settings["ITEM_FAMILY_ROLLUP"]["defined_scope"]:
+        from kpi_pipeline.pipeline import _roll_to_item_family_parent
+
+        keyed = _roll_to_item_family_parent(keyed, ctx).distinct()
+
+    window_weeks = _window_weeks(ctx).select("Year", "Week", "week_start_date").distinct()
+    keyed = keyed.join(broadcast(window_weeks.select("Year", "Week")), on=["Year", "Week"], how="inner")
+
+    window_start = ctx.settings["EFFECTIVE_REPORT_START_DATE"]
+    pair_first_week = (
+        keyed.join(broadcast(window_weeks), on=["Year", "Week"], how="inner")
+        .groupBy("product_id", "store_id")
+        .agg(F.min("week_start_date").alias("first_scope_week_start"))
+    )
+    pairs_with_gap = pair_first_week.filter(F.col("first_scope_week_start") > F.lit(window_start))
+    backfill = (
+        pairs_with_gap.crossJoin(broadcast(window_weeks))
+        .filter(F.col("week_start_date") < F.col("first_scope_week_start"))
+        .select("product_id", "store_id", "Year", "Week")
+    )
+
+    return keyed.unionByName(backfill).select(*ctx.scope_keys).distinct()
 
 
 def build_defined_scope(ctx: KPIContext) -> None:
