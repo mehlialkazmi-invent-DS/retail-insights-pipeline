@@ -63,6 +63,14 @@ from typing import Any, Callable, Dict, Optional
 # a separate delta table.
 COMPARISON_KINDS_ALL = ("yoy", "ytd")
 
+# Comparable-pairs (like-for-like) kinds the pipeline can produce, in canonical order. Each is its
+# own same-pairs-across-years population, computed independently:
+#   ytd     — pairs present in every year of the window, compared on each year's elapsed window.
+#   yoy     — pairs present in every year of the window, compared on the full year.
+#   quarter — for each quarter number, pairs present in every year that HAS that quarter number,
+#             compared within that quarter's own year-set (independent per quarter number).
+COMPARABLE_KINDS_ALL = ("ytd", "yoy", "quarter")
+
 CONFIG: Dict[str, Any] = {
     # =============================================================================
     # IDENTITY & RUN WINDOW
@@ -144,6 +152,14 @@ CONFIG: Dict[str, Any] = {
         "date_col": "week_start_date",
         "year_col": None,
         "week_col": None,
+        # product_store_week only: if a pair's earliest recorded scope week starts later than the
+        # report window's own start, assume it was in scope for the whole window instead of
+        # leaving that leading gap uncovered (see kpi_pipeline/scope.py's _defined_scope_weekly).
+        # True by default (matches product/product_store's own always-whole-window behaviour).
+        # Set False for a deployment with EXISTING product_store_week history saved before this
+        # option existed -- switching it on for such a deployment mixes two scope definitions in
+        # one incrementally-merged table; a fresh product_store_week adoption is unaffected either way.
+        "backfill_leading_gap": True,
     },
     "scope_adjustments": {
         # ---------------------------------------------------------------------------
@@ -412,11 +428,15 @@ CONFIG: Dict[str, Any] = {
     },
     "comparable_pairs": {
         # OFF by default -- requires run_min_date to span at least 2 years (e.g. "2024-01-01"
-        # to cover a 2024-vs-2025 link) to have anything to compute. Like-for-like YTD:
-        # recomputes YTD metrics over only the (product_id, store_id) pairs present in EVERY
-        # year of the run window -- one shared universe reused across every consecutive-year
-        # link, not a separate universe per link.
+        # to cover a 2024-vs-2025 link) to have anything to compute. Like-for-like: recomputes
+        # metrics over only the (product_id, store_id) pairs present in EVERY year of the run
+        # window -- one shared universe reused across every consecutive-year link, not a separate
+        # universe per link.
         "enabled": False,
+        # Which comparable kinds to compute -- see COMPARABLE_KINDS_ALL above. "quarter" builds
+        # its own pair universe per quarter number (a pair must appear in that quarter of every
+        # year that has it, independent of the other quarter numbers).
+        "kinds": ["ytd"],
     },
     # =============================================================================
     # METRICS
@@ -1042,6 +1062,30 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             f"choose at least one of {list(COMPARISON_KINDS_ALL)}"
         )
 
+    # Selected comparable-pairs kinds — validated and normalised to canonical order. Only
+    # meaningful when comparable_pairs.enabled=True; resolves to an empty list when disabled (no
+    # need to force a non-empty kinds list on an off feature).
+    comparable_pairs_cfg = cfg.get("comparable_pairs", {}) or {}
+    comparable_pairs_enabled = bool(comparable_pairs_cfg.get("enabled", False))
+    requested_comparable_kinds = comparable_pairs_cfg.get("kinds")
+    if requested_comparable_kinds is None:
+        requested_comparable_kinds = ["ytd"]
+    comparable_requested_set = {str(k).strip().lower() for k in requested_comparable_kinds}
+    invalid_comparable_kinds = sorted(comparable_requested_set - set(COMPARABLE_KINDS_ALL))
+    if invalid_comparable_kinds:
+        raise ValueError(
+            f"comparable_pairs.kinds has invalid kinds {invalid_comparable_kinds}; "
+            f"allowed: {list(COMPARABLE_KINDS_ALL)}"
+        )
+    comparable_kinds = (
+        [k for k in COMPARABLE_KINDS_ALL if k in comparable_requested_set] if comparable_pairs_enabled else []
+    )
+    if comparable_pairs_enabled and not comparable_kinds:
+        raise ValueError(
+            "comparable_pairs.kinds resolved to an empty list while comparable_pairs.enabled=True; "
+            f"choose at least one of {list(COMPARABLE_KINDS_ALL)}"
+        )
+
     output_cfg = cfg["output"]
     output_root = fund_paste(bucket, *output_cfg["path_segments"])
     run_date_raw = output_cfg.get("run_date")
@@ -1098,7 +1142,8 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "SCOPE_MIN_WEEKS_FOR_FILTER": score_scope["min_weeks_for_filter"],
         "USE_HYBRID_SCOPE": cfg["scope"]["use_hybrid_scope"],
         "RUN_SCOPE_DIFF": cfg["scope"].get("run_scope_diff", False),
-        "COMPARABLE_PAIRS_ENABLED": cfg.get("comparable_pairs", {}).get("enabled", False),
+        "COMPARABLE_PAIRS_ENABLED": comparable_pairs_enabled,
+        "COMPARABLE_KINDS": comparable_kinds,
         "COMPARISON_KINDS": comparison_kinds,
         "SCOPE_ADJUSTMENTS": cfg.get("scope_adjustments", {}),
         # .get() throughout, matching what the validators above actually require: they only

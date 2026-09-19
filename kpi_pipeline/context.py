@@ -53,15 +53,21 @@ class KPIContext:
     comparison_ytd: Optional[pd.DataFrame] = None
     scope_diff: Optional[pd.DataFrame] = None
 
-    # Gated comparable-pairs (like-for-like) output: YTD only, metrics over only the
-    # (product_id, store_id) pairs present in BOTH years of each consecutive-year link.
-    # Populated only when comparable_pairs.enabled=True.
+    # Gated comparable-pairs (like-for-like) output: metrics over only the pairs present in every
+    # year of the run window. comparable_kpi_long carries ALL enabled kinds (comparable_pairs.kinds
+    # -- see config.py), tagged by its own comparison_type column ("ytd"/"yoy"/"quarter");
+    # comparable_comparison_{ytd,yoy,quarter} are that kind's own long-format comparison rows.
+    # Populated only when comparable_pairs.enabled=True and the kind is in comparable_pairs.kinds.
     comparable_kpi_long: Optional[pd.DataFrame] = None
     comparable_comparison_ytd: Optional[pd.DataFrame] = None
+    comparable_comparison_yoy: Optional[pd.DataFrame] = None
+    comparable_comparison_quarter: Optional[pd.DataFrame] = None
 
     yoy_display: Optional[pd.DataFrame] = None
     ytd_display: Optional[pd.DataFrame] = None
     comparable_ytd_display: Optional[pd.DataFrame] = None
+    comparable_yoy_display: Optional[pd.DataFrame] = None
+    comparable_quarter_display: Optional[pd.DataFrame] = None
     save_plan: Optional[Any] = None
 
     daily_data_raw: Optional[DataFrame] = None
