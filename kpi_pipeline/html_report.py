@@ -543,6 +543,20 @@ _CSS_BASE = """\
   .chg-pos { color: var(--good); font-weight: 700; }
   .chg-neg { color: var(--bad);  font-weight: 700; }
 
+  /* --- Comparable (like-for-like) group divider: separates it from the value trend / regular
+     comparison tables above it, especially now that "quarter" can render several sub-tables. --- */
+  .cmp-group-divider {
+    margin-top: 30px;
+    padding-top: 16px;
+    border-top: 2px solid var(--border);
+  }
+  .cmp-group-label {
+    margin: 0 0 12px;
+    font-size: .8rem;
+    font-weight: 800;
+    color: var(--ink);
+  }
+
   /* --- Metric definitions table --- */
   table.def-table {
     width: 100%;
@@ -1041,7 +1055,7 @@ def _comparable_wide_html(
 
     value_sub, periods = _pivot_single_value(
         comparable_kpi_long if comparable_kpi_long is not None else pd.DataFrame(),
-        "ytd", dimension, dimension_value, metric_cols,
+        period_type or "ytd", dimension, dimension_value, metric_cols,
     )
     if value_sub.empty or not periods:
         return '<p style="color:#64748b;font-size:.875rem">No data for this selection.</p>'
@@ -1095,6 +1109,46 @@ def _comparable_wide_html(
     )
 
 
+def _comparable_quarter_section_html(
+    comparable_kpi_long: Optional[pd.DataFrame],
+    comparable_comp_df: Optional[pd.DataFrame],
+    dimension: str,
+    dimension_value: str,
+    metric_cols: List[str],
+    labels: Dict[str, str],
+    month_display_by_period: Optional[Dict[str, str]] = None,
+) -> str:
+    """One narrow value+delta table PER quarter number (Q1, Q2, ...) via _comparable_wide_html,
+    instead of a single table mixing every quarter's periods and links together -- each quarter
+    number has its own independent same-pairs population and year-set (see comparable.py's
+    build_comparable_pairs), and a combined table would grow a value column per quarter-year and
+    a delta column per quarter-link, quickly becoming unreadable. A quarter with no qualifying
+    data (fewer than 2 years having it, or 0 common pairs) simply contributes no table."""
+    if (
+        comparable_comp_df is None
+        or comparable_comp_df.empty
+        or "quarter_number" not in comparable_comp_df.columns
+    ):
+        return ""
+    sections: List[str] = []
+    for q in sorted(int(q) for q in comparable_comp_df["quarter_number"].dropna().unique()):
+        comp_q = comparable_comp_df[comparable_comp_df["quarter_number"] == q]
+        kpi_q = (
+            comparable_kpi_long[comparable_kpi_long["quarter_number"] == q]
+            if comparable_kpi_long is not None
+            and not comparable_kpi_long.empty
+            and "quarter_number" in comparable_kpi_long.columns
+            else pd.DataFrame()
+        )
+        html = _comparable_wide_html(
+            kpi_q, comp_q, dimension, dimension_value, metric_cols, labels,
+            f"Q{q}", "quarter", month_display_by_period,
+        )
+        if html:
+            sections.append(html)
+    return "".join(sections)
+
+
 def _value_panel_content(
     kpi_long: pd.DataFrame,
     period_type: str,
@@ -1116,10 +1170,23 @@ def _value_panel_content(
     )
     table = _kpi_table_html(sub, periods, metric_cols, labels, period_type, month_display_by_period)
     cmp = _comparison_wide_html(comp_df, dimension, dimension_value, metric_cols, labels, comp_label, period_type)
-    comparable_cmp = _comparable_wide_html(
-        comparable_kpi_long, comparable_comp_df, dimension, dimension_value, metric_cols, labels,
-        comparable_label, period_type, month_display_by_period,
-    )
+    if period_type == "quarter":
+        comparable_cmp = _comparable_quarter_section_html(
+            comparable_kpi_long, comparable_comp_df, dimension, dimension_value, metric_cols, labels,
+            month_display_by_period,
+        )
+    else:
+        comparable_cmp = _comparable_wide_html(
+            comparable_kpi_long, comparable_comp_df, dimension, dimension_value, metric_cols, labels,
+            comparable_label, period_type, month_display_by_period,
+        )
+    if comparable_cmp:
+        comparable_cmp = (
+            "<div class='cmp-group-divider'>"
+            "<p class='cmp-group-label'>Comparable (Like-for-Like)</p>"
+            f"{comparable_cmp}"
+            "</div>"
+        )
     return table + cmp + comparable_cmp
 
 
@@ -1387,7 +1454,7 @@ def _report_info_html(
 _PERIOD_ORDER = ["annual", "ytd", "quarter", "monthly", "weekly"]
 _PERIOD_LABELS = {"annual": "Annual", "ytd": "YTD", "quarter": "Quarter", "monthly": "Monthly", "weekly": "Weekly"}
 _PERIOD_COMP_LABEL = {"annual": "YoY", "ytd": "YTD"}
-_COMPARABLE_LABELS = {"ytd": "Comparable YTD"}
+_COMPARABLE_LABELS = {"ytd": "Comparable YTD", "annual": "Comparable YoY"}
 
 _TURNOVER_PERIOD_LABELS = {
     "annual": "Annual Inventory Turnover Rate",
@@ -1473,22 +1540,32 @@ def render_kpi_html(
         "weekly": None,
     }
 
-    # Gated comparable (like-for-like) comparison table — YTD-only — rendered as a consolidated
-    # wide value+delta table on the YTD panel when comparable_pairs was enabled and data is
-    # present (else _comparable_wide_html is a no-op on the empty/None frame). comparable_kpi_long
-    # supplies the wide table's own value columns (see _comparable_wide_html); comparable_comp_map
-    # supplies its delta columns, same as before.
+    # Gated comparable (like-for-like) comparison tables — one per comparable_pairs.kinds entry
+    # (ytd/yoy/quarter, see config.py) — rendered as consolidated wide value+delta table(s) on
+    # each kind's own tab when comparable_pairs was enabled and data is present (else
+    # _comparable_wide_html/_comparable_quarter_section_html are no-ops on an empty/None frame).
+    # comparable_kpi_long is now a SHARED table across every enabled kind, tagged by its own
+    # comparison_type column -- split it per kind here so each tab only sees its own rows.
+    _full_comparable_kpi_long = getattr(ctx, "comparable_kpi_long", None)
+
+    def _comparable_kpi_long_for(comparison_type: str) -> Optional[pd.DataFrame]:
+        if _full_comparable_kpi_long is None or _full_comparable_kpi_long.empty:
+            return None
+        if "comparison_type" not in _full_comparable_kpi_long.columns:
+            return _full_comparable_kpi_long
+        return _full_comparable_kpi_long[_full_comparable_kpi_long["comparison_type"] == comparison_type]
+
     comparable_comp_map: Dict[str, Optional[pd.DataFrame]] = {
-        "annual": None,
+        "annual": getattr(ctx, "comparable_comparison_yoy", None),
         "ytd": getattr(ctx, "comparable_comparison_ytd", None),
-        "quarter": None,
+        "quarter": getattr(ctx, "comparable_comparison_quarter", None),
         "monthly": None,
         "weekly": None,
     }
     comparable_kpi_long_map: Dict[str, Optional[pd.DataFrame]] = {
-        "annual": None,
-        "ytd": getattr(ctx, "comparable_kpi_long", None),
-        "quarter": None,
+        "annual": _comparable_kpi_long_for("yoy"),
+        "ytd": _comparable_kpi_long_for("ytd"),
+        "quarter": _comparable_kpi_long_for("quarter"),
         "monthly": None,
         "weekly": None,
     }

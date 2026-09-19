@@ -13,10 +13,11 @@ run_date partition is therefore a self-contained snapshot of the full merged his
 run. Comparison tables are recomputed from that merged ``kpi_long`` so YoY/YTD reflect the full
 saved history, not just the current run window.
 
-The same pattern applies to the comparable (like-for-like) YTD table: ``comparable_kpi_long`` is
-merged incrementally across runs just like ``kpi_long``, and ``comparable_comparison_ytd`` is then
-recomputed from the merged ``comparable_kpi_long``. A single-week refresh therefore produces a
-comparable YTD comparison relative to the full saved history. Comparable is YTD-only.
+The same pattern applies to the comparable (like-for-like) tables: ``comparable_kpi_long`` is
+merged incrementally across runs just like ``kpi_long``, and each enabled kind's own
+``comparable_comparison_{kind}`` (ytd/yoy/quarter — see config.py's comparable_pairs.kinds) is
+then recomputed from the merged ``comparable_kpi_long``. A single-week refresh therefore produces
+a comparable comparison relative to the full saved history.
 """
 
 from __future__ import annotations
@@ -83,12 +84,25 @@ TABLE_ROW_KEYS: Dict[str, Sequence[str]] = {
     # it participates in (as "current" in one, "prior" in the next) even though every link now
     # shares the same all-years-restricted pair population -- the link tag is what tells those
     # two occurrences of the same year apart under this row key, not a value difference.
+    # period_type + period already disambiguate every quarter number for the "quarter" kind
+    # ("quarter" + "2024-Q1" vs "quarter" + "2024-Q2"), so quarter_number doesn't need to be a
+    # key column too -- it's carried as a plain column for the HTML renderer's convenience.
     "comparable_kpi_long": (
         "comparison_type", "period_type", "period", "root", "dimension", "dimension_value",
         "link_prior_year", "link_current_year",
     ),
     "comparable_comparison_ytd": (
         "comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period",
+    ),
+    "comparable_comparison_yoy": (
+        "comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period",
+    ),
+    # quarter_number included: "current_period" alone ("2024 Q1" vs "2024 Q2") already disambiguates
+    # in practice, but the explicit key column keeps this table's key symmetric with how
+    # comparable_kpi_long disambiguates quarters, rather than relying on a display-label format.
+    "comparable_comparison_quarter": (
+        "comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period",
+        "quarter_number",
     ),
 }
 
@@ -98,26 +112,31 @@ TABLE_ROW_KEYS: Dict[str, Sequence[str]] = {
 COMPARISON_TABLES: Tuple[str, ...] = ("comparison_yoy", "comparison_ytd")
 
 # comparable_kpi_long is period-grain (same shape as kpi_long) and is merged incrementally across
-# runs. The comparable comparison table is then recomputed from the merged comparable_kpi_long —
-# the same pattern as regular comparisons from kpi_long. Comparable is YTD-only.
-COMPARABLE_COMPARISON_TABLES: Tuple[str, ...] = ("comparable_comparison_ytd",)
+# runs. Each comparable comparison table is then recomputed from the merged comparable_kpi_long —
+# the same pattern as regular comparisons from kpi_long. One table per comparable_pairs.kinds entry.
+COMPARABLE_COMPARISON_TABLES: Tuple[str, ...] = (
+    "comparable_comparison_ytd", "comparable_comparison_yoy", "comparable_comparison_quarter",
+)
 
 
 def _output_frames(ctx: KPIContext) -> Dict[str, pd.DataFrame]:
     """Tables to persist, in save order.
 
     Only the comparison kinds selected via ``comparisons.enabled`` are persisted; the others
-    are skipped entirely. Comparable tables (YTD-only) are included only when comparable_pairs
-    is gated on AND "ytd" is among the selected kinds.
+    are skipped entirely. Comparable tables are included only when comparable_pairs is gated on
+    AND at least one kind is selected via comparable_pairs.kinds (independent of the regular
+    comparisons.enabled selection above -- the two settings are unrelated).
     """
     kinds = _selected_comparison_kinds(ctx)
     frames: Dict[str, pd.DataFrame] = {"kpi_long": ctx.kpi_long}
     for kind in kinds:
         frames[f"comparison_{kind}"] = getattr(ctx, f"comparison_{kind}")
     frames["scope_diff"] = ctx.scope_diff
-    if ctx.settings.get("COMPARABLE_PAIRS_ENABLED", False) and "ytd" in kinds:
+    comparable_kinds = ctx.settings.get("COMPARABLE_KINDS") or []
+    if ctx.settings.get("COMPARABLE_PAIRS_ENABLED", False) and comparable_kinds:
         frames["comparable_kpi_long"] = ctx.comparable_kpi_long
-        frames["comparable_comparison_ytd"] = ctx.comparable_comparison_ytd
+        for kind in comparable_kinds:
+            frames[f"comparable_comparison_{kind}"] = getattr(ctx, f"comparable_comparison_{kind}")
     return frames
 
 
@@ -461,9 +480,11 @@ _SAVED_OUTPUT_TABLES = {
     "comparison_ytd": "comparison_ytd",
     "scope_diff": "scope_diff",
     # Comparable (like-for-like) tables — optional; absent unless comparable_pairs was enabled.
-    # Comparable is YTD-only.
+    # One comparable_comparison_{kind} per comparable_pairs.kinds entry (see COMPARABLE_COMPARISON_TABLES).
     "comparable_kpi_long": "comparable_kpi_long",
     "comparable_comparison_ytd": "comparable_comparison_ytd",
+    "comparable_comparison_yoy": "comparable_comparison_yoy",
+    "comparable_comparison_quarter": "comparable_comparison_quarter",
 }
 
 
@@ -539,16 +560,25 @@ def _recompute_comparisons_from_saved_history(ctx: KPIContext, fund_paste) -> No
     print("recomputed comparisons from merged kpi_long history (run_date=%s)" % run_date)
 
 
+_COMPARABLE_KIND_ATTRS = {
+    "ytd": ("comparable_comparison_ytd", "comparable_ytd_display"),
+    "yoy": ("comparable_comparison_yoy", "comparable_yoy_display"),
+    "quarter": ("comparable_comparison_quarter", "comparable_quarter_display"),
+}
+
+
 def _recompute_comparable_comparisons_from_saved_history(ctx: KPIContext, fund_paste) -> None:
-    """Re-read the merged comparable_kpi_long and recompute the comparable YTD comparison from it.
+    """Re-read the merged comparable_kpi_long and recompute every enabled comparable comparison
+    kind from it.
 
     Mirrors ``_recompute_comparisons_from_saved_history``: after ``comparable_kpi_long`` has been
-    incrementally merged onto prior history, reload it and rebuild the comparison from every
-    link present (each link's rows already carry that link's own pair-restricted metric values,
-    tagged via link_prior_year/link_current_year) so the saved comparable numbers reflect the
-    full accumulated history, not just the current run window. Comparable is YTD-only.
+    incrementally merged onto prior history, reload it and rebuild each kind's comparison from
+    every link present (each link's rows already carry that link's own pair-restricted metric
+    values, tagged via link_prior_year/link_current_year, plus quarter_number for the quarter
+    kind) so the saved comparable numbers reflect the full accumulated history, not just the
+    current run window.
     """
-    from kpi_pipeline.comparable import rebuild_comparable_ytd_from_saved_rows
+    from kpi_pipeline.comparable import rebuild_comparable_kind_from_saved_rows
 
     output_root = ctx.settings["PATH_OUTPUT_ROOT"]
     run_date = ctx.settings["OUTPUT_RUN_DATE"]
@@ -560,11 +590,11 @@ def _recompute_comparable_comparisons_from_saved_history(ctx: KPIContext, fund_p
 
     ctx.comparable_kpi_long = merged
 
-    if "ytd" not in set(_selected_comparison_kinds(ctx)):
-        return
-    display, save = rebuild_comparable_ytd_from_saved_rows(ctx, merged)
-    ctx.comparable_comparison_ytd = save
-    ctx.comparable_ytd_display = display
+    for kind in ctx.settings.get("COMPARABLE_KINDS") or []:
+        save_attr, display_attr = _COMPARABLE_KIND_ATTRS[kind]
+        display, save = rebuild_comparable_kind_from_saved_rows(ctx, merged, kind)
+        setattr(ctx, save_attr, save)
+        setattr(ctx, display_attr, display)
 
     print("recomputed comparable comparisons from merged comparable_kpi_long history (run_date=%s)" % run_date)
 
@@ -645,9 +675,12 @@ def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
         _save(f"comparison_{kind}", getattr(ctx, f"comparison_{kind}"), comparison_mode)
     _save("scope_diff", ctx.scope_diff, save_mode)
 
-    # 4. Comparable (like-for-like) tables (YTD-only): comparable_kpi_long merges incrementally
-    #    like kpi_long; comparable_comparison_ytd is then recomputed from the merged comparable_kpi_long.
-    if comparable_enabled and "ytd" in selected_kinds:
+    # 4. Comparable (like-for-like) tables: comparable_kpi_long merges incrementally like
+    #    kpi_long; each enabled kind's comparable_comparison_{kind} is then recomputed from the
+    #    merged comparable_kpi_long. Gated on comparable_pairs.kinds, independent of the regular
+    #    comparisons.enabled selection above.
+    comparable_kinds = ctx.settings.get("COMPARABLE_KINDS") or []
+    if comparable_enabled and comparable_kinds:
         _save("comparable_kpi_long", ctx.comparable_kpi_long, save_mode)
 
         comparable_comp_mode = save_mode
@@ -655,7 +688,9 @@ def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
             _recompute_comparable_comparisons_from_saved_history(ctx, fund_paste)
             comparable_comp_mode = "full_refresh"
 
-        _save("comparable_comparison_ytd", ctx.comparable_comparison_ytd, comparable_comp_mode)
+        for kind in comparable_kinds:
+            save_attr, _ = _COMPARABLE_KIND_ATTRS[kind]
+            _save(f"comparable_comparison_{kind}", getattr(ctx, save_attr), comparable_comp_mode)
 
     ctx.save_plan = plan
     return plan

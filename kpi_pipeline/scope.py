@@ -47,22 +47,30 @@ def _defined_scope_pairs(ctx: KPIContext, raw: DataFrame) -> DataFrame:
 
 
 def _defined_scope_weekly(ctx: KPIContext, raw: DataFrame) -> DataFrame:
-    """Honour the scope table's own (product, store, Year, Week) rows, window-filtered, with a
-    leading-gap backfill applied on top.
+    """Honour the scope table's own (product, store, Year, Week) rows, window-filtered, with an
+    optional leading-gap backfill applied on top.
 
     Used for the ``product_store_week`` grain. Weeks are resolved from ``date_col`` via
-    fiscal_cal, or from native ``year_col``/``week_col``. Item-family-rolled to parent
-    product_id when ITEM_FAMILY_ROLLUP["defined_scope"] is True (see config.py and
-    _defined_scope_pairs above -- same toggle and reasoning).
+    fiscal_cal, or from native ``year_col``/``week_col`` -- the NATIVE path is only valid when
+    USE_FISCAL_CALENDAR=False (civil calendar mode), matching every other source's own
+    date-vs-native gating (build_scoped_daily, read_lost_sales_weekly in pipeline.py): in fiscal
+    mode, Year/Week must always come from fiscal_cal/fiscal_week, or a scope source using a
+    different week-numbering convention (e.g. ISO week-year) would silently mismatch every other
+    frame's Year/Week keys. Fails loudly instead if fiscal mode is on and date_col is unset --
+    there is no way to correctly resolve fiscal Year/Week without a date to join against
+    fiscal_cal. Item-family-rolled to parent product_id when ITEM_FAMILY_ROLLUP["defined_scope"]
+    is True (see config.py and _defined_scope_pairs above -- same toggle and reasoning).
 
-    Leading-gap backfill: if a pair's own earliest recorded scope week starts later than the
-    report window's own start, the scope table simply has no row for that gap -- so the pair
-    would otherwise be out of scope for those early weeks. Assume the pair was in scope for the
-    whole window instead, same "min date in window" principle build_dc_inst's per-pair grid uses
-    (pipeline.py) -- never a hardcoded floor date, just whatever the window's own start already
-    is. Only the LEADING gap is filled: any real weeks the source provides (a later start with no
-    gap, a mid-window gap, an end date) are honoured exactly as recorded. product/product_store
-    grains are unaffected -- they already apply every scoped pair to the whole window.
+    Leading-gap backfill (defined_scope.backfill_leading_gap, default True): if a pair's own
+    earliest recorded scope week starts later than the report window's own start, the scope table
+    simply has no row for that gap -- so the pair would otherwise be out of scope for those early
+    weeks. Assume the pair was in scope for the whole window instead, same "min date in window"
+    principle build_dc_inst's per-pair grid uses (pipeline.py) -- never a hardcoded floor date,
+    just whatever the window's own start already is. Only the LEADING gap is filled: any real
+    weeks the source provides (a later start with no gap, a mid-window gap, an end date) are
+    honoured exactly as recorded. product/product_store grains are unaffected -- they already
+    apply every scoped pair to the whole window. Set False for a deployment with existing
+    product_store_week history saved before this option existed (see config.py's comment).
     """
     config = ctx.settings["DEFINED_SCOPE"]
     sel = [
@@ -81,6 +89,12 @@ def _defined_scope_weekly(ctx: KPIContext, raw: DataFrame) -> DataFrame:
             )
             .drop("scope_date")
         )
+    elif ctx.settings["USE_FISCAL_CALENDAR"]:
+        raise ValueError(
+            "defined_scope.grain='product_store_week' with USE_FISCAL_CALENDAR=True requires "
+            "defined_scope.date_col -- year_col/week_col (the NATIVE path) cannot be trusted to "
+            "match fiscal_cal/fiscal_week's own Year/Week numbering."
+        )
     else:
         year_col, week_col = config.get("year_col"), config.get("week_col")
         keyed = raw.select(
@@ -95,7 +109,10 @@ def _defined_scope_weekly(ctx: KPIContext, raw: DataFrame) -> DataFrame:
         keyed = _roll_to_item_family_parent(keyed, ctx).distinct()
 
     window_weeks = _window_weeks(ctx).select("Year", "Week", "week_start_date").distinct()
-    keyed = keyed.join(broadcast(window_weeks.select("Year", "Week")), on=["Year", "Week"], how="inner")
+    keyed = keyed.join(broadcast(window_weeks.select("Year", "Week")), on=["Year", "Week"], how="inner").cache()
+
+    if not config.get("backfill_leading_gap", True):
+        return keyed.select(*ctx.scope_keys).distinct()
 
     window_start = ctx.settings["EFFECTIVE_REPORT_START_DATE"]
     pair_first_week = (
