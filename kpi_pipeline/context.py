@@ -30,6 +30,12 @@ class KPIContext:
     # absent for a given dimension_source column.
     root_definitions: List[Dict[str, Any]] = field(default_factory=list)
     available_fiscal_quarters: Optional[List[int]] = None
+    # {"Fiscal_Quarter": df, "Fiscal_Month": df} -- the (Year, period) pairs that have FULLY
+    # ELAPSED as of REPORT_END_DATE (fiscal.complete_fiscal_periods). Semi-joined onto every metric
+    # frame by kpi_long._period_frames so the Quarter/Monthly value-trend tabs never carry an
+    # in-progress trailing period. Set by fiscal.build_fiscal_and_products; stays None in html_only
+    # mode, which renders saved rows and never period-frames a Spark frame.
+    complete_fiscal_periods: Optional[Dict[str, DataFrame]] = None
 
     defined_scope_keys: Optional[DataFrame] = None
     scope_keys: List[str] = field(default_factory=list)

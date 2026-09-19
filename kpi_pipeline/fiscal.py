@@ -101,6 +101,38 @@ def _build_fiscal_week_frame(
     return frame
 
 
+def _fiscal_upload_column_map(ctx: KPIContext) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """(quarter_col, month_col, month_name_col) from config's fiscal_calendar.column_map."""
+    s = ctx.settings
+    return s.get("FISCAL_QUARTER_COL"), s.get("FISCAL_MONTH_COL"), s.get("FISCAL_MONTH_NAME_COL")
+
+
+def _read_fiscal_cal_upload(
+    ctx: KPIContext,
+    path: str,
+    report_start_date: Optional[datetime.date] = None,
+    report_end_date: Optional[datetime.date] = None,
+) -> DataFrame:
+    """The fiscal_cal upload projected to date + Year/Week + whichever fiscal attribute columns
+    config names, optionally clipped to the report window.
+
+    Both bounds are optional so the same projection serves two readers: ctx.fiscal_cal (clipped to
+    [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] -- what every downstream consumer reads), and
+    _fiscal_period_bounds's UNCLIPPED read, which needs each quarter's/month's REAL first/last
+    week, including weeks on either side of the window that the clipped calendar deliberately drops.
+    """
+    raw = ctx.spark.read.format("delta").load(path)
+    select_cols = ["date", "Year", "Week"]
+    for col in _fiscal_upload_column_map(ctx):
+        if col and col in raw.columns and col not in select_cols:
+            select_cols.append(col)
+
+    out = raw.select(*select_cols).withColumn("date", F.to_date("date"))
+    if report_start_date is not None and report_end_date is not None:
+        out = out.filter(F.col("date").between(F.lit(report_start_date), F.lit(report_end_date)))
+    return out
+
+
 def _compute_available_fiscal_quarters(ctx: KPIContext) -> List[int]:
     """Fiscal-quarter numbers fully elapsed (as of REPORT_END_DATE) for the latest year in the
     report window. Applied identically to every year for the "ytd" period (see kpi_long.py) so
@@ -110,20 +142,113 @@ def _compute_available_fiscal_quarters(ctx: KPIContext) -> List[int]:
 
     Handles a single-year or single-quarter report window the same way — it only looks at the
     latest year's own weeks, so nothing else needs to exist.
+
+    Delegates to complete_fiscal_periods -- NOT ctx.fiscal_week directly. ctx.fiscal_week is
+    itself clipped to [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] (see
+    build_fiscal_cal_and_week_from_upload), so a week_end_date queried from it can never exceed
+    REPORT_END_DATE in the first place -- every quarter present in the window would trivially pass
+    a "quarter_end <= REPORT_END_DATE" check whether it's really complete or not. This was a live
+    bug (the in-progress current quarter was always treated as elapsed) until fixed alongside
+    comparable.py's analogous _complete_quarter_years.
     """
-    report_end = ctx.settings["REPORT_END_DATE"]
     fw = ctx.fiscal_week
     latest_year = fw.agg(F.max("Year")).collect()[0][0]
-    quarter_ends = (
-        fw.filter(F.col("Year") == latest_year)
-        .groupBy("Fiscal_Quarter")
-        .agg(F.max("week_end_date").alias("quarter_end"))
-        .collect()
+    complete = complete_fiscal_periods(ctx, "Fiscal_Quarter").filter(F.col("Year") == latest_year)
+    return sorted(int(r["Fiscal_Quarter"]) for r in complete.select("Fiscal_Quarter").collect())
+
+
+# Period columns a (Year, period) completeness set is computed for — the two fiscal rollups the
+# Quarter/Monthly value-trend tabs group by (see kpi_long._period_frames).
+COMPLETE_PERIOD_COLUMNS = ("Fiscal_Quarter", "Fiscal_Month")
+
+
+def _fiscal_period_bounds(ctx: KPIContext, period_col: str) -> DataFrame:
+    """One row per (Year, ``period_col``) with ``period_start``/``period_end`` — that period's
+    REAL first/last date.
+
+    Deliberately NOT read from ctx.fiscal_week. ctx.fiscal_week is clipped to
+    [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] (see build_fiscal_cal_and_week_from_upload), so
+    a period truncated at EITHER edge of the window reports a start/end exactly at the window's own
+    boundary and would compare as "fully inside" against any window-boundary-based test:
+
+      * a period still in progress at the window's leading (most recent) edge always shows
+        period_end == REPORT_END_DATE regardless of when it really ends;
+      * a period whose real start predates EFFECTIVE_REPORT_START_DATE (e.g. run_min_date doesn't
+        land on a period boundary) always shows period_start == EFFECTIVE_REPORT_START_DATE
+        regardless of when it really starts.
+
+    Both need the calendar BEYOND the window to detect:
+
+      * fiscal-calendar upload (use_fiscal_calendar=True) — re-read unclipped, so a period still in
+        progress carries its true (future) end date, and one truncated at the window's start
+        carries its true (earlier) start date. This needs the upload to actually cover the weeks
+        before/after the window, with its quarter/month columns populated there: an upload that
+        stops at the window edge (or leaves those columns null past it) makes the truncated period
+        look complete again and nothing is excluded. Only IN-WINDOW weeks are validated for null
+        quarter/month (see build_fiscal_and_products), so extend the upload through the fiscal
+        year on both sides to get this guard.
+      * daily-data time grain (use_fiscal_calendar=False) — no calendar exists beyond the data, but
+        on that path Fiscal_Month IS the real calendar month of the week start and Fiscal_Quarter
+        is ceil(month/3) (see _build_fiscal_week_frame's derivation fallbacks), so the period
+        start/end are the first/last day of that calendar month / of the quarter's first/third
+        month — computable analytically, no calendar lookup needed.
+    """
+    if ctx.settings["USE_FISCAL_CALENDAR"]:
+        quarter_col, month_col, month_name_col = _fiscal_upload_column_map(ctx)
+        full_weeks = _build_fiscal_week_frame(
+            _read_fiscal_cal_upload(ctx, ctx.settings["PATH_FISCAL"]),
+            quarter_col,
+            month_col,
+            month_name_col,
+        )
+        return full_weeks.groupBy("Year", period_col).agg(
+            F.min("week_start_date").alias("period_start"),
+            F.max("week_end_date").alias("period_end"),
+        )
+
+    months_in_period = 3 if period_col == "Fiscal_Quarter" else 1
+    last_month_number = F.col(period_col) * F.lit(months_in_period)
+    first_month_number = last_month_number - F.lit(months_in_period) + F.lit(1)
+    return (
+        ctx.fiscal_week.select("Year", period_col).distinct()
+        .withColumn(
+            "period_start",
+            F.to_date(F.format_string("%04d-%02d-01", F.col("Year").cast("int"), first_month_number.cast("int"))),
+        )
+        .withColumn(
+            "period_end",
+            F.last_day(
+                F.to_date(
+                    F.format_string("%04d-%02d-01", F.col("Year").cast("int"), last_month_number.cast("int"))
+                )
+            ),
+        )
     )
-    return sorted(
-        int(row["Fiscal_Quarter"])
-        for row in quarter_ends
-        if row["quarter_end"] is not None and row["quarter_end"] <= report_end
+
+
+def complete_fiscal_periods(ctx: KPIContext, period_col: str) -> DataFrame:
+    """(Year, ``period_col``) pairs that have FULLY ELAPSED **and** are fully contained in the
+    report window: ``period_start >= EFFECTIVE_REPORT_START_DATE`` and
+    ``period_end <= REPORT_END_DATE``.
+
+    Semi-join this onto a metric frame to drop every row belonging to a period that is either
+    still in progress at the window's trailing edge or truncated at its leading edge — what keeps
+    an incomplete quarter/month off the Quarter and Monthly value-trend tabs
+    (kpi_long._period_frames). Every pair well inside the window is trivially complete; only the
+    one or two nearest either edge are ever at risk.
+
+    This is a PER-PAIR test ("is THIS year's Q3 fully inside the window?"), distinct from
+    _compute_available_fiscal_quarters's per-NUMBER test for YTD ("which quarter numbers are over
+    for the latest year", then applied to every year so YTD stays apples-to-apples) — that function
+    only checks the trailing edge and does not (yet) share this helper. The Weekly tab needs
+    neither: REPORT_END_DATE is the last completed Saturday, so a partial week never exists.
+    """
+    start = ctx.settings["EFFECTIVE_REPORT_START_DATE"]
+    end = ctx.settings["REPORT_END_DATE"]
+    return (
+        _fiscal_period_bounds(ctx, period_col)
+        .filter((F.col("period_start") >= F.lit(start)) & (F.col("period_end") <= F.lit(end)))
+        .select("Year", period_col)
     )
 
 
@@ -133,21 +258,8 @@ def build_fiscal_cal_and_week_from_upload(
     report_start_date: datetime.date,
     report_end_date: datetime.date,
 ) -> Tuple[DataFrame, DataFrame]:
-    raw = ctx.spark.read.format("delta").load(path)
-    quarter_col = ctx.settings.get("FISCAL_QUARTER_COL")
-    month_col = ctx.settings.get("FISCAL_MONTH_COL")
-    month_name_col = ctx.settings.get("FISCAL_MONTH_NAME_COL")
-
-    select_cols = ["date", "Year", "Week"]
-    for col in (quarter_col, month_col, month_name_col):
-        if col and col in raw.columns and col not in select_cols:
-            select_cols.append(col)
-
-    fiscal_cal_out = (
-        raw.select(*select_cols)
-        .withColumn("date", F.to_date("date"))
-        .filter(F.col("date").between(F.lit(report_start_date), F.lit(report_end_date)))
-    )
+    quarter_col, month_col, month_name_col = _fiscal_upload_column_map(ctx)
+    fiscal_cal_out = _read_fiscal_cal_upload(ctx, path, report_start_date, report_end_date)
     return fiscal_cal_out, _build_fiscal_week_frame(fiscal_cal_out, quarter_col, month_col, month_name_col)
 
 
@@ -375,6 +487,18 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
 
     ctx.available_fiscal_quarters = _compute_available_fiscal_quarters(ctx)
     print("available (fully elapsed) fiscal quarters for YTD:", ctx.available_fiscal_quarters)
+
+    # Computed once per run and cached: kpi_long._period_frames semi-joins these onto every metric
+    # frame for the Quarter and Monthly trend tabs, so an in-progress trailing period never renders.
+    ctx.complete_fiscal_periods = {
+        period_col: complete_fiscal_periods(ctx, period_col).cache()
+        for period_col in COMPLETE_PERIOD_COLUMNS
+    }
+    latest_complete = {
+        period_col: pairs.agg(F.max(F.struct("Year", period_col)).alias("latest")).collect()[0]["latest"]
+        for period_col, pairs in ctx.complete_fiscal_periods.items()
+    }
+    print("latest fully elapsed fiscal period (Quarter/Monthly trend tabs end here):", latest_complete)
 
     products_raw = ctx.spark.read.format("delta").load(s["PATH_PRODUCTS"])
     slice_dims = s["SLICE_DIMENSIONS"]
