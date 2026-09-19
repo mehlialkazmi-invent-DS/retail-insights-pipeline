@@ -25,11 +25,21 @@ consecutive-year link within that shared population:
             quarter number has a fully
             independent population.
 
-The (product_id, store_id) pair universe is used under EVERY defined_scope.grain, product-grain
-included: scoped_daily comes straight from daily-data and is store-level whatever the scope grain,
-so like-for-like always means the same pairs present in every year. Frames that carry no store_id
-of their own are restricted to that pair universe's distinct products instead, and dc_daily/dc_inst
-each keep their own independent (product_id, warehouse_id) universe. See _restrict_frames's
+The same-pairs population's own grain is comparable_pairs.grain (config.py), NOT defined_scope.grain:
+
+  "product_store" (default) — the universe is the (product_id, store_id) pairs present in every
+            qualifying year. Used under EVERY defined_scope.grain, product-grain included:
+            scoped_daily comes straight from daily-data and is store-level whatever the scope
+            grain, so like-for-like means the same pairs present in every year regardless of how
+            the report's own scope is defined.
+  "product" — the universe is the product_ids present in every qualifying year, and every store of
+            a qualifying product is kept. Store-estate churn is then NOT isolated (a product that
+            gained or lost stores between the compared years still moves the metrics); use it only
+            when a pair-level intersection leaves too small a population to be meaningful.
+
+Frames that carry no store_id of their own are restricted to that universe's distinct products
+instead (as is every frame under grain="product"), and dc_daily/dc_inst each keep their own
+independent (product_id, warehouse_id) universe under both grains. See _restrict_frames's
 docstring.
 
 A comparable comparison for a given kind is produced only when it has at least 2 qualifying years
@@ -64,6 +74,14 @@ _PRODUCT_KEYS = ["product_id"]
 _DC_PAIR_KEYS = ["product_id", "warehouse_id"]
 _RESTRICT_FRAMES = ("scoped_daily", "inst_data", "lost_base", "scope_pairs", "scope_pair_weeks")
 
+# config.py's comparable_pairs.grain -> the key columns the store-side same-pairs universe is
+# intersected on. The DC universe (_DC_PAIR_KEYS) is not configurable: warehouse inventory has no
+# store dimension at all, so there is nothing for a product-grain setting to drop from it.
+_GRAIN_PAIR_KEYS: Dict[str, List[str]] = {
+    "product_store": _PAIR_KEYS,
+    "product": _PRODUCT_KEYS,
+}
+
 # kind -> (kpi_long period_type this kind's rows are tagged with, ctx save attr, ctx display attr)
 _KIND_CTX_ATTRS: Dict[str, Tuple[str, str, str]] = {
     "ytd": ("ytd", "comparable_comparison_ytd", "comparable_ytd_display"),
@@ -77,16 +95,24 @@ def _restrict_frames(
     comparable_keys: DataFrame,
     dc_comparable_keys: DataFrame,
     dc_inst_comparable_keys: DataFrame,
+    pair_keys: List[str],
 ) -> Dict[str, DataFrame]:
-    """Restrict every frame to the years' common (product, store) pairs, and dc_daily to its own
+    """Restrict every frame to the years' common pairs/products, and dc_daily to its own
     common (product, warehouse) pairs.
 
-    Like-for-like is pair-level under every defined_scope.grain, not only the store-level ones:
-    scoped_daily is store-level straight from daily_data whatever the scope grain (see
-    build_scoped_daily's has_store=False path, which restricts by product but leaves every store's
-    rows intact), so the same pairs can be required in every year even for a product-grain report.
-    Keeping the restriction pair-level under all grains is what makes comparable genuinely
-    like-for-like rather than something that silently weakens with the scope configuration.
+    ``pair_keys`` is the store-side universe's own key columns, resolved once from
+    comparable_pairs.grain (_GRAIN_PAIR_KEYS): _PAIR_KEYS for "product_store", _PRODUCT_KEYS for
+    "product". Under "product" EVERY frame is restricted by product alone -- scoped_daily keeps
+    all of a qualifying product's store rows (its rows still carry store_id, they are simply not
+    required to match a pair), which is the whole point of that setting.
+
+    Under the default "product_store", like-for-like is pair-level under every defined_scope.grain,
+    not only the store-level ones: scoped_daily is store-level straight from daily_data whatever
+    the scope grain (see build_scoped_daily's has_store=False path, which restricts by product but
+    leaves every store's rows intact), so the same pairs can be required in every year even for a
+    product-grain report. Keeping the restriction pair-level under all scope grains is what makes
+    comparable genuinely like-for-like rather than something that silently weakens with the scope
+    configuration.
 
     Frames carrying no store_id of their own -- inst_data/lost_base when lost_sales_source has no
     store_col, plus scope_pairs/scope_pair_weeks when neither scope nor lost-sales has a store
@@ -108,11 +134,12 @@ def _restrict_frames(
     """
     out = dict(period_frames)
     comparable_products = comparable_keys.select(*_PRODUCT_KEYS).distinct()
+    store_level_universe = pair_keys == _PAIR_KEYS
     for key in _RESTRICT_FRAMES:
         frame = out.get(key)
         if frame is None:
             continue
-        pair_level = "store_id" in frame.columns
+        pair_level = store_level_universe and "store_id" in frame.columns
         out[key] = frame.join(
             comparable_keys if pair_level else comparable_products,
             on=_PAIR_KEYS if pair_level else _PRODUCT_KEYS,
@@ -133,23 +160,22 @@ def _complete_quarter_years(ctx: KPIContext, quarter: int) -> List[int]:
     partial -- comparing it against a prior year's FULL quarter would silently produce a wildly
     wrong "like-for-like" delta (a quarter 6 weeks in compared to a full 13-week quarter). The
     window's own start can truncate the earliest year's quarter the same way if run_min_date
-    doesn't fall on a quarter boundary. Mirrors fiscal._compute_available_fiscal_quarters's
-    "fully elapsed" guard for YTD, generalised to check both window boundaries for an arbitrary
-    quarter number and year, not just the latest year.
+    doesn't fall on a quarter boundary.
 
-    Read from ctx.fiscal_week's own week bounds (the full fiscal calendar), not from a data
-    frame's real rows -- a quarter that's genuinely fully closed but happens to have all-zero
-    sales/inventory should still count, and a quarter still in progress must never count even if
-    its partial weeks already have real data.
+    Delegates to fiscal.complete_fiscal_periods -- NOT ctx.fiscal_week directly. ctx.fiscal_week is
+    itself clipped to [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] (see
+    fiscal.build_fiscal_cal_and_week_from_upload), so a week_start_date/week_end_date queried from
+    it can never fall outside the window in the first place -- any quarter present at all would
+    trivially pass a bounds check like "q_start >= start and q_end <= end" whether it's really
+    complete or not. fiscal.complete_fiscal_periods re-reads the calendar unclipped specifically to
+    avoid this; a quarter that's genuinely fully closed but happens to have all-zero
+    sales/inventory still counts, and a quarter still in progress never counts even if its partial
+    weeks already have real data.
     """
-    start, end = ctx.settings["EFFECTIVE_REPORT_START_DATE"], ctx.settings["REPORT_END_DATE"]
-    bounds = (
-        ctx.fiscal_week.filter(F.col("Fiscal_Quarter") == quarter)
-        .groupBy("Year")
-        .agg(F.min("week_start_date").alias("q_start"), F.max("week_end_date").alias("q_end"))
-        .filter((F.col("q_start") >= F.lit(start)) & (F.col("q_end") <= F.lit(end)))
-    )
-    return sorted(r["Year"] for r in bounds.select("Year").distinct().collect())
+    from kpi_pipeline.fiscal import complete_fiscal_periods
+
+    complete = complete_fiscal_periods(ctx, "Fiscal_Quarter").filter(F.col("Fiscal_Quarter") == quarter)
+    return sorted(r["Year"] for r in complete.select("Year").distinct().collect())
 
 
 def _intersect_years(frame: DataFrame, years: Sequence[int], key_cols: List[str]) -> DataFrame:
@@ -287,8 +313,13 @@ def _build_comparable_kind(
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Compute one comparable kind's (kpi_long rows, comparison save rows, overall display) —
     empty frames if there are fewer than 2 qualifying years or 0 common pairs. ``quarter`` is
-    required (and only meaningful) for comparison_type="quarter"."""
+    required (and only meaningful) for comparison_type="quarter".
+
+    The store-side universe's keys come from comparable_pairs.grain, resolved ONCE here and
+    threaded through _intersect_years/_restrict_frames. comparable_pair_count therefore counts
+    common pairs under grain="product_store" and common PRODUCTS under grain="product"."""
     period_type, _, _ = _KIND_CTX_ATTRS[comparison_type]
+    pair_keys = _GRAIN_PAIR_KEYS[ctx.settings["COMPARABLE_PAIRS_GRAIN"]]
     period_col = "period_key" if comparison_type == "quarter" else "Year"
     pf = _period_frames(ctx, ctx.hybrid_frames, period_type)
 
@@ -308,7 +339,7 @@ def _build_comparable_kind(
     if len(years) < 2:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    common_keys = _intersect_years(scoped_daily_pop, years, _PAIR_KEYS)
+    common_keys = _intersect_years(scoped_daily_pop, years, pair_keys)
     dc_common_keys = _intersect_years(dc_daily_pop, years, _DC_PAIR_KEYS)
     dc_inst_common_keys = _intersect_years(dc_inst_pop, years, _DC_PAIR_KEYS)
     pair_count = common_keys.count()
@@ -318,7 +349,7 @@ def _build_comparable_kind(
         dc_inst_common_keys.unpersist()
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    restricted = _restrict_frames(pf, common_keys, dc_common_keys, dc_inst_common_keys)
+    restricted = _restrict_frames(pf, common_keys, dc_common_keys, dc_inst_common_keys, pair_keys)
 
     kpi_parts: List[pd.DataFrame] = []
     save_parts: List[pd.DataFrame] = []
@@ -385,6 +416,8 @@ def build_comparable_pairs(ctx: KPIContext) -> None:
         return
 
     metric_cols = ctx.settings["METRIC_COLS"]
+    # What comparable_pair_count actually counts under the configured comparable_pairs.grain.
+    unit = "pairs" if ctx.settings["COMPARABLE_PAIRS_GRAIN"] == "product_store" else "products"
     kpi_long_parts: List[pd.DataFrame] = []
     summary: List[str] = []
 
@@ -398,7 +431,7 @@ def build_comparable_pairs(ctx: KPIContext) -> None:
             setattr(ctx, save_attr, save_rows)
             setattr(ctx, display_attr, display)
             pair_count = int(kpi_rows["comparable_pair_count"].iloc[0]) if not kpi_rows.empty else 0
-            summary.append(f"{kind}={pair_count} pairs" if pair_count else f"{kind}=n/a")
+            summary.append(f"{kind}={pair_count} {unit}" if pair_count else f"{kind}=n/a")
             continue
 
         # quarter: fully independent per quarter number. Fiscal_Quarter is already a plain column
@@ -417,7 +450,7 @@ def build_comparable_pairs(ctx: KPIContext) -> None:
             if not kpi_rows.empty:
                 q_kpi_parts.append(kpi_rows)
                 pair_count = int(kpi_rows["comparable_pair_count"].iloc[0])
-                q_summary.append(f"Q{q}={pair_count} pairs")
+                q_summary.append(f"Q{q}={pair_count} {unit}")
             if not save_rows.empty:
                 q_save_parts.append(save_rows)
             if not display.empty:

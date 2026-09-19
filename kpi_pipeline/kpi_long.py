@@ -39,6 +39,33 @@ def _with_ytd_filter(df: DataFrame, available_quarters: List[int]) -> DataFrame:
     return df.filter(F.col("Fiscal_Quarter").isin(available_quarters))
 
 
+# The metric-source frames build_kpi_table reads — the same five frames _VALUE_FILTERED_FRAMES
+# lists below. scope_pairs/scope_pair_weeks are excluded on purpose: they carry no fiscal period
+# column and feed no metric.
+_PERIOD_METRIC_FRAMES = ("scoped_daily", "inst_data", "lost_base", "dc_daily", "dc_inst")
+
+
+def _drop_incomplete_periods(
+    ctx: KPIContext, frames: Dict[str, DataFrame], period_col: str
+) -> Dict[str, DataFrame]:
+    """Drop every row belonging to a (Year, ``period_col``) that has not fully elapsed as of
+    REPORT_END_DATE (fiscal.complete_fiscal_periods).
+
+    Why the Quarter/Monthly trend tabs need it: REPORT_END_DATE is a week boundary that almost
+    never lands on a quarter or month boundary, so without this the trailing row of those tabs is
+    routinely a period only a week or two in — a 1-week "quarter" plotted next to full 13-week
+    ones. That row now simply doesn't appear until the period closes.
+
+    Weekly needs no equivalent (REPORT_END_DATE is the last completed Saturday, so the trailing
+    week is always whole), and YTD has its own apples-to-apples quarter filter above.
+    """
+    complete = F.broadcast(ctx.complete_fiscal_periods[period_col])
+    out = dict(frames)
+    for key in _PERIOD_METRIC_FRAMES:
+        out[key] = out[key].join(complete, on=["Year", period_col], how="left_semi")
+    return out
+
+
 def _period_frames(ctx: KPIContext, frames: Dict[str, DataFrame], period_name: str) -> Dict[str, DataFrame]:
     if period_name == "quarter":
         out = dict(frames)
@@ -47,7 +74,7 @@ def _period_frames(ctx: KPIContext, frames: Dict[str, DataFrame], period_name: s
         out["lost_base"] = _with_period_key(frames["lost_base"])
         out["dc_daily"] = _with_period_key(frames["dc_daily"])
         out["dc_inst"] = _with_period_key(frames["dc_inst"])
-        return out
+        return _drop_incomplete_periods(ctx, out, "Fiscal_Quarter")
     if period_name == "monthly":
         out = dict(frames)
         out["scoped_daily"] = _with_month_key(frames["scoped_daily"])
@@ -55,7 +82,7 @@ def _period_frames(ctx: KPIContext, frames: Dict[str, DataFrame], period_name: s
         out["lost_base"] = _with_month_key(frames["lost_base"])
         out["dc_daily"] = _with_month_key(frames["dc_daily"])
         out["dc_inst"] = _with_month_key(frames["dc_inst"])
-        return out
+        return _drop_incomplete_periods(ctx, out, "Fiscal_Month")
     if period_name == "ytd":
         # Only the fiscal quarters that have fully elapsed for the latest year (see
         # fiscal._compute_available_fiscal_quarters), applied identically to every year, so

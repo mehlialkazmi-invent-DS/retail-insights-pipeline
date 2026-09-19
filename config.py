@@ -437,6 +437,20 @@ CONFIG: Dict[str, Any] = {
         # its own pair universe per quarter number (a pair must appear in that quarter of every
         # year that has it, independent of the other quarter numbers).
         "kinds": ["ytd"],
+        # grain — what a "same pair across every year" actually means. Independent of
+        # defined_scope.grain above (scoped_daily carries store_id whatever the scope grain):
+        #   "product_store" (default) -> the population is the distinct (product_id, store_id)
+        #                     pairs present in every qualifying year. A product that opened or
+        #                     closed in one store drops that store's rows from every year.
+        #   "product"      -> the population is the distinct product_id values present in every
+        #                     qualifying year; every store of a qualifying product is then kept.
+        #                     Same-store movement is NOT isolated -- a product that gained or lost
+        #                     stores between the compared years still shifts the metrics. Use it
+        #                     when the store estate itself churns enough that a pair-level
+        #                     intersection leaves too small a population to be meaningful.
+        # Only the store-side population is affected; dc_daily/dc_inst keep their own
+        # (product_id, warehouse_id) universe under both values (DC has no store dimension).
+        "grain": "product_store",
     },
     # =============================================================================
     # METRICS
@@ -1086,6 +1100,16 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             f"choose at least one of {list(COMPARABLE_KINDS_ALL)}"
         )
 
+    # Grain of the comparable same-pairs population itself (NOT defined_scope.grain -- see the
+    # comparable_pairs config block). Validated the same way defined_scope.grain is, above.
+    comparable_pairs_grain = comparable_pairs_cfg.get("grain", "product_store")
+    valid_comparable_grains = {"product", "product_store"}
+    if comparable_pairs_grain not in valid_comparable_grains:
+        raise ValueError(
+            f"comparable_pairs.grain must be one of {sorted(valid_comparable_grains)}; "
+            f"got {comparable_pairs_grain!r}"
+        )
+
     output_cfg = cfg["output"]
     output_root = fund_paste(bucket, *output_cfg["path_segments"])
     run_date_raw = output_cfg.get("run_date")
@@ -1144,6 +1168,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "RUN_SCOPE_DIFF": cfg["scope"].get("run_scope_diff", False),
         "COMPARABLE_PAIRS_ENABLED": comparable_pairs_enabled,
         "COMPARABLE_KINDS": comparable_kinds,
+        "COMPARABLE_PAIRS_GRAIN": comparable_pairs_grain,
         "COMPARISON_KINDS": comparison_kinds,
         "SCOPE_ADJUSTMENTS": cfg.get("scope_adjustments", {}),
         # .get() throughout, matching what the validators above actually require: they only
