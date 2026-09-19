@@ -35,8 +35,8 @@ def _with_month_key(df: DataFrame) -> DataFrame:
     )
 
 
-def _with_ytd_filter(df: DataFrame, available_quarters: List[int]) -> DataFrame:
-    return df.filter(F.col("Fiscal_Quarter").isin(available_quarters))
+def _with_ytd_filter(df: DataFrame, available_months: List[int]) -> DataFrame:
+    return df.filter(F.col("Fiscal_Month").isin(available_months))
 
 
 # The metric-source frames build_kpi_table reads — the same five frames _VALUE_FILTERED_FRAMES
@@ -84,16 +84,20 @@ def _period_frames(ctx: KPIContext, frames: Dict[str, DataFrame], period_name: s
         out["dc_inst"] = _with_month_key(frames["dc_inst"])
         return _drop_incomplete_periods(ctx, out, "Fiscal_Month")
     if period_name == "ytd":
-        # Only the fiscal quarters that have fully elapsed for the latest year (see
-        # fiscal._compute_available_fiscal_quarters), applied identically to every year, so
+        # Only the fiscal MONTHS that have fully elapsed for the latest year (see
+        # fiscal._compute_available_fiscal_months), applied identically to every year, so
         # summing by "Year" alone below gives an apples-to-apples YTD window across years.
-        available_quarters = ctx.available_fiscal_quarters or []
+        # Month-grain, not quarter-grain: a quarter still in progress can still have one or more
+        # of its own months already fully closed (e.g. Q3 in progress but its first month done) —
+        # quarter-grain would have stopped YTD at the end of the PRIOR quarter instead, understating
+        # it by up to two months' worth of otherwise-complete data.
+        available_months = ctx.available_fiscal_months or []
         out = dict(frames)
-        out["scoped_daily"] = _with_ytd_filter(frames["scoped_daily"], available_quarters)
-        out["inst_data"] = _with_ytd_filter(frames["inst_data"], available_quarters)
-        out["lost_base"] = _with_ytd_filter(frames["lost_base"], available_quarters)
-        out["dc_daily"] = _with_ytd_filter(frames["dc_daily"], available_quarters)
-        out["dc_inst"] = _with_ytd_filter(frames["dc_inst"], available_quarters)
+        out["scoped_daily"] = _with_ytd_filter(frames["scoped_daily"], available_months)
+        out["inst_data"] = _with_ytd_filter(frames["inst_data"], available_months)
+        out["lost_base"] = _with_ytd_filter(frames["lost_base"], available_months)
+        out["dc_daily"] = _with_ytd_filter(frames["dc_daily"], available_months)
+        out["dc_inst"] = _with_ytd_filter(frames["dc_inst"], available_months)
         return out
     return frames
 

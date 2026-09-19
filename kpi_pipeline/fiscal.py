@@ -133,28 +133,35 @@ def _read_fiscal_cal_upload(
     return out
 
 
-def _compute_available_fiscal_quarters(ctx: KPIContext) -> List[int]:
-    """Fiscal-quarter numbers fully elapsed (as of REPORT_END_DATE) for the latest year in the
+def _compute_available_fiscal_months(ctx: KPIContext) -> List[int]:
+    """Fiscal-month numbers fully elapsed (as of REPORT_END_DATE) for the latest year in the
     report window. Applied identically to every year for the "ytd" period (see kpi_long.py) so
     the YTD comparison stays apples-to-apples once the current year is only partially reported —
-    e.g. if only Q1 has fully closed for the latest year, YTD sums Q1 for every year, not the
-    calendar-to-date weeks of an in-progress Q2.
+    e.g. if only fiscal months 01-07 have fully closed for the latest year, YTD sums months
+    01-07 for every year, not the calendar-to-date weeks of an in-progress month 08.
 
-    Handles a single-year or single-quarter report window the same way — it only looks at the
+    Month-grain, not quarter-grain: a quarter still in progress can still have one or more of its
+    own months already fully closed (e.g. Q3 in progress, but its first month is done) -- using
+    quarter-grain here would understate YTD by up to two months' worth of otherwise-complete data
+    every time the "current" quarter is in progress, which is virtually always (REPORT_END_DATE is
+    a week boundary, essentially never a quarter boundary).
+
+    Handles a single-year or single-month report window the same way — it only looks at the
     latest year's own weeks, so nothing else needs to exist.
 
     Delegates to complete_fiscal_periods -- NOT ctx.fiscal_week directly. ctx.fiscal_week is
     itself clipped to [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] (see
     build_fiscal_cal_and_week_from_upload), so a week_end_date queried from it can never exceed
-    REPORT_END_DATE in the first place -- every quarter present in the window would trivially pass
-    a "quarter_end <= REPORT_END_DATE" check whether it's really complete or not. This was a live
-    bug (the in-progress current quarter was always treated as elapsed) until fixed alongside
-    comparable.py's analogous _complete_quarter_years.
+    REPORT_END_DATE in the first place -- every month present in the window would trivially pass
+    a "month_end <= REPORT_END_DATE" check whether it's really complete or not. This was a live
+    bug (the in-progress current period was always treated as elapsed) until fixed alongside
+    comparable.py's analogous _complete_quarter_years -- originally quarter-grain only
+    (_compute_available_fiscal_quarters), switched to month-grain here per explicit requirement.
     """
     fw = ctx.fiscal_week
     latest_year = fw.agg(F.max("Year")).collect()[0][0]
-    complete = complete_fiscal_periods(ctx, "Fiscal_Quarter").filter(F.col("Year") == latest_year)
-    return sorted(int(r["Fiscal_Quarter"]) for r in complete.select("Fiscal_Quarter").collect())
+    complete = complete_fiscal_periods(ctx, "Fiscal_Month").filter(F.col("Year") == latest_year)
+    return sorted(int(r["Fiscal_Month"]) for r in complete.select("Fiscal_Month").collect())
 
 
 # Period columns a (Year, period) completeness set is computed for — the two fiscal rollups the
@@ -238,10 +245,12 @@ def complete_fiscal_periods(ctx: KPIContext, period_col: str) -> DataFrame:
     one or two nearest either edge are ever at risk.
 
     This is a PER-PAIR test ("is THIS year's Q3 fully inside the window?"), distinct from
-    _compute_available_fiscal_quarters's per-NUMBER test for YTD ("which quarter numbers are over
-    for the latest year", then applied to every year so YTD stays apples-to-apples) — that function
-    only checks the trailing edge and does not (yet) share this helper. The Weekly tab needs
-    neither: REPORT_END_DATE is the last completed Saturday, so a partial week never exists.
+    _compute_available_fiscal_months's per-NUMBER test for YTD ("which fiscal MONTH numbers are
+    over for the latest year", then applied to every year so YTD stays apples-to-apples) — that
+    function DOES delegate to this same helper (at Fiscal_Month grain) for its own per-pair check,
+    it just then reduces the result to a plain list of month numbers for the latest year only. The
+    Weekly tab needs neither: REPORT_END_DATE is the last completed Saturday, so a partial week
+    never exists.
     """
     start = ctx.settings["EFFECTIVE_REPORT_START_DATE"]
     end = ctx.settings["REPORT_END_DATE"]
@@ -485,8 +494,8 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
             "otherwise those weeks silently drop out of the monthly rollup."
         )
 
-    ctx.available_fiscal_quarters = _compute_available_fiscal_quarters(ctx)
-    print("available (fully elapsed) fiscal quarters for YTD:", ctx.available_fiscal_quarters)
+    ctx.available_fiscal_months = _compute_available_fiscal_months(ctx)
+    print("available (fully elapsed) fiscal months for YTD:", ctx.available_fiscal_months)
 
     # Computed once per run and cached: kpi_long._period_frames semi-joins these onto every metric
     # frame for the Quarter and Monthly trend tabs, so an in-progress trailing period never renders.
