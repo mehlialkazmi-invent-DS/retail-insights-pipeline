@@ -49,7 +49,7 @@ main.ipynb         Cell 1: config summary
                    Cell 4: save plan preview (when save_outputs=True)
                    Cell 5: Delta write
                    (unnumbered): kpi_long sample, YoY / YTD comparisons,
-                                 comparable pairs (YTD-only), scope diff
+                                 comparable pairs (ytd/yoy/quarter), scope diff
                    Cell 6: HTML report
 
 kpi_pipeline/
@@ -66,7 +66,9 @@ kpi_pipeline/
                    (one root per distinct value) from real data;
                    fiscal_calendar.column_map (quarter_col/month_col/month_name_col) —
                    each optional/auto-detected, derived when a client's fiscal_cal lacks it;
-                   available_fiscal_quarters (elapsed-quarter set for YTD, from the latest year)
+                   available_fiscal_quarters (elapsed-quarter set for YTD, from the latest year);
+                   complete_fiscal_periods (per-(Year,period) fully-elapsed set for the Quarter/
+                   Monthly trend tabs, dict keyed by Fiscal_Quarter/Fiscal_Month — see §3.1)
   inputs.py        cached Delta reads (daily_data_raw, lost_sales_weekly_base) + input_filters;
                    prints the source date range for daily_data/lost_sales on every read
   scope.py         defined scope, score scope (hybrid), manual adjustments
@@ -88,10 +90,13 @@ kpi_pipeline/
                    (not sequential), chained across every consecutive year pair present — see
                    _consecutive_year_pairs. No QoQ/MoM/WoW comparison table exists — the
                    Quarter/Monthly/Weekly period tabs show value trends only.
-  comparable.py    build_comparable_pairs: like-for-like YTD metrics only, root × cut aware.
-                   ONE pair universe (intersection across EVERY year in the window, NOT
-                   restricted per root — computed once against the overall population), shared
-                   by every consecutive-year link — see rebuild_comparable_ytd_from_saved_rows
+  comparable.py    build_comparable_pairs: like-for-like ytd/yoy/quarter, root × cut aware.
+                   ONE pair universe PER KIND (ytd/yoy: intersection across EVERY year in the
+                   window; quarter: per quarter-number, across years where that quarter is fully
+                   elapsed — NOT restricted per root, computed once against the overall
+                   population), shared by every consecutive-year link within that kind — see
+                   rebuild_comparable_kind_from_saved_rows. Store-side grain (product_store vs
+                   product) is comparable_pairs.grain, independent of defined_scope.grain — §3.6
   io.py            incremental Delta saves, save plan, load_saved_outputs (html_only),
                    recompute comparisons from merged kpi_long history. TABLE_ROW_KEYS now
                    includes "root" everywhere dimension/dimension_value appears.
@@ -134,6 +139,10 @@ When a user wants to configure the toolkit, ask them (or read from their message
   ```
   Each entry is independently optional/auto-detected: read when the column exists on `fiscal_cal`, derived when absent or set to `None`. This matters because **a client's fiscal month/quarter number does not necessarily match the real calendar month/quarter** — e.g. tbretail's fiscal year runs Feb–Jan, so fiscal month 07 has been observed spanning real 8/2–8/29. Feeding that number straight into a month-name lookup (`calendar.month_abbr[7]` → "Jul") would be **wrong** whenever a client's fiscal calendar is offset like this. So when `month_name_col` is absent, the Monthly tab instead derives its display label from the **majority real calendar month by day count** across each fiscal month's actual dates (`html_report._build_month_display_labels` / `fiscal._build_fiscal_week_frame`) — correct regardless of the offset, and a no-op (reduces to the trivial case) on a calendar-aligned fiscal year.
 - `False`: derived from `noob/daily-data` (`fiscal_calendar.daily_time_columns`, which has only `date`/`week` keys), read via `get_daily_data_raw` — the same cached, config-filtered read every other daily_data consumer uses, so `input_filters.daily_data` applies here too. **Year is the calendar year of `date`** (`F.year(date)`); **Week is the native fiscal week column**; Quarter/Month are both derived from the real calendar month the same way as the fiscal-calendar fallback above (they ARE the real calendar values here, so this is exact, not approximate). Year is deliberately never read from a raw source year column — it can carry the ISO week-year, mislabeling late-December weeks as the next year (e.g. Dec 2025 shown as `2026`), which previously mismatched the Quarter/Month derived from `date` (Dec 2025 → "Q4 2026"). Caveat: a fiscal week straddling Jan 1 now appears as two partial weeks (one per calendar year) in the Weekly view; quarter/month/annual rollups stay correct.
+
+**Complete periods only — Quarter/Monthly trend tabs (`REPORT_END_DATE` itself is UNCHANGED, this is additive).** The Quarter/Monthly `kpi_long` `period_type` rows (value-trend tabs, not YTD — see below) previously showed whatever data existed up to `REPORT_END_DATE`, including an in-progress trailing quarter/month (a 1-week-old "quarter" plotted next to full 13-week ones). Now a `(Year, Fiscal_Quarter)`/`(Year, Fiscal_Month)` only appears once **fully elapsed on both edges** — not truncated at the trailing edge, and not truncated at the window's own start either (matters when `run_min_date` doesn't land on a period boundary). Mechanics: `fiscal.complete_fiscal_periods(ctx, period_col)` (cached per `Fiscal_Quarter`/`Fiscal_Month` on `ctx.complete_fiscal_periods`, set in `fiscal.build_fiscal_and_products`) is semi-joined onto every metric frame by `kpi_long._drop_incomplete_periods`, called from both `"quarter"`/`"monthly"` branches of `_period_frames`. Weekly needs no equivalent — `REPORT_END_DATE` already guarantees a whole trailing week.
+
+**Real pre-existing bug this fixed.** `fiscal._compute_available_fiscal_quarters` (YTD's own "which quarters count" set, in production for a while) previously read week bounds from `ctx.fiscal_week`, which is itself clipped to `[EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE]` — so its `quarter_end <= REPORT_END_DATE` check was trivially true for any quarter present in the window at all, and never actually excluded an in-progress quarter. Now fixed: it delegates to the same unclipped `complete_fiscal_periods`. (`comparable.py`'s `_complete_quarter_years` — §3.6 — already did this correctly and was the template for the fix.) **Live impact:** this changes what the already-deployed report shows, not just future runs — a currently-visible partial trailing quarter/month row disappears from a freshly computed run, and YTD's own quarter selection may shift since it's now genuinely checking completeness. Under `save_mode="incremental"` + default `allow_overwrite_existing=False`, a stale partial-period row saved by a run *before* this fix stays in the merged Delta history (the new run doesn't reproduce that merge key, so nothing appends over or removes it) — `allow_overwrite_existing=True` or `full_refresh` to clear it. Whether a given run's own output changes at all depends on whether `reporting_window.as_of_date` happens to land on a fiscal period boundary in that customer's `fiscal_cal` upload — not something config alone can answer.
 
 ### 3.2 Scope mode
 
@@ -266,7 +275,7 @@ Use this when a breakdown column does **not** live on the products table (e.g. N
 - **Roots** = `"overall"` (always, unrestricted) + one per configured `root_values` entry (e.g. `"nvrout"`, `"comp"`). A client with no root-producing `dimension_sources` gets a single `"overall"` root — the report looks exactly as it did before roots existed.
 - **Cuts** = `"overall"` (the root's own total, no further breakdown) + each `slices.dimensions`/`derived_dimensions` entry (e.g. `brand`, `SMW`) — applied identically within every root.
 
-With `root_values: {"is_nvrout": {"yes": "nvrout"}}` and `slices.dimensions: ["brand"]`, `kpi_long` has: `overall`×`overall` (grand total), `overall`×`brand` (brand across everything), `nvrout`×`overall` (NVROUT total), `nvrout`×`brand` (brand within NVROUT only) — mirroring kpi-skill-toolkit's `overall_annual_segment` / `nvr_all_annual_brand` outputs. `kpi_long`, comparisons (`comparison_yoy`/`comparison_ytd`/`comparable_comparison_ytd` all carry a `"root"` column), and the HTML report (root becomes an outer tab when more than one root exists) are all root × cut aware. See §7 for the exact loop and §9 for `ctx.cut_dimensions`/`ctx.root_definitions`.
+With `root_values: {"is_nvrout": {"yes": "nvrout"}}` and `slices.dimensions: ["brand"]`, `kpi_long` has: `overall`×`overall` (grand total), `overall`×`brand` (brand across everything), `nvrout`×`overall` (NVROUT total), `nvrout`×`brand` (brand within NVROUT only) — mirroring kpi-skill-toolkit's `overall_annual_segment` / `nvr_all_annual_brand` outputs. `kpi_long`, comparisons (`comparison_yoy`/`comparison_ytd`/every `comparable_comparison_{ytd,yoy,quarter}` all carry a `"root"` column), and the HTML report (root becomes an outer tab when more than one root exists) are all root × cut aware. See §7 for the exact loop and §9 for `ctx.cut_dimensions`/`ctx.root_definitions`.
 
 **Scope vs. roots vs. cuts vs. population filters — four different knobs:**
 | Need | Use | Effect |
@@ -334,10 +343,10 @@ An entry on any one column in a group applies to the whole group; conflicting sp
 | `comparison_yoy` | YoY comparison rows, per root × cut |
 | `comparison_ytd` | YTD comparison rows, per root × cut (one row set per consecutive-year pair, elapsed-window sums) |
 | `scope_diff` | Defined vs score annual diff (only when `scope.run_scope_diff=True`) |
-| `comparable_kpi_long` | Like-for-like per-link YTD metrics + `comparable_pair_count` + `link_prior_year`/`link_current_year`, per root × cut (only when `comparable_pairs.enabled=True`) |
-| `comparable_comparison_ytd` | Like-for-like YTD comparison rows, per root × cut (only when `comparable_pairs.enabled=True`) |
+| `comparable_kpi_long` | ONE shared table across every enabled `comparable_pairs.kinds` entry, tagged by `comparison_type` (`"ytd"`/`"yoy"`/`"quarter"`) + `comparable_pair_count` + `link_prior_year`/`link_current_year` (+ plain `quarter_number` for quarter rows), per root × cut (only when `comparable_pairs.enabled=True`) |
+| `comparable_comparison_ytd` / `_yoy` / `_quarter` | One comparison table per enabled kind, per root × cut (`_quarter` additionally keys on `quarter_number`) |
 
-No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — comparable is YTD-only and there's no separate QoQ/MoM/WoW comparison at all.
+No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — those aren't comparison kinds at all (only `yoy`/`ytd` are, see §3.5.1); comparable pairs is a separate feature with its own `ytd`/`yoy`/`quarter` kinds (§3.6).
 
 **Merge keys (incremental only)** — defined in `io.py` `TABLE_ROW_KEYS`. **`root` is now part of every key that has `dimension`/`dimension_value`** — without it, the same cut (e.g. `brand`="KNG") under two different roots would collide as if it were one row. Saved history from before this existed lacks the `root` column entirely; the merge fails loudly on that missing key column (by design) rather than silently corrupting old history — re-run and re-save if you hit this.
 
@@ -346,8 +355,9 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — comparabl
 | `kpi_long` | `period_type`, `period`, `root`, `dimension`, `dimension_value` |
 | `comparison_yoy` / `comparison_ytd` | `comparison_type`, `root`, `dimension`, `dimension_value`, `metric_key`, `current_period` |
 | `scope_diff` | `Year`, `metric` |
-| `comparable_kpi_long` | `comparison_type`, `period_type`, `period`, `root`, `dimension`, `dimension_value`, `link_prior_year`, `link_current_year` (the link tag is required — the same year appears once per adjacent link it participates in, even though every link now shares one all-years-restricted population) |
-| `comparable_comparison_ytd` | `comparison_type`, `root`, `dimension`, `dimension_value`, `metric_key`, `current_period` (same shape as `comparison_yoy`/`comparison_ytd` — no link tag needed here: `current_period` already embeds `current_year`, and each consecutive-year link has a distinct `current_year`, so it can't collide across links) |
+| `comparable_kpi_long` | `comparison_type`, `period_type`, `period`, `root`, `dimension`, `dimension_value`, `link_prior_year`, `link_current_year` (the link tag is required — the same year appears once per adjacent link it participates in, even though every link within a kind shares one all-years-restricted population) |
+| `comparable_comparison_ytd` / `_yoy` | `comparison_type`, `root`, `dimension`, `dimension_value`, `metric_key`, `current_period` (same shape as `comparison_yoy`/`comparison_ytd` — no link tag needed here: `current_period` already embeds `current_year`, and each consecutive-year link has a distinct `current_year`, so it can't collide across links) |
+| `comparable_comparison_quarter` | Same as above **plus `quarter_number`** — needed because a given `current_period` can recur across different quarter numbers' independent year-sets |
 
 **Save modes:**
 
@@ -361,7 +371,7 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — comparabl
 - Each weekly run loads the **latest existing `run_date` partition on or before** the current run, appends only new merge keys, and writes the full merged result to this run's `run_date` partition.
 - Each `run_date` partition is therefore a self-contained snapshot of the full merged history as of that run.
 - Comparison tables (`comparison_yoy`/`comparison_ytd`) are **recomputed from the merged `kpi_long` history** after the kpi_long save, then overwritten wholesale — so a single-week refresh can still produce YoY vs last year. Disable with `recompute_comparisons_from_history: False`.
-- `comparable_kpi_long` is merged incrementally like `kpi_long`; `comparable_comparison_ytd` is then recomputed from the merged `comparable_kpi_long` (grouped by `link_prior_year`/`link_current_year` — see `rebuild_comparable_ytd_from_saved_rows`). A single-week refresh produces a comparable YTD comparison relative to prior saved history. Comparable is YTD-only.
+- `comparable_kpi_long` is merged incrementally like `kpi_long`; each enabled kind's `comparable_comparison_{ytd,yoy,quarter}` is then recomputed from the merged `comparable_kpi_long` (grouped by `link_prior_year`/`link_current_year`, and additionally `quarter_number` for `quarter` — see `rebuild_comparable_kind_from_saved_rows`). A single-week refresh can still produce a comparable comparison for any enabled kind relative to prior saved history.
 
 **Full refresh details:**
 - Replaces the **entire** Delta table — not "update 2026 inside a multi-year table."
@@ -399,7 +409,7 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — comparabl
 
 - **`yoy`** — last two full calendar/fiscal years.
 - **`ytd`** — each year's **elapsed window** (only the fiscal quarters fully closed as of `as_of_date` for the latest year — `fiscal.available_fiscal_quarters` — applied to every year) vs the prior year's same window, chained across consecutive years. Use instead of `yoy` once the current year is only partially reported, so a partial current year isn't compared against a full prior year.
-- Gates the `comparison_{kind}` (and, when `comparable_pairs.enabled=True` and `"ytd"` is selected, `comparable_comparison_ytd`) Delta tables + HTML comparison columns only. `kpi_long` is always built in full, including a `"ytd"` `period_type`.
+- Gates the `comparison_{kind}` Delta tables + HTML comparison columns only. `kpi_long` is always built in full, including a `"ytd"` `period_type`. Comparable pairs' own `comparable_comparison_{ytd,yoy,quarter}` tables are gated **independently**, purely by `comparable_pairs.enabled` + `comparable_pairs.kinds` — not coupled to this `comparisons.enabled` selection at all (see §3.6).
 - HTML rendering: `ytd`, if more than one consecutive-year pair exists, renders as several stacked mini comparison tables in one panel (one per year-pair) instead of a single table. `yoy` always renders as a single table.
 - A latest-week run can still produce e.g. YoY: with `save_mode="incremental"` + `recompute_comparisons_from_history=True`, selected comparisons are rebuilt from the full merged `kpi_long` (this run unioned onto prior saved runs). Needs a prior saved partition.
 - Invalid/empty selection fails loudly in `materialize()`. Env override: `KPI_COMPARISONS="yoy,ytd"`.
@@ -415,12 +425,19 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — comparabl
 
 There is no comparable QoQ/MoM/WoW — those aren't comparison kinds at all (see §3.5.1).
 
-**Pair-level under every `defined_scope.grain`, `"product"` included.** `scoped_daily` carries `store_id` straight from daily-data whatever the scope grain, so comparable always requires the *same product-store pairs* in every year — it does not degrade to a product-only match when the report's own scope is store-agnostic. Don't "restore" a grain-conditional key here: a comparable universe that silently weakens with the scope configuration is the bug this replaced.
+**Pair-level under every `defined_scope.grain`, `"product"` included.** `scoped_daily` carries `store_id` straight from daily-data whatever the scope grain, so comparable always requires the *same product-store pairs* in every year — it does not degrade to a product-only match when the report's own scope is store-agnostic just because `defined_scope.grain="product"`. Don't "restore" a grain-conditional key here: a comparable universe that silently weakens with the SCOPE configuration is the bug this replaced. (That's separate from `comparable_pairs.grain` below, which changes this deliberately, by its own config key.)
+
+**`comparable_pairs.grain` — what "same pair" means, independent of `defined_scope.grain`:**
+- `"product_store"` (default) — population is `(product_id, store_id)` pairs present in every qualifying year (the behaviour described above).
+- `"product"` — population is `product_id` values present in every qualifying year; every store of a qualifying product is then kept. Store-estate churn is NOT isolated. Use only when a pair-level intersection leaves too small a population.
+
+Only the store-side frames (`scoped_daily`/`inst_data`/`lost_base`/`scope_pairs`/`scope_pair_weeks`) are affected — `dc_daily`/`dc_inst` always keep their own `(product_id, warehouse_id)` universe regardless (no store dimension to drop).
 
 ```python
 "comparable_pairs": {
     "enabled": True,                       # default False
     "kinds": ["ytd", "yoy", "quarter"],    # default ["ytd"]
+    "grain": "product_store",              # default; "product" = same-pair population is product_id alone
 }
 ```
 
@@ -432,8 +449,8 @@ For `ytd`/`yoy`, the pair universe is computed ONCE, as the intersection across 
 All metric frames are restricted to this one all-years pair set and metrics recomputed for Overall and every slice (since slice dims are product attributes, no extra per-slice intersections needed).
 
 The restriction key is chosen **per frame**, from the columns that frame actually carries — not once globally:
-- `scoped_daily` → `(product_id, store_id)`, always.
-- `inst_data` / `lost_base` / `scope_pairs` / `scope_pair_weeks` → `(product_id, store_id)` when they have a store dimension (native `lost_sales_source.store_col`, or — for `scope_pairs`/`scope_pair_weeks` — a store-grain scope); otherwise the pair universe's **distinct products**. Collapsing to distinct products first is load-bearing: joining a store-less frame straight onto pair keys would fan its rows out one-per-store and multiply lost sales. Those frames keep product-level values; only their product universe is made like-for-like.
+- `scoped_daily` → `comparable_pairs.grain`'s own key columns: `(product_id, store_id)` under `"product_store"` (default), `product_id` alone under `"product"`.
+- `inst_data` / `lost_base` / `scope_pairs` / `scope_pair_weeks` → `(product_id, store_id)` when they have a store dimension (native `lost_sales_source.store_col`, or — for `scope_pairs`/`scope_pair_weeks` — a store-grain scope) **and** `comparable_pairs.grain="product_store"`; otherwise the pair universe's **distinct products**. Collapsing to distinct products first is load-bearing: joining a store-less frame straight onto pair keys would fan its rows out one-per-store and multiply lost sales. Those frames keep product-level values; only their product universe is made like-for-like.
 - `dc_daily` / `dc_inst` → each gets its OWN independent `(product_id, warehouse_id)` all-years intersection (two separate universes, not one shared). DC/warehouse inventory has no store dimension, so neither can ever share the store-side keys. Both are item-family-rolled to parent `product_id` (same id space as `scope_core`) and both come from `inventory_warehouse`, but `dc_inst` still doesn't reuse `dc_daily`'s universe: `dc_inst` 0-fills every day from a pair's first stocked day to the end of the report window, so a pair that stopped being stocked partway through still has rows — all stockouts — in later years where `dc_daily` has none. Its per-year universe is a superset of `dc_daily`'s, and reusing that intersection would delete exactly the sustained stockouts `dc_in_stock_rate` exists to surface. See README's "dc_instock" section.
 
 **Outputs:**
@@ -442,7 +459,7 @@ The restriction key is chosen **per frame**, from the columns that frame actuall
 - HTML report — a "Comparable (Like-for-Like)" section, visually divided from the regular comparison table above it: one consolidated wide table on the Annual (`yoy`) and YTD (`ytd`) tabs; **one narrow table per quarter number** on the Quarter tab (a single table mixing all 4 quarters would need too many value/delta columns to stay readable).
 - Notebook — a "Comparable pairs (like-for-like)" cell.
 
-**Single-week run and history:** `comparable_kpi_long` is merged incrementally (same as `kpi_long`). A single-week refresh can still produce a comparable YTD comparison **relative to prior saved `comparable_kpi_long` history** — even if the current window only spans one week. Recomputation from saved history (`rebuild_comparable_ytd_from_saved_rows`) is pure pandas grouped by `link_prior_year`/`link_current_year` — no Spark recomputation needed, since each link's rows already carry that link's own pair-restricted values. A comparable comparison is skipped for the current run only when fewer than 2 years are present *and* there is no saved history covering more.
+**Single-week run and history:** `comparable_kpi_long` is merged incrementally (same as `kpi_long`). A single-week refresh can still produce a comparable comparison for any enabled kind **relative to prior saved `comparable_kpi_long` history** — even if the current window only spans one week. Recomputation from saved history (`rebuild_comparable_kind_from_saved_rows`) is pure pandas grouped by `link_prior_year`/`link_current_year` (and `quarter_number` for `quarter`) — no Spark recomputation needed, since each link's rows already carry that link's own pair-restricted values. A given kind's comparison is skipped for the current run only when fewer than 2 qualifying years are present *and* there is no saved history covering more (`quarter`: fewer than 2 years where that quarter number is fully elapsed).
 
 ### 3.7 Run mode
 
@@ -488,10 +505,10 @@ Environment override: `KPI_RUN_MODE=html_only`
 **Root tab (only rendered when more than one root exists — see §3.4c).** With a single root (`"overall"` only, the common case with no root-producing `dimension_sources`), the report renders exactly as it always has — no extra tab layer, period tabs are the outermost level. With more than one root, an outer tab bar appears (one tab per root, e.g. Overall / NVROUT / COMP), each containing its own complete period-tab set below; **Metric Details** moves to be a peer of the root tabs instead of the period tabs in this case (it's root-independent — just metric definitions — so it's never duplicated per root).
 
 Each root's period tabs (six top-level tabs when it's the only/outermost level; five plus the shared Metric Details when nested under a root tab):
-- **Annual** — KPI table by year + YoY comparison (no comparable YoY — comparable is YTD-only)
-- **YTD** — KPI table by year over each year's elapsed (fully-closed-quarters) window + YTD comparison, stacked one mini-table per consecutive-year pair (+ comparable YTD when enabled)
-- **Quarter** — KPI table by fiscal quarter, **value trend only** (most recent N quarters, default 5) — no comparison table
-- **Monthly** — KPI table by month, **value trend only** (most recent N months, default 5) — no comparison table. Column header text is the real calendar month (e.g. "2026-Aug"), which can differ from the fiscal month *number* underlying the grouping — see §3.1's fiscal-calendar note.
+- **Annual** — KPI table by year + YoY comparison (+ comparable `yoy` when enabled — see §3.6)
+- **YTD** — KPI table by year over each year's elapsed (fully-closed-quarters) window + YTD comparison, stacked one mini-table per consecutive-year pair (+ comparable `ytd` when enabled)
+- **Quarter** — KPI table by fiscal quarter, **value trend only** (most recent N quarters, default 5, and only fully-elapsed quarters — see §3.1) — no regular comparison table (+ comparable `quarter`, one narrow table per quarter number, when enabled)
+- **Monthly** — KPI table by month, **value trend only** (most recent N months, default 5, and only fully-elapsed months — see §3.1) — no comparison table. Column header text is the real calendar month (e.g. "2026-Aug"), which can differ from the fiscal month *number* underlying the grouping — see §3.1's fiscal-calendar note.
 - **Weekly** — KPI table for the **most recent N fiscal weeks** (default 5; sorted by `week_start_date`), **value trend only** — no comparison table
 - **Metric Details** — plain-English definition, store scope, and formula for every active metric (single root only; a peer of the root tabs, not the period tabs, when there's more than one root)
 
@@ -770,9 +787,11 @@ trim_periods_to_recent → produces ctx.kpi_long_display (HTML rendering ONLY) t
                           (no trim setting for ytd — always shows every year present)
 build_comparisons → yoy/ytd pandas tables, per root × cut (ytd: one row set per year-pair,
                      chained across consecutive years). No qoq/mom/wow comparison table exists.
-build_comparable_pairs → comparable_kpi_long + comparable_comparison_ytd, per root × cut (when
-                          enabled; YTD-only, ONE all-years pair restriction shared by every link,
-                          computed once against the overall population, not per root — see §3.6)
+build_comparable_pairs → comparable_kpi_long + comparable_comparison_{ytd,yoy,quarter} (one per
+                          enabled comparable_pairs.kinds entry), per root × cut (when enabled; ONE
+                          all-years pair restriction PER KIND shared by every link within it,
+                          computed once against the overall population, not per root; store-side
+                          grain is comparable_pairs.grain — see §3.6)
 build_scope_diff → scope_diff pandas table (defined vs score; only when run_scope_diff=True)
 save_outputs → kpi_long (incremental) → recompute comparisons from merged history → save all
 render_kpi_html → standalone HTML file
@@ -807,7 +826,10 @@ render_kpi_html → standalone HTML file
 | `html_only` fails on load | Output tables not at `.../run_date={OUTPUT_RUN_DATE}/` — run full save first or set `output.run_date` |
 | Weekly tab looks wrong with sparse weeks | The display trim (`weekly_display_weeks`) shows the N most recent weeks present in `kpi_long`, not necessarily consecutive fiscal weeks. There's no WoW comparison table to be affected by this — QoQ/MoM/WoW aren't comparison kinds (see §3.5.1). |
 | YTD shows nothing for a slice | The whole run has fewer than 2 years present — degrades to "no comparison," not an error; the `"ytd"` period_type rows in `kpi_long` still show whatever data exists |
-| Comparable YTD skipped | Fewer than 2 years available in the current run window AND no saved `comparable_kpi_long` history covering them yet. Also skipped if `"ytd"` isn't in `comparisons.enabled` — comparable is YTD-only. |
+| A comparable kind (`ytd`/`yoy`/`quarter`) is skipped | Fewer than 2 qualifying years available in the current run window AND no saved `comparable_kpi_long` history covering them yet (`quarter`: fewer than 2 years where that quarter number is fully elapsed). NOT gated by `comparisons.enabled` — that coupling is gone; only `comparable_pairs.enabled` + `comparable_pairs.kinds` control it (§3.6). |
+| Comparable pairs population smaller than expected, or `comparable_pair_count` low | Check `comparable_pairs.grain` — under default `"product_store"`, a product opening/closing at even one store between compared years drops that store's pair from the WHOLE population for that kind. Set `grain: "product"` to compare at product level instead (store-estate churn then isn't isolated) — see §3.6. |
+| Quarter/Monthly trend tab's most recent row disappeared after upgrading, no config change | Expected, one-time — that period hadn't actually fully elapsed; now correctly excluded instead of showing a partial quarter/month beside full ones. See §3.1 "Complete periods only." Re-run with `allow_overwrite_existing=True` (or `full_refresh`) if a stale partial-period row from before the fix is still saved. |
+| `ctx.available_fiscal_quarters` (YTD's quarter selection) changed after upgrading, no config change | Expected, one-time — the "is this quarter fully elapsed" check was previously trivially true for any quarter present in the window (a real bug, now fixed) and never actually excluded an in-progress quarter. See §3.1 "Complete periods only." |
 | Monthly tab missing from HTML | Monthly period type may not be present in `kpi_long` — check `Fiscal_Month` is derived (requires fiscal calendar upload or daily data with civil month fallback) |
 | YTD tab missing or empty from HTML | No `"ytd"` `period_type` rows in `kpi_long` — check `ctx.available_fiscal_quarters` isn't empty (would mean even the latest year's Q1 hasn't fully closed as of `as_of_date`) |
 | HTML report header shows wrong reporting-window start date | Header was reading `REPORT_START_DATE` (raw Jan-1-anchored) instead of `EFFECTIVE_REPORT_START_DATE` (incorporating `run_min_date`) — now fixed. If you set `run_min_date` to narrow the window, the header now correctly reflects the effective start. |
@@ -826,7 +848,8 @@ render_kpi_html → standalone HTML file
 |-------|--------------|
 | `fiscal_cal` | date → Year/Week lookup |
 | `fiscal_week` | Year/Week → week_start/end/Fiscal_Quarter/Fiscal_Month |
-| `available_fiscal_quarters` | fiscal-quarter numbers fully closed as of `REPORT_END_DATE` for the latest year — the YTD elapsed-window set, applied to every year |
+| `available_fiscal_quarters` | fiscal-quarter numbers fully closed as of `REPORT_END_DATE` for the latest year — the YTD elapsed-window set, applied to every year. Delegates to `complete_fiscal_periods` below (fixed this session — previously read clipped `ctx.fiscal_week` bounds, so the "closed" check was trivially always true; see §3.1) |
+| `complete_fiscal_periods` | `{"Fiscal_Quarter": df, "Fiscal_Month": df}` — the `(Year, period)` pairs fully elapsed on BOTH window edges (unclipped fiscal calendar), from `fiscal.complete_fiscal_periods`. Semi-joined onto every metric frame by `kpi_long._drop_incomplete_periods` for the Quarter/Monthly trend tabs (§3.1). `None` in `html_only` mode (fiscal.py never runs). |
 | `products_attr` | broadcast: product_id, cogs, price, ALL dimension columns (cuts + root-defining) |
 | `active_slice_dimensions` | every validated dimension column (slices + dimension_sources) — includes root-defining columns; used to build `products_attr`/`product_dims` and by `scope_debug.py`. NOT what the KPI step iterates for cuts — see `cut_dimensions`. |
 | `cut_dimensions` | `active_slice_dimensions` minus root-defining columns — what `kpi_long`/comparisons/HTML actually iterate as cuts within every root (§3.4c) |
@@ -841,9 +864,9 @@ render_kpi_html → standalone HTML file
 | `comparison_yoy/ytd` | full comparison long-format DataFrames, per root × cut (ytd can carry multiple year-pair rows per metric). No qoq/mom/wow — not comparison kinds. |
 | `yoy_display/ytd_display` | display-format DataFrames (overall); for ytd this is just the **latest** consecutive-year pair — see `comparison_ytd` for the full multi-pair detail |
 | `scope_diff` | defined vs score annual diff (when `run_scope_diff=True`) |
-| `comparable_kpi_long` | like-for-like per-link YTD rows, tagged with `link_prior_year`/`link_current_year` (when `comparable_pairs.enabled=True`) |
-| `comparable_comparison_ytd` | like-for-like YTD comparison DataFrame. Comparable is YTD-only — no comparable_comparison_yoy/qoq/mom/wow. |
-| `comparable_ytd_display` | like-for-like YTD display DataFrame (latest link) |
+| `comparable_kpi_long` | like-for-like per-link rows for EVERY enabled `comparable_pairs.kinds` entry, tagged by `comparison_type` (`"ytd"`/`"yoy"`/`"quarter"`) + `link_prior_year`/`link_current_year` (+ `quarter_number` for quarter rows) (when `comparable_pairs.enabled=True`) |
+| `comparable_comparison_ytd` / `comparable_comparison_yoy` / `comparable_comparison_quarter` | one comparison DataFrame per enabled kind (same shape as `comparison_ytd`/`comparison_yoy`; `quarter` additionally keyed on `quarter_number`). Populated only for kinds in `comparable_pairs.kinds`; the others stay `None`. |
+| `comparable_ytd_display` / `comparable_yoy_display` / `comparable_quarter_display` | display DataFrame per enabled kind (ytd/yoy: latest link; quarter: latest link per quarter number) |
 | `save_plan` | SavePlan from last save_outputs call |
 
 For a quick distinct product/store count of the final scope (overall + per slice) without running the KPI step, use `runner.scope_debug_summary()` — see §3.3a.
@@ -933,7 +956,7 @@ For a quick distinct product/store count of the final scope (overall + per slice
 11. **Speed-cluster table shape is config, not auto-detected** — `speed_cluster_format` must match the actual source table (`"long"` attribute_name/attribute_value vs `"wide"` a direct cluster column); pointing at the wrong shape fails loudly on read rather than silently returning nulls.
 12. **Comparisons recomputed from merged history** — under incremental, `comparison_*` tables reflect the full saved `kpi_long` history, not just the current run window.
 13. **`ctx.kpi_long` is never trimmed; only `ctx.kpi_long_display` is** — the HTML display trim (`*_display_*` settings) must only ever write to `kpi_long_display`. Trimming `ctx.kpi_long` itself would silently truncate what `save_outputs()` persists, since `main.ipynb` calls `runner.run(save=False)` then `save_outputs(ctx, ...)` separately in a later cell — this was a real, previously-shipped bug.
-14. **Comparable-pairs (YTD-only) restriction is a single universe fixed across the whole window, shared by every consecutive-year link** — a pair/product must be present in EVERY year in the run window to count at all, computed once (not per link). This means the same year's metric value is now identical across every link it participates in — `comparable_kpi_long` rows still carry `link_prior_year`/`link_current_year`, but only so incremental merge doesn't collide two links' rows for the same year under one key, not because the values differ by link.
+14. **Comparable-pairs restriction is a single universe PER KIND, fixed across that kind's own qualifying years, shared by every consecutive-year link within it** — for `ytd`/`yoy` a pair/product must be present in EVERY year in the run window to count at all; for `quarter`, independently per quarter number, in every year where that quarter is fully elapsed. Each kind computes this once (not per link), so the same year's metric value is identical across every link it participates in **within that kind** — `yoy`/`quarter` and `ytd` do NOT share one universe with each other. `comparable_kpi_long` rows still carry `link_prior_year`/`link_current_year` (+ `quarter_number` for `quarter`), but only so incremental merge doesn't collide two links' rows for the same year under one key, not because the values differ by link. The store-side population's own grain (`(product_id, store_id)` vs `product_id` alone) is `comparable_pairs.grain`, independent of `defined_scope.grain` — see §3.6/§22.
 15. **Dimension sources fail loudly** — unlike `slices.derived_dimensions` (skipped on error), an enabled `dimension_sources` entry always raises on bad path/column/expression.
 16. **`dimension_sources` columns are ALWAYS roots, never cuts** — mutually exclusive with `slices` by design. A dimension_source column is unconditionally excluded from `ctx.cut_dimensions` even if nothing lists it as a root explicitly (auto-discovery still applies); do not expect it to show up as a flat breakdown alongside brand/SMW.
 17. **A fiscal calendar's month/quarter NUMBER is not assumed to equal the real calendar month/quarter** — `fiscal_calendar.column_map` reads a client's own quarter/month columns when present, but the Monthly tab's *display label* is never derived by feeding a fiscal month number into a month-name table (a client's fiscal year can be offset from the civil calendar, e.g. tbretail's Feb–Jan year, so fiscal month 07 can span real August). The label is instead derived from the majority real calendar month by day count across each fiscal month's actual dates when `month_name_col` isn't configured — see §3.1.
@@ -941,3 +964,5 @@ For a quick distinct product/store count of the final scope (overall + per slice
 19. **DC/warehouse scope restriction must include the week dimension, not just product_id** — `build_dc_daily` restricts on `(product_id, Year, Week)` against `scope_core`, attaching `Year`/`Week` to DC rows (via the fiscal calendar join) **before** the scope semi-join. Under `product_store_week` grain, scope membership varies by week; restricting on `product_id` alone (dropping `Year`/`Week` first) previously let a product's DC inventory leak into weeks it had fallen out of scope — inflating `WOS_DC`/`WOS_TOTAL`/`dc_mean_stock`/`total_mean_stock` for those weeks. Fixed 2026-09-16. No effect under `"product"`/`"product_store"` grain (scope is uniform across every week there already). Any new store-less input frame (§5 "Add a new input frame") must follow the same pattern.
 20. **DC/warehouse frames restrict against `scope_core` in the SAME id space they were built in — item-family-rolled to parent `product_id`, not raw.** `scope_core`/`defined_scope` is already parent-rolled at its own source (its producer maps `product_id -> coalesce(parent_id, product_id)` via `item_family`'s `is_main=false` rows before writing the scope table). `build_dc_daily` and `build_dc_inst` both read `inventory_warehouse` through the same shared `pipeline._get_inventory_warehouse_parent_rolled` helper (which applies `_roll_to_item_family_parent`) before restricting to `scope_core` — fixed 2026-09-17. Previously `build_dc_daily` restricted RAW `product_id` against the parent-rolled `scope_core`, silently dropping any DC inventory sitting on a superseded/child `product_id`. This is unconditional (NOT gated by `dc_instock.enabled`): `path_segments.item_family` must point at a real table any time `path_segments.inventory_warehouse` does, and `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL` will shift for any family with inventory split across old/current item codes. Any new DC-adjacent input frame (§5) must roll to parent `product_id` the same way before restricting to `scope_core`.
 21. **`dc_in_stock_rate` bounds each pair's grid by that pair's own first `inventory_warehouse` row — never by a scope table's `start_date`, and never by a flat window shared across pairs.** This deliberately matches how `daily_data_expanded` bounds the store-level in-stock denominator, keeping both in-stock series on one definition. Consequences, both expected: a pair ranged at a DC but never once stocked inside the window is **absent** from the metric rather than reading 0%; a pair that stops being stocked mid-window keeps accruing stockout days through `REPORT_END_DATE`. Changed 2026-09-18 — the previous scope-derived grid (`operation/scope` + a go-live-floor rewrite) was removed entirely, along with `path_segments.dc_scope`, `input_filters.dc_scope` and `dc_scope_source`. See README's "dc_instock" section.
+22. **`comparable_pairs.grain` is a SEPARATE grain from `defined_scope.grain`, never conflated with it.** `defined_scope.grain` decides scope membership (which rows are in the report at all); `comparable_pairs.grain` decides what "the same pair across years" means for the like-for-like population only, and only when comparable pairs is enabled. `"product_store"` (default) intersects `(product_id, store_id)`; `"product"` intersects `product_id` alone, keeping every store of a qualifying product. Resolved once via `comparable.py`'s `_GRAIN_PAIR_KEYS` and threaded through `_build_comparable_kind`/`_restrict_frames`. Only the store-side frames are affected (`scoped_daily`/`inst_data`/`lost_base`/`scope_pairs`/`scope_pair_weeks`) — `dc_daily`/`dc_inst` always keep their own `(product_id, warehouse_id)` universe regardless, since DC/warehouse has no store dimension to drop in the first place. See §3.6.
+23. **Quarter/Monthly `kpi_long` rows only exist for FULLY ELAPSED periods — checked on both window edges, via the unclipped fiscal calendar, not `ctx.fiscal_week`.** `fiscal.complete_fiscal_periods(ctx, period_col)` re-reads the fiscal calendar without the `[EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE]` clip `ctx.fiscal_week` carries, then `kpi_long._drop_incomplete_periods` semi-joins it onto every metric frame in `_period_frames`'s `"quarter"`/`"monthly"` branches — so an in-progress trailing quarter/month (or one truncated by a `run_min_date` not on a period boundary) never enters `kpi_long`, and therefore never gets saved. `REPORT_END_DATE` itself is unchanged; this is additive. Do NOT read period bounds from `ctx.fiscal_week` for any future completeness check — that was the exact bug in `fiscal._compute_available_fiscal_quarters` (YTD's own quarter-availability check) fixed this session: `ctx.fiscal_week` is already window-clipped, so any bounds check against it is trivially true for every period present at all. `comparable.py`'s `_complete_quarter_years` got this right from the start and was the template for the fix. See §3.1.
