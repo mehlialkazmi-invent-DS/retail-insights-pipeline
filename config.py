@@ -410,11 +410,15 @@ CONFIG: Dict[str, Any] = {
     # it on can shift historical numbers for any product with a supersede history.
     # lost_sales defaults OFF -- report_dfu already does its own supersede substitution upstream,
     # so a second rollup here would likely be a no-op; kept available as an opt-in safety net.
-    # Requires path_segments.item_family whenever any of the three is True.
+    # defined_scope defaults OFF for the same reason -- a client's scope source may already be
+    # rolled to parent product_id upstream (as tbretail's is); this is an opt-in safety net for a
+    # client whose scope source isn't. Requires path_segments.item_family whenever any of the
+    # four is True.
     "item_family_rollup": {
         "daily_data": True,
         "lost_sales": False,
         "inventory_warehouse": True,
+        "defined_scope": False,
     },
     # ---------------------------------------------------------------------------
     # DC INSTOCK — gated: DC in-stock rate from an expanded inventory_warehouse grid
@@ -882,6 +886,8 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
         ifr["lost_sales"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_LOST_SALES"])
     if "KPI_ITEM_FAMILY_ROLLUP_INVENTORY_WAREHOUSE" in os.environ:
         ifr["inventory_warehouse"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_INVENTORY_WAREHOUSE"])
+    if "KPI_ITEM_FAMILY_ROLLUP_DEFINED_SCOPE" in os.environ:
+        ifr["defined_scope"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_DEFINED_SCOPE"])
 
     op = out.setdefault("output", {})
     if "KPI_SAVE_OUTPUTS" in os.environ:
@@ -1050,6 +1056,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "daily_data": bool(item_family_rollup_cfg.get("daily_data", True)),
         "lost_sales": bool(item_family_rollup_cfg.get("lost_sales", False)),
         "inventory_warehouse": bool(item_family_rollup_cfg.get("inventory_warehouse", True)),
+        "defined_scope": bool(item_family_rollup_cfg.get("defined_scope", False)),
     }
 
     dc_instock_cfg = cfg.get("dc_instock", {}) or {}
