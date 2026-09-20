@@ -1540,12 +1540,9 @@ def render_kpi_html(
         "weekly": None,
     }
 
-    # Gated comparable (like-for-like) comparison tables — one per comparable_pairs.kinds entry
-    # (ytd/yoy/quarter, see config.py) — rendered as consolidated wide value+delta table(s) on
-    # each kind's own tab when comparable_pairs was enabled and data is present (else
-    # _comparable_wide_html/_comparable_quarter_section_html are no-ops on an empty/None frame).
-    # comparable_kpi_long is now a SHARED table across every enabled kind, tagged by its own
-    # comparison_type column -- split it per kind here so each tab only sees its own rows.
+    # Gated comparable (like-for-like) tables, one per comparable_pairs.kinds entry (config.py) --
+    # comparable_kpi_long is a SHARED table tagged by comparison_type, split per kind here so each
+    # tab only sees its own rows. No-ops on an empty/None frame when disabled or no data.
     _full_comparable_kpi_long = getattr(ctx, "comparable_kpi_long", None)
 
     def _comparable_kpi_long_for(comparison_type: str) -> Optional[pd.DataFrame]:

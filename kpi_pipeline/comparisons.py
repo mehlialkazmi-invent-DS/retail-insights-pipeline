@@ -1,7 +1,7 @@
 """YoY / YTD comparison tables (overall + slice dimensions) and defined-vs-score diff.
 
 YoY compares the latest two full years present. YTD compares each year's elapsed
-(fully-closed-quarters) window against the prior year's same window, chained across every
+(fully-closed-months) window against the prior year's same window, chained across every
 consecutive pair of years present (e.g. also 2025 YTD vs 2024 YTD if a third year exists).
 """
 
@@ -215,7 +215,7 @@ def ytd_comparison_long(
     dimension: str,
     dimension_value: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Each year's elapsed (fully-closed-quarters) window vs the prior year's same window,
+    """Each year's elapsed (fully-closed-months) window vs the prior year's same window,
     chained across every consecutive pair of years present (2026 YTD vs 2025 YTD, 2025 YTD vs
     2024 YTD, ...). A single-year window produces no comparison."""
     pairs_with_display: List[Tuple[Any, pd.DataFrame, pd.DataFrame]] = []

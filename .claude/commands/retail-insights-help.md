@@ -419,7 +419,7 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — those are
 
 **Gated, opt-in** (default off). Metrics are recomputed over **only the pairs present in EVERY qualifying year**, then compared. Isolates like-for-like movement from mix shifts caused by new/closed pairs. Three independent kinds, selected via `comparable_pairs.kinds`:
 
-- **`ytd`** — pairs present in every window year, on each year's elapsed (fully-closed-quarters) window. Chains every consecutive year pair.
+- **`ytd`** — pairs present in every window year, on each year's elapsed (fully-closed-months) window. Chains every consecutive year pair.
 - **`yoy`** — pairs present in every window year, on the FULL window year (not the YTD-elapsed subset). Chains every consecutive year pair too (not just the latest two, unlike the regular non-comparable YoY). Window-boundary years can themselves be partial — same accepted behaviour as the regular Annual/YoY tab, not something this corrects for.
 - **`quarter`** — computed INDEPENDENTLY per quarter number. For quarter Q, only years where Q falls **entirely inside the report window** count (`_complete_quarter_years` in `comparable.py`) — `REPORT_END_DATE` is a week boundary, never quarter-aligned, so the in-progress "current" quarter would otherwise be silently compared as if complete against a full prior-year quarter. Mirrors the same "fully elapsed" guard `ytd`'s own elapsed-period check already uses (`fiscal.py`'s `available_fiscal_months` — same helper, but at MONTH grain, not quarter grain), generalized here to check both window boundaries for an arbitrary quarter and year. A pair common across years for Q1 says nothing about Q2 — fully independent populations.
 
@@ -506,7 +506,7 @@ Environment override: `KPI_RUN_MODE=html_only`
 
 Each root's period tabs (six top-level tabs when it's the only/outermost level; five plus the shared Metric Details when nested under a root tab):
 - **Annual** — KPI table by year + YoY comparison (+ comparable `yoy` when enabled — see §3.6)
-- **YTD** — KPI table by year over each year's elapsed (fully-closed-quarters) window + YTD comparison, stacked one mini-table per consecutive-year pair (+ comparable `ytd` when enabled)
+- **YTD** — KPI table by year over each year's elapsed (fully-closed-months) window + YTD comparison, stacked one mini-table per consecutive-year pair (+ comparable `ytd` when enabled)
 - **Quarter** — KPI table by fiscal quarter, **value trend only** (most recent N quarters, default 5, and only fully-elapsed quarters — see §3.1) — no regular comparison table (+ comparable `quarter`, one narrow table per quarter number, when enabled)
 - **Monthly** — KPI table by month, **value trend only** (most recent N months, default 5, and only fully-elapsed months — see §3.1) — no comparison table. Column header text is the real calendar month (e.g. "2026-Aug"), which can differ from the fiscal month *number* underlying the grouping — see §3.1's fiscal-calendar note.
 - **Weekly** — KPI table for the **most recent N fiscal weeks** (default 5; sorted by `week_start_date`), **value trend only** — no comparison table
