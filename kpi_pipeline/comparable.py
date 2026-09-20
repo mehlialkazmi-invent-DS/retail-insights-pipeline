@@ -1,59 +1,46 @@
 """Gated 'comparable pairs' (like-for-like) comparisons — ytd / yoy / quarter.
 
 Each enabled kind (see config.py's comparable_pairs.kinds / COMPARABLE_KINDS_ALL) recomputes
-metrics over only the pairs present in EVERY qualifying year — a pair must survive across every
-year that kind considers, not just the two years of a given link — then compares each
-consecutive-year link within that shared population:
+metrics over only the pairs present in EVERY qualifying year for that kind -- not just the two
+years of a given link -- then compares each consecutive-year link within that shared population:
 
-  ytd     — pairs present in every year of the run window, compared on each year's elapsed
-            (fully-closed-quarters) window. Chained across every consecutive pair of years.
-  yoy     — pairs present in every year of the run window, compared on the FULL window year (not
-            the YTD-elapsed subset — a real, larger population). Like the regular non-comparable
-            Annual/YoY tab, the earliest and latest window years can themselves be partial (a
-            run_min_date or as_of_date that doesn't fall on Jan 1 / Dec 31) -- this is accepted,
-            existing behaviour for "annual", not something comparable-yoy corrects for. Chained
-            across every consecutive pair of years, same as ytd (not just the latest two, unlike
-            the regular non-comparable YoY comparison in comparisons.py).
-  quarter — computed independently PER QUARTER NUMBER: for quarter Q, only years where quarter Q
-            falls ENTIRELY inside the report window are considered (see _complete_quarter_years —
-            unlike yoy, a partial quarter at either window boundary is excluded outright, since
-            REPORT_END_DATE is a week boundary that essentially never aligns to a quarter
-            boundary, making the "current" quarter partial on almost every run). A pair must be
-            present in quarter Q of EVERY one of those complete years (not the whole year) to
-            count. Chained across consecutive years within that quarter's own year-set. A pair
-            common across years for Q1 says nothing about whether it's also common for Q2 — each
-            quarter number has a fully
-            independent population.
+  ytd     — pairs present in every window year, compared on each year's elapsed (fully-closed-
+            months) window, chained across every consecutive pair of years.
+  yoy     — pairs present in every window year, compared on the full window year (including a
+            partial first/last year, same accepted behaviour as the regular non-comparable
+            Annual/YoY tab), chained across every consecutive pair of years (not just the latest
+            two, unlike the regular non-comparable YoY comparison in comparisons.py).
+  quarter — computed independently PER QUARTER NUMBER: for quarter Q, only years where Q falls
+            entirely inside the report window count (see _complete_quarter_years -- a partial
+            quarter at either window boundary is excluded outright, since REPORT_END_DATE is a
+            week boundary that essentially never aligns to a quarter boundary). A pair must be
+            present in quarter Q of every one of those years; each quarter number has its own
+            fully independent population and year-chain.
 
 The same-pairs population's own grain is comparable_pairs.grain (config.py), NOT defined_scope.grain:
 
-  "product_store" (default) — the universe is the (product_id, store_id) pairs present in every
-            qualifying year. Used under EVERY defined_scope.grain, product-grain included:
-            scoped_daily comes straight from daily-data and is store-level whatever the scope
-            grain, so like-for-like means the same pairs present in every year regardless of how
-            the report's own scope is defined.
-  "product" — the universe is the product_ids present in every qualifying year, and every store of
-            a qualifying product is kept. Store-estate churn is then NOT isolated (a product that
-            gained or lost stores between the compared years still moves the metrics); use it only
-            when a pair-level intersection leaves too small a population to be meaningful.
+  "product_store" (default) — (product_id, store_id) pairs present in every qualifying year, used
+            under EVERY defined_scope.grain: scoped_daily comes straight from daily-data and is
+            store-level whatever the scope grain, so like-for-like still means the same pairs
+            present in every year regardless of how the report's own scope is defined.
+  "product" — product_ids present in every qualifying year; every store of a qualifying product is
+            kept, so store-estate churn is NOT isolated. Use only when a pair-level intersection
+            leaves too small a population to be meaningful.
 
-Frames that carry no store_id of their own are restricted to that universe's distinct products
-instead (as is every frame under grain="product"), and dc_daily/dc_inst each keep their own
-independent (product_id, warehouse_id) universe under both grains. See _restrict_frames's
-docstring.
+Frames with no store_id of their own are restricted to that universe's distinct products instead
+(as is every frame under grain="product"); dc_daily/dc_inst each keep their own independent
+(product_id, warehouse_id) universe under both grains. See _restrict_frames's docstring.
 
-A comparable comparison for a given kind is produced only when it has at least 2 qualifying years
-(quarter: at least 2 years having that quarter number) — gracefully skipped otherwise. Gated overall
-by comparable_pairs.enabled; per-kind by comparable_pairs.kinds.
+Produced for a kind only with >=2 qualifying years (quarter: >=2 years with that quarter number),
+gracefully skipped otherwise. Gated overall by comparable_pairs.enabled, per-kind by
+comparable_pairs.kinds.
 
-Each link's rows in comparable_kpi_long carry link_prior_year/link_current_year, kept so
-incremental save's row key (period_type, period, root, dimension, dimension_value,
-link_prior_year, link_current_year) doesn't collide across links -- a given year appears in up to
-two links (as current in one, prior in the next), and even though both links share the same
-restricted population, the merge key still needs the tag to tell those rows apart. Quarter rows
-additionally carry a plain (non-key) quarter_number column so the HTML renderer can group by it —
-period_type ("quarter") + period ("2024-Q1"-style) already disambiguate every quarter/year
-combination in the row key without needing quarter_number there too.
+comparable_kpi_long rows carry link_prior_year/link_current_year so the incremental-save row key
+(period_type, period, root, dimension, dimension_value, link_prior_year, link_current_year)
+doesn't collide across links -- a year appears as "current" in one link and "prior" in the next,
+both sharing the same restricted population, and the link tag is what tells those rows apart.
+Quarter rows also carry a plain (non-key) quarter_number column for the HTML renderer to group by
+-- period_type ("quarter") + period ("2024-Q1"-style) already disambiguate the row key on their own.
 """
 
 from __future__ import annotations

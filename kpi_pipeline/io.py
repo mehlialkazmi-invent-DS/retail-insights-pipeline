@@ -72,21 +72,17 @@ class SavePlan:
 
 
 TABLE_ROW_KEYS: Dict[str, Sequence[str]] = {
-    # "root" included everywhere dimension/dimension_value appears: a cut's own breakdown is
-    # computed independently within every root (e.g. "brand"="KNG" exists once under root=
-    # "overall" and again under root="nvrout", each a genuinely different row) -- without root in
-    # the key, those would collide as if they were the same row. See kpi_pipeline/kpi_long.py.
+    # "root" is in every key with dimension/dimension_value: a cut's breakdown is computed
+    # independently per root (e.g. "brand"="KNG" under root="overall" and again under
+    # root="nvrout" are different rows) -- omitting root would collide them.
     "kpi_long": ("period_type", "period", "root", "dimension", "dimension_value"),
     "comparison_yoy": ("comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period"),
     "comparison_ytd": ("comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period"),
     "scope_diff": ("Year", "metric"),
-    # link_prior_year/link_current_year included: the same year appears once per adjacent link
-    # it participates in (as "current" in one, "prior" in the next) even though every link now
-    # shares the same all-years-restricted pair population -- the link tag is what tells those
-    # two occurrences of the same year apart under this row key, not a value difference.
-    # period_type + period already disambiguate every quarter number for the "quarter" kind
-    # ("quarter" + "2024-Q1" vs "quarter" + "2024-Q2"), so quarter_number doesn't need to be a
-    # key column too -- it's carried as a plain column for the HTML renderer's convenience.
+    # link_prior_year/link_current_year included: the same year appears once as "current" and once
+    # as "prior" across adjacent links (same all-years-restricted population) -- the link tag is
+    # what distinguishes those two rows. quarter_number isn't needed in the key: period_type+period
+    # ("quarter"+"2024-Q1") already disambiguates it; kept as a plain column for the HTML renderer.
     "comparable_kpi_long": (
         "comparison_type", "period_type", "period", "root", "dimension", "dimension_value",
         "link_prior_year", "link_current_year",
@@ -97,9 +93,8 @@ TABLE_ROW_KEYS: Dict[str, Sequence[str]] = {
     "comparable_comparison_yoy": (
         "comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period",
     ),
-    # quarter_number included: "current_period" alone ("2024 Q1" vs "2024 Q2") already disambiguates
-    # in practice, but the explicit key column keeps this table's key symmetric with how
-    # comparable_kpi_long disambiguates quarters, rather than relying on a display-label format.
+    # quarter_number included here (unlike comparable_kpi_long) to keep the key symmetric rather
+    # than relying on current_period's display-label format to disambiguate quarters.
     "comparable_comparison_quarter": (
         "comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period",
         "quarter_number",

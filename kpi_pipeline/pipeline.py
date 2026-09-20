@@ -217,23 +217,17 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
     if s.get("INSTOCK_SOURCE_ENABLED", False):
         instock_raw = read_instock_source(ctx.spark, s, quiet=True)
         instock_agg = _aggregate_instock_pairweek(ctx, instock_raw, start, end)
-        # store_id only goes in the join key when BOTH sides actually have it -- a real
-        # per-store match. When only instock_agg lacks it, dropping store_id from the join key
-        # lets the regular (non-semi) join broadcast instock_agg's ratio across deduped's own
-        # (real, per-store) rows -- safe, same mechanism documented in _aggregate_instock_pairweek
-        # (in_stock_days/total_days is a ratio; summing a repeated broadcast value then dividing
-        # reproduces the original ratio).
+        # store_id only enters the join key when BOTH sides have it (a real per-store match). If
+        # only instock_agg lacks it, drop store_id from the join key so the regular join
+        # broadcasts instock_agg's ratio across deduped's real per-store rows -- safe, since
+        # in_stock_days/total_days is a ratio (repeated-broadcast-then-divide reproduces it).
         #
-        # The OTHER direction is not safe the same way: if deduped itself has no store_id
-        # (lost_sales_source is store-less), letting instock_agg's own store rows fan deduped
-        # OUT via a bare (product, week) join would duplicate deduped's lost_sales -- an
-        # ABSOLUTE COUNT, not a ratio (see _aggregate_lost_sales_pairweek's CAUTION) -- once per
-        # instock store, silently inflating any later sum across stores, using a store set that
-        # comes from incidental instock coverage rather than the report's actual scope. Roll
-        # instock_agg DOWN to deduped's own (product, week) grain instead (re-summing preserves
-        # the ratio, same reasoning as the broadcast direction above), so this join always stays
-        # 1:1 and deduped's store-less grain -- and its later, scope-driven broadcast in
-        # build_pipeline_frames -- is left untouched.
+        # The reverse is NOT safe: if deduped itself has no store_id (lost_sales_source is
+        # store-less), a bare (product, week) join would fan deduped's lost_sales -- an ABSOLUTE
+        # COUNT, not a ratio (see _aggregate_lost_sales_pairweek's CAUTION) -- out once per
+        # instock store, inflating any later sum. Roll instock_agg DOWN to deduped's own
+        # (product, week) grain instead, keeping the join 1:1 and deduped's store-less grain
+        # untouched.
         if "store_id" not in deduped.columns and "store_id" in instock_agg.columns:
             instock_agg = instock_agg.groupBy("product_id", "week_start_date").agg(
                 F.sum("in_stock_days").alias("in_stock_days"),

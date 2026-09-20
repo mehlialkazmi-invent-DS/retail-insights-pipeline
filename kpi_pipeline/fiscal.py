@@ -135,28 +135,19 @@ def _read_fiscal_cal_upload(
 
 def _compute_available_fiscal_months(ctx: KPIContext) -> List[int]:
     """Fiscal-month numbers fully elapsed (as of REPORT_END_DATE) for the latest year in the
-    report window. Applied identically to every year for the "ytd" period (see kpi_long.py) so
-    the YTD comparison stays apples-to-apples once the current year is only partially reported —
-    e.g. if only fiscal months 01-07 have fully closed for the latest year, YTD sums months
-    01-07 for every year, not the calendar-to-date weeks of an in-progress month 08.
+    report window, applied identically to every year so YTD stays apples-to-apples once the
+    current year is only partially reported (e.g. months 01-07 closed -> YTD sums 01-07 for
+    every year, not the in-progress month 08).
 
-    Month-grain, not quarter-grain: a quarter still in progress can still have one or more of its
-    own months already fully closed (e.g. Q3 in progress, but its first month is done) -- using
-    quarter-grain here would understate YTD by up to two months' worth of otherwise-complete data
-    every time the "current" quarter is in progress, which is virtually always (REPORT_END_DATE is
-    a week boundary, essentially never a quarter boundary).
+    Month-grain, not quarter-grain: a quarter in progress can still have already-closed months
+    (e.g. Q3 in progress but its first month done) -- quarter-grain would understate YTD by up to
+    two months every time the current quarter is in progress, which is virtually always
+    (REPORT_END_DATE is a week boundary, essentially never a quarter boundary).
 
-    Handles a single-year or single-month report window the same way — it only looks at the
-    latest year's own weeks, so nothing else needs to exist.
-
-    Delegates to complete_fiscal_periods -- NOT ctx.fiscal_week directly. ctx.fiscal_week is
-    itself clipped to [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] (see
-    build_fiscal_cal_and_week_from_upload), so a week_end_date queried from it can never exceed
-    REPORT_END_DATE in the first place -- every month present in the window would trivially pass
-    a "month_end <= REPORT_END_DATE" check whether it's really complete or not. This was a live
-    bug (the in-progress current period was always treated as elapsed) until fixed alongside
-    comparable.py's analogous _complete_quarter_years -- originally quarter-grain only
-    (_compute_available_fiscal_quarters), switched to month-grain here per explicit requirement.
+    Delegates to complete_fiscal_periods -- NOT ctx.fiscal_week directly, which is itself clipped
+    to [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] and so would trivially treat every period in
+    the window as complete. This was a live bug (in-progress periods always read as elapsed) fixed
+    alongside comparable.py's analogous _complete_quarter_years.
     """
     fw = ctx.fiscal_week
     latest_year = fw.agg(F.max("Year")).collect()[0][0]
