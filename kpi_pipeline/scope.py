@@ -61,16 +61,19 @@ def _defined_scope_weekly(ctx: KPIContext, raw: DataFrame) -> DataFrame:
     fiscal_cal. Item-family-rolled to parent product_id when ITEM_FAMILY_ROLLUP["defined_scope"]
     is True (see config.py and _defined_scope_pairs above -- same toggle and reasoning).
 
-    Leading-gap backfill (defined_scope.backfill_leading_gap, default True): if a pair's own
-    earliest recorded scope week starts later than the report window's own start, the scope table
-    simply has no row for that gap -- so the pair would otherwise be out of scope for those early
-    weeks. Assume the pair was in scope for the whole window instead, same "min date in window"
-    principle build_dc_inst's per-pair grid uses (pipeline.py) -- never a hardcoded floor date,
-    just whatever the window's own start already is. Only the LEADING gap is filled: any real
-    weeks the source provides (a later start with no gap, a mid-window gap, an end date) are
-    honoured exactly as recorded. product/product_store grains are unaffected -- they already
-    apply every scoped pair to the whole window. Set False for a deployment with existing
-    product_store_week history saved before this option existed (see config.py's comment).
+    Leading-gap backfill (defined_scope.backfill_leading_gap, default True): if the scope
+    source's own earliest available week (across every pair) starts later than the report
+    window's start, that gap is a data-availability limit of the source itself -- so only the
+    pairs tied to that earliest week are assumed in scope back to the window's own start (never
+    a hardcoded floor date), same "min date in window" principle build_dc_inst's per-pair grid
+    uses (pipeline.py). A pair whose own first-seen week is later still -- later than the
+    source's earliest week, not merely later than the window start -- is left untouched: that
+    later start is a real signal (a new store, a new product), not a leading-gap artifact, and
+    must not be backfilled. Only the LEADING gap is filled: any real weeks the source provides (a
+    later start with no gap, a mid-window gap, an end date) are honoured exactly as recorded.
+    product/product_store grains are unaffected -- they already apply every scoped pair to the
+    whole window. Set False for a deployment with existing product_store_week history saved
+    before this option existed (see config.py's comment).
     """
     config = ctx.settings["DEFINED_SCOPE"]
     sel = [
@@ -120,7 +123,14 @@ def _defined_scope_weekly(ctx: KPIContext, raw: DataFrame) -> DataFrame:
         .groupBy("product_id", "store_id")
         .agg(F.min("week_start_date").alias("first_scope_week_start"))
     )
-    pairs_with_gap = pair_first_week.filter(F.col("first_scope_week_start") > F.lit(window_start))
+    # Only the pairs tied to the SOURCE's own earliest available week qualify -- a pair whose own
+    # first-seen week is later than that (even if still later than window_start) is a real pair
+    # start (new store/product), not a leading-gap artifact of the feed, and stays untouched.
+    scope_earliest_start = pair_first_week.agg(F.min("first_scope_week_start")).collect()[0][0]
+    pairs_with_gap = pair_first_week.filter(
+        (F.col("first_scope_week_start") == F.lit(scope_earliest_start))
+        & (F.col("first_scope_week_start") > F.lit(window_start))
+    )
     backfill = (
         pairs_with_gap.crossJoin(broadcast(window_weeks))
         .filter(F.col("week_start_date") < F.col("first_scope_week_start"))
