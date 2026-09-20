@@ -209,13 +209,16 @@ CONFIG: Dict[str, Any] = {
         "date_col": "week_start_date",
         "year_col": None,
         "week_col": None,
-        # product_store_week only: if a pair's earliest recorded scope week starts later than the
-        # report window's own start, assume it was in scope for the whole window instead of
-        # leaving that leading gap uncovered (see kpi_pipeline/scope.py's _defined_scope_weekly).
-        # True by default (matches product/product_store's own always-whole-window behaviour).
-        # Set False for a deployment with EXISTING product_store_week history saved before this
-        # option existed -- switching it on for such a deployment mixes two scope definitions in
-        # one incrementally-merged table; a fresh product_store_week adoption is unaffected either way.
+        # product_store_week only: if the scope source's own earliest available week (across
+        # every pair) starts later than the report window's start, only the pairs tied to that
+        # earliest week are assumed in scope back to the window's start -- a data-availability
+        # limit of the source, not a per-pair signal. A pair whose own first-seen week is later
+        # still (a new store/product) is left untouched (see kpi_pipeline/scope.py's
+        # _defined_scope_weekly). True by default (matches product/product_store's own
+        # always-whole-window behaviour). Set False for a deployment with EXISTING
+        # product_store_week history saved before this option existed -- switching it on for such
+        # a deployment mixes two scope definitions in one incrementally-merged table; a fresh
+        # product_store_week adoption is unaffected either way.
         "backfill_leading_gap": True,
     },
     "scope_adjustments": {

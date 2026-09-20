@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Released]
 
+### 🐛 Fixed
+
+#### `defined_scope.backfill_leading_gap` restricted to the source's own earliest pairs
+
+Previously backfilled *every* `product_store_week` pair whose own first-seen week was later than
+the report window's start, including pairs that are genuinely new (a new store, a new product) —
+incorrectly granting them retroactive scope membership before they existed. Now only the pairs
+tied to the scope source's own earliest available week (across every pair) are backfilled, since
+that shared earliest point is what signals a data-availability limit of the source itself rather
+than a real pair start. A pair whose first-seen week is later than the source's own earliest week
+is left untouched.
+
+**Affected:** `config.py`, `kpi_pipeline/scope.py`
+
+**Date:** 2026-09-20
+
 ### ✨ Added
 
 #### Comparable pairs: `yoy` and `quarter` kinds, `grain` toggle
