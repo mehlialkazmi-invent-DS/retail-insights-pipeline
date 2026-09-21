@@ -962,6 +962,8 @@ def _kpi_table_html(
 
 
 def _comparison_wide_html(
+    value_sub: pd.DataFrame,
+    periods: List[str],
     comp_df: Optional[pd.DataFrame],
     dimension: str,
     dimension_value: str,
@@ -969,38 +971,54 @@ def _comparison_wide_html(
     labels: Dict[str, str],
     comp_label: str,
     period_type: Optional[str] = None,
+    month_display_by_period: Optional[Dict[str, str]] = None,
 ) -> str:
-    """One consolidated YoY/YTD comparison table: a Metric column plus one delta column per
-    consecutive-period link present in ``comp_df`` -- YoY always has exactly one link; YTD can
-    chain several (e.g. 2024->2025 and 2025->2026 when 3+ years are in the report window). Same
-    Delta-column layout _comparable_wide_html established for the comparable-pairs path, minus
-    its value columns -- the value trend for these same periods is already the table directly
-    above this one on the panel (see _value_panel_content), so repeating it here would just be
-    the same numbers twice. Replaces the old per-link stacked mini-tables (one 4-column
-    Metric/prior/current/Change table per link) with this single table.
+    """One consolidated YoY/YTD table: the same value columns _kpi_table_html renders (one per
+    period present in kpi_long, e.g. 2024/2025/2026 -- passed in pre-pivoted as ``value_sub``/
+    ``periods`` since _value_panel_content already computes them for the plain table) plus one
+    delta column per consecutive-period link present in ``comp_df`` (e.g. Delta 2025,
+    Delta 2026) -- same value+delta layout _comparable_wide_html established for the
+    comparable-pairs path. Previously this table carried delta columns only, with the value
+    trend shown separately in the plain _kpi_table_html panel directly above it -- a delta with
+    no value next to it isn't useful on its own, so the two are now one table whenever a
+    comparison exists for this period_type (comp_df is only ever populated for annual/ytd; see
+    _value_panel_content's fallback to the plain value-only table otherwise). Replaces the old
+    per-link stacked mini-tables (one 4-column Metric/prior/current/Change table per link) with
+    this single table.
     """
-    if comp_df is None or comp_df.empty:
+    if comp_df is None or comp_df.empty or value_sub.empty or not periods:
         return ""
-    sub = comp_df[
+    comp_sub = comp_df[
         (comp_df["dimension"] == dimension)
         & (comp_df["dimension_value"].astype(str) == str(dimension_value))
     ]
-    if sub.empty:
+    if comp_sub.empty:
         return ""
 
-    links = sub[["prior_period", "current_period"]].drop_duplicates().sort_values("current_period")
+    value_grp = value_sub.set_index("period")
+
+    links = comp_sub[["prior_period", "current_period"]].drop_duplicates().sort_values("current_period")
     link_pairs = list(zip(links["prior_period"], links["current_period"]))
 
+    value_ths = "".join(
+        f"<th>{_esc(_period_th_label(p, period_type, month_display_by_period))}</th>" for p in periods
+    )
     delta_ths = "".join(f"<th>&Delta; {_esc(current)}</th>" for _, current in link_pairs)
-    head = f"<thead><tr><th class='cell-kpi'>Metric</th>{delta_ths}</tr></thead>"
+    head = f"<thead><tr><th class='cell-kpi'>Metric</th>{value_ths}{delta_ths}</tr></thead>"
 
     rows: List[str] = []
     for metric in metric_cols:
-        metric_rows = sub[sub["metric_key"] == metric]
+        if metric not in value_grp.columns:
+            continue
+        metric_rows = comp_sub[comp_sub["metric_key"] == metric]
         if metric_rows.empty:
             continue
         cat = _CAT.get(metric, "general")
         label = _metric_display_label(metric, labels, period_type)
+        value_cells = "".join(
+            f"<td>{_esc(_fmt(metric, value_grp.at[p, metric]) if p in value_grp.index else '—')}</td>"
+            for p in periods
+        )
         delta_cells: List[str] = []
         for prior, current in link_pairs:
             link_row = metric_rows[
@@ -1011,7 +1029,7 @@ def _comparison_wide_html(
         rows.append(
             f"<tr class='cat-{_esc(cat)}'>"
             f"<td class='cell-kpi'>{_esc(label)}</td>"
-            f"{''.join(delta_cells)}"
+            f"{value_cells}{''.join(delta_cells)}"
             f"</tr>"
         )
 
@@ -1040,9 +1058,9 @@ def _comparable_wide_html(
     year in the report window, from comparable_kpi_long -- reuses _pivot_single_value, the same
     wide-value pattern _kpi_table_html renders) plus N-1 delta columns (one per consecutive-year
     link, from comparable_comparison_ytd's own per-link change_display) laid out side by side in
-    ONE table, instead of N-1 separate 2-column stacked tables. Value columns are included here
-    (unlike _comparison_wide_html's regular-comparison table) because comparable_kpi_long is a
-    separate restricted population that isn't shown anywhere else on the panel.
+    ONE table, instead of N-1 separate 2-column stacked tables. Same value+delta layout as
+    _comparison_wide_html's regular-comparison table, just sourced from comparable_kpi_long (a
+    separate restricted population) instead of the panel's own already-pivoted value table.
     """
     if comparable_comp_df is None or comparable_comp_df.empty:
         return ""
@@ -1168,8 +1186,13 @@ def _value_panel_content(
         kpi_long, period_type, dimension, dimension_value, metric_cols,
         week_start_by_period,
     )
-    table = _kpi_table_html(sub, periods, metric_cols, labels, period_type, month_display_by_period)
-    cmp = _comparison_wide_html(comp_df, dimension, dimension_value, metric_cols, labels, comp_label, period_type)
+    # A comparison only ever exists for annual/ytd (comp_df is None otherwise -- see
+    # render_kpi_html's comp_map). When it does, show ONE value+delta table instead of the plain
+    # value table followed by a delta-only table: a delta with no value next to it isn't useful.
+    table = _comparison_wide_html(
+        sub, periods, comp_df, dimension, dimension_value, metric_cols, labels, comp_label,
+        period_type, month_display_by_period,
+    ) or _kpi_table_html(sub, periods, metric_cols, labels, period_type, month_display_by_period)
     if period_type == "quarter":
         comparable_cmp = _comparable_quarter_section_html(
             comparable_kpi_long, comparable_comp_df, dimension, dimension_value, metric_cols, labels,
@@ -1187,7 +1210,7 @@ def _value_panel_content(
             f"{comparable_cmp}"
             "</div>"
         )
-    return table + cmp + comparable_cmp
+    return table + comparable_cmp
 
 
 def _value_tabs_html(

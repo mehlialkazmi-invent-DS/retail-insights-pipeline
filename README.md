@@ -1098,7 +1098,7 @@ Environment override: `KPI_RUN_MODE=html_only`
 | **Slice dimension tabs** | Overall + every slice column in `kpi_long` (inferred automatically from data and config) |
 | **Value tabs** | Vertical sidebar within each slice dimension — one panel per value (e.g. each brand) |
 | **KPI tables** | Metrics as rows (colour-coded), periods as columns; inventory turnover is labelled **Annual** / **YTD** / **Quarterly** / **Monthly** / **Weekly** per tab |
-| **Comparison** | YoY / YTD per value panel, shown only on the Annual/YTD tabs — one consolidated wide table (a Metric column plus one delta column per consecutive-year link, YoY always exactly one link). Quarter/Monthly/Weekly tabs show value trends only, no *regular* comparison table. |
+| **Comparison** | YoY / YTD per value panel, shown only on the Annual/YTD tabs — one consolidated wide value+delta table (the same period value columns as the KPI table above, e.g. 2024/2025/2026, plus one delta column per consecutive-year link, YoY always exactly one link) in place of the plain value table. Quarter/Monthly/Weekly tabs show the plain value-trend table only, no *regular* comparison table. |
 | **Comparable (Like-for-Like)** | When `comparable_pairs.enabled=True`, a visually separated section beneath the comparison table, per enabled `comparable_pairs.kinds` entry: one consolidated wide value+delta table on the Annual tab (`yoy`) and YTD tab (`ytd`); **one narrow table per quarter number** on the Quarter tab (`quarter` — mixing all 4 quarters into one table would be unreadable) |
 | **Metric Details tab** | Definition, store scope, and formula for every active metric |
 
