@@ -101,7 +101,7 @@ def _restrict_frames(
     comparable genuinely like-for-like rather than something that silently weakens with the scope
     configuration.
 
-    Frames carrying no store_id of their own -- inst_data/lost_base when lost_sales_source has no
+    Frames carrying no store_id of their own -- inst_data/lost_base when instock_source/lost_sales_source has no
     store_col, plus scope_pairs/scope_pair_weeks when neither scope nor lost-sales has a store
     dimension -- are restricted to the pair universe's DISTINCT PRODUCTS instead. Collapsing to
     distinct products first is what stops that join fanning their rows out one-per-store; their

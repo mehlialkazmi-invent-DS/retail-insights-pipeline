@@ -78,6 +78,7 @@ class KPIContext:
 
     daily_data_raw: Optional[DataFrame] = None
     lost_sales_weekly_base: Optional[DataFrame] = None
+    instock_weekly_base: Optional[DataFrame] = None
     inventory_warehouse_raw: Optional[DataFrame] = None
     # item_family_raw: read unconditionally whenever inventory_warehouse is configured -- also
     # backs build_dc_daily's item-family rollup, not just dc_in_stock_rate.

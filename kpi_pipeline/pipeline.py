@@ -22,18 +22,18 @@ from kpi_pipeline.inputs import (
 )
 
 
-def _enrich_lost_sales_with_time_grain(ctx: KPIContext, lost_sales_pair: DataFrame) -> DataFrame:
+def _enrich_weekly_with_time_grain(ctx: KPIContext, weekly_pair: DataFrame) -> DataFrame:
     fw_cols = ["week_start_date", "week_end_date", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Month"]
     if ctx.settings["USE_FISCAL_CALENDAR"]:
-        return lost_sales_pair.join(broadcast(ctx.fiscal_week.select(*fw_cols)), on="week_start_date", how="inner")
-    if "_ls_year" in lost_sales_pair.columns and "_ls_week" in lost_sales_pair.columns:
+        return weekly_pair.join(broadcast(ctx.fiscal_week.select(*fw_cols)), on="week_start_date", how="inner")
+    if "_ls_year" in weekly_pair.columns and "_ls_week" in weekly_pair.columns:
         enriched = (
-            lost_sales_pair.withColumn("Year", F.col("_ls_year"))
+            weekly_pair.withColumn("Year", F.col("_ls_year"))
             .withColumn("Week", F.col("_ls_week"))
             .drop("_ls_year", "_ls_week")
         )
     else:
-        enriched = lost_sales_pair.join(
+        enriched = weekly_pair.join(
             broadcast(ctx.fiscal_cal.select(F.col("date").alias("week_start_date"), "Year", "Week")),
             on="week_start_date",
             how="inner",
@@ -47,7 +47,7 @@ def _aggregate_lost_sales_pairweek(ctx: KPIContext, raw: DataFrame, start, end) 
     lost_sales/in_stock/total_days source column names come from LOST_SALES_COLUMN_MAP
     (see config.py's lost_sales_source). in_stock/total_days are skipped here entirely
     when INSTOCK_SOURCE_ENABLED — they come from the separate instock_source table
-    instead (see read_lost_sales_weekly).
+    instead (see read_instock_weekly).
 
     Item-family-rolled to parent product_id right before aggregation when
     ITEM_FAMILY_ROLLUP["lost_sales"] is True (see config.py) — OFF by default, since
@@ -74,9 +74,9 @@ def _aggregate_lost_sales_pairweek(ctx: KPIContext, raw: DataFrame, start, end) 
         agg_exprs.append(F.first(F.col("week").cast("int"), ignorenulls=True).alias("_ls_week"))
     # Grouped without store_id when the source has none (store_col=None in
     # LOST_SALES_COLUMN_MAP) -- CAUTION (see config.py's lost_sales_source comment): lost_sales
-    # is an absolute count, so a pair-week without store_id gets broadcast across every scoped
-    # store of that product downstream (read_lost_sales_weekly's join), which OVER-COUNTS if
-    # later summed across stores. Only safe for in_stock/total_days (ratios), not lost_sales.
+    # is an absolute count, so a pair-week without store_id must never be broadcast across a
+    # product's scoped stores, which would OVER-COUNT if later summed across stores -- see
+    # build_pipeline_frames, which collapses scope to this grain instead.
     group_keys = ["product_id", "week_start_date"]
     if "store_id" in raw.columns:
         group_keys.insert(1, "store_id")
@@ -90,11 +90,8 @@ def _aggregate_instock_pairweek(ctx: KPIContext, raw: DataFrame, start, end) -> 
     (including any fallback_sources already appended -- see read_instock_source).
 
     Grouped without store_id when the source has none (store_col=None in
-    INSTOCK_SOURCE_COLUMN_MAP, e.g. reporting_inv_fc_dfu/report_dfu) -- read_lost_sales_weekly's
-    join then broadcasts this pair-week's value across every scoped store of that product
-    instead of requiring an exact (product, store, week) match. Safe here: in_stock_days/
-    total_days are a ratio, and summing the same broadcast value across a product's stores then
-    dividing reproduces the original ratio (numerator and denominator scale identically).
+    INSTOCK_SOURCE_COLUMN_MAP, e.g. reporting_inv_fc_dfu/report_dfu) -- build_pipeline_frames
+    then restricts it to scope at product x week, never fanning it out across stores.
 
     Item-family-rolled to parent product_id right before aggregation when
     ITEM_FAMILY_ROLLUP["lost_sales"] is True (see config.py) -- same toggle and reasoning as
@@ -130,9 +127,8 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
     pair-week, so they always come from the SAME chosen model. Mutually exclusive with
     instock_source (see config.py's validation).
 
-    instock_source.enabled=True (mutually exclusive with the ensemble above): in_stock_days
-    and total_days are read from a separate table instead of PATH_LOST_SALES, left-joined
-    onto the lost-sales pair-weeks by (product_id, store_id, week_start_date).
+    instock_source.enabled=True: in_stock_days/total_days are not read here at all -- they come
+    from read_instock_weekly, independently of the lost-sales rows.
     """
     if ctx.lost_sales_weekly_base is not None:
         return ctx.lost_sales_weekly_base
@@ -214,35 +210,30 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
         if native_week:
             deduped = deduped.withColumn("_ls_year", F.year("week_start_date"))
 
-    if s.get("INSTOCK_SOURCE_ENABLED", False):
-        instock_raw = read_instock_source(ctx.spark, s, quiet=True)
-        instock_agg = _aggregate_instock_pairweek(ctx, instock_raw, start, end)
-        # store_id only enters the join key when BOTH sides have it (a real per-store match). If
-        # only instock_agg lacks it, drop store_id from the join key so the regular join
-        # broadcasts instock_agg's ratio across deduped's real per-store rows -- safe, since
-        # in_stock_days/total_days is a ratio (repeated-broadcast-then-divide reproduces it).
-        #
-        # The reverse is NOT safe: if deduped itself has no store_id (lost_sales_source is
-        # store-less), a bare (product, week) join would fan deduped's lost_sales -- an ABSOLUTE
-        # COUNT, not a ratio (see _aggregate_lost_sales_pairweek's CAUTION) -- out once per
-        # instock store, inflating any later sum. Roll instock_agg DOWN to deduped's own
-        # (product, week) grain instead, keeping the join 1:1 and deduped's store-less grain
-        # untouched.
-        if "store_id" not in deduped.columns and "store_id" in instock_agg.columns:
-            instock_agg = instock_agg.groupBy("product_id", "week_start_date").agg(
-                F.sum("in_stock_days").alias("in_stock_days"),
-                F.sum("total_days").alias("total_days"),
-            )
-        instock_join_keys = ["product_id", "week_start_date"]
-        if "store_id" in instock_agg.columns and "store_id" in deduped.columns:
-            instock_join_keys.insert(1, "store_id")
-        deduped = deduped.join(instock_agg, on=instock_join_keys, how="left")
-
-    ctx.lost_sales_weekly_base = _enrich_lost_sales_with_time_grain(ctx, deduped).withColumn(
+    ctx.lost_sales_weekly_base = _enrich_weekly_with_time_grain(ctx, deduped).withColumn(
         "fiscal_week_days",
         F.datediff(F.col("week_end_date"), F.col("week_start_date")) + 1,
     ).cache()
     return ctx.lost_sales_weekly_base
+
+
+def read_instock_weekly(ctx: KPIContext) -> DataFrame:
+    """Weekly in-stock aggregates from instock_source for the report window (cached per run).
+
+    Only called when INSTOCK_SOURCE_ENABLED. Independent of the lost-sales rows: every
+    (product[, store], week) the in-stock table has is kept, whether or not lost_sales_source
+    has a row for it. Scope restriction happens in build_pipeline_frames.
+    """
+    if ctx.instock_weekly_base is not None:
+        return ctx.instock_weekly_base
+
+    s = ctx.settings
+    start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
+    raw = read_instock_source(ctx.spark, s, quiet=True)
+    ctx.instock_weekly_base = _enrich_weekly_with_time_grain(
+        ctx, _aggregate_instock_pairweek(ctx, raw, start, end)
+    ).cache()
+    return ctx.instock_weekly_base
 
 
 def build_scoped_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs_in: DataFrame, has_store: bool) -> DataFrame:
@@ -430,6 +421,10 @@ def build_dc_inst(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
 def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, DataFrame]:
     """Build scoped_daily, inst_data, lost_base, and scope helper frames for one scope variant.
 
+    Four independent metric families, each restricted to scope on its own: daily-data metrics
+    (scoped_daily), in-stock (inst_data), lost sales (lost_base), and DC (dc_daily/dc_inst).
+    They only meet at the final per-period aggregate join (metrics.build_kpi_table).
+
     has_store is read from ctx.scope_keys (set once in scope.build_defined_scope from
     defined_scope.grain), not re-derived from scope_in.columns -- every scope variant this is
     called with (hybrid_scope_keys, defined_scope_keys, score_only_scope_keys) is already built
@@ -451,14 +446,26 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
     # Collapse scope to the source's own grain, never fan the source out to scope's: drop store_id
     # from the join keys when lost_sales_raw has no per-store dimension (e.g. report_dfu,
     # store_col=None), then left_semi against the collapsed scope. Joining scope_core's stores onto
-    # a store-less row instead would repeat lost_sales -- an ABSOLUTE count, unlike instock's
-    # ratio -- once per scoped store, inflating every later sum across stores by the store-count
-    # factor. Same roll-down rule read_lost_sales_weekly already applies when instock_source and
-    # lost-sales disagree about store grain.
+    # a store-less row instead would repeat lost_sales -- an ABSOLUTE count -- once per scoped
+    # store, inflating every later sum across stores by the store-count factor.
     ls_keys = [k for k in scope_keys if k != "store_id" or "store_id" in lost_sales_raw.columns]
     lost_sales_weekly = lost_sales_raw.join(
         scope_core.select(*ls_keys).distinct(), on=ls_keys, how="left_semi"
     ).cache()
+
+    # In-stock is its own metric family: with instock_source enabled it is read and
+    # scope-restricted on its own, at its own grain, exactly like lost-sales above -- never
+    # joined onto the lost-sales rows. Otherwise it comes from lost_sales_source's own
+    # in_stock/total_days columns, i.e. the same rows as lost_sales_weekly.
+    instock_source_enabled = ctx.settings.get("INSTOCK_SOURCE_ENABLED", False)
+    if instock_source_enabled:
+        instock_raw = read_instock_weekly(ctx)
+        inst_keys = [k for k in scope_keys if k != "store_id" or "store_id" in instock_raw.columns]
+        instock_weekly = instock_raw.join(
+            scope_core.select(*inst_keys).distinct(), on=inst_keys, how="left_semi"
+        )
+    else:
+        instock_weekly = lost_sales_weekly
 
     # ls_has_store: whether lost_sales_weekly has its own store_id. Purely a property of
     # lost_sales_source.store_col -- the semi-join above only filters rows, it never attaches a
@@ -479,22 +486,19 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
         scope_pair_weeks = lost_sales_weekly.select("product_id", "Year", "Week").distinct().cache()
         scope_pairs = lost_sales_weekly.select("product_id").distinct().cache()
 
-    # Fall back to the fiscal week's day-count only when total_days can legitimately be missing
-    # for reasons unrelated to instock_source (e.g. a null in the lost-sales table itself). Under
-    # instock_source.enabled=True, a null total_days specifically means "no matching row in the
-    # separate instock table" -- coalescing it to a full week would silently pad available_days
-    # for an unmatched pair-week instead of excluding it via the filter below, deflating
-    # in_stock_rate/weighted_instock_rate for exactly the coverage gaps instock_source expects.
+    # Fall back to the fiscal week's day-count only for lost_sales_source's own in_stock/total_days
+    # (e.g. a null in the lost-sales table itself). instock_source's total_days is taken as-is --
+    # padding a null to a full week would deflate in_stock_rate/weighted_instock_rate.
     available_days_expr = (
         F.col("total_days")
-        if ctx.settings.get("INSTOCK_SOURCE_ENABLED", False)
+        if instock_source_enabled
         else F.coalesce(F.col("total_days"), F.col("fiscal_week_days"))
     )
     inst_select_cols = ["product_id", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Month"]
-    if ls_has_store:
+    if "store_id" in instock_weekly.columns:
         inst_select_cols.insert(1, "store_id")
     inst_data = (
-        lost_sales_weekly.select(
+        instock_weekly.select(
             *inst_select_cols,
             F.col("in_stock_days").alias("stocked_pairs"),
             available_days_expr.alias("available_days"),
