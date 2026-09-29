@@ -724,7 +724,7 @@ Any column present on `daily_data` can be used, and expressions are ANDed (same 
 
 ### `instock_source`
 
-**Optional.** Reads in-stock rate and total-days from a separate table (e.g. because your in-stock rate is calculated from a different data pipeline than your lost-sales model), then left-joins onto the lost-sales pair-weeks to override the in-stock and total-days values.
+**Optional.** Reads in-stock rate and total-days from a separate table (e.g. because your in-stock rate is calculated from a different data pipeline than your lost-sales model), read and scope-restricted independently of lost sales.
 
 ```python
 "instock_source": {
@@ -740,11 +740,11 @@ Any column present on `daily_data` can be used, and expressions are ANDed (same 
 }
 ```
 
-**Behaviour.** When `enabled=False` (default), `in_stock`/`total_days` are aggregated from `lost_sales_source`'s table exactly as before — no change to existing pipelines. When `enabled=True`, `_aggregate_lost_sales_pairweek` stops aggregating `in_stock`/`total_days` from the lost-sales table entirely (only `lost_sales` is aggregated from it); the pipeline instead reads and aggregates the separate `instock_source` table and left-joins it onto the lost-sales weekly frame by `(product_col, store_col, week_col)`. A pair-week present in lost-sales with no matching row in `instock_source` gets `NULL` for `in_stock`/`total_days` — there is no fallback to a lost-sales-side value, since none is computed in this mode. Downstream metrics (`in_stock_rate`, `weighted_instock_rate`, `lost_sales_pct`) use whatever the join produces.
+**Behaviour.** When `enabled=False` (default), `in_stock`/`total_days` are aggregated from `lost_sales_source`'s table exactly as before, on the same rows as lost sales. When `enabled=True`, in-stock becomes fully independent of lost sales: `_aggregate_lost_sales_pairweek` stops aggregating `in_stock`/`total_days` from the lost-sales table (only `lost_sales` is aggregated from it), and `read_instock_weekly` reads and aggregates the `instock_source` table on its own. `build_pipeline_frames` then semi-joins it to scope at its own grain — exactly like lost sales — so every in-scope pair-week the in-stock table has counts, whether or not lost sales has a row for it. The two only meet at the final per-period aggregate join, alongside the daily-data and DC metric families. A pair-week with a null/zero `total_days` in `instock_source` is dropped, never padded to a full week.
 
 **`product_col` / `product_agg_level_col`**: same "configure exactly one, `product_col` wins if present" rule as `lost_sales_source` above.
 
-**`store_col: None`** — for a source with no per-store dimension (e.g. `reporting_inv_fc_dfu/report_dfu`, aggregated to `product_agg_level` × week only). The join drops `store_id` from its condition and broadcasts the product-week value across the lost-sales frame's own per-store rows instead. Broadcasting **is** safe here, which is why this is handled differently from `lost_sales_source` (collapsed to its own grain rather than broadcast): `in_stock_days`/`total_days` form a ratio, and summing the same broadcast value across a product's stores then dividing reproduces the original ratio exactly (numerator and denominator scale identically) — you just lose real per-store variation, which a store-less source never had anyway. In the opposite case — a store-ful `instock_source` alongside a store-less `lost_sales_source` — instock is rolled **down** to product-week instead, so its store rows can't fan out lost sales. A verified example for tbretail:
+**`store_col: None`** — for a source with no per-store dimension (e.g. `reporting_inv_fc_dfu/report_dfu`, aggregated to product × week only). The scope semi-join drops `store_id` from its keys, so the source is restricted to scope at product × week and never fanned out across stores. Its store grain is independent of `lost_sales_source`'s — either can be store-less without affecting the other. A verified example for tbretail:
 
 ```python
 "instock_source": {
@@ -780,7 +780,7 @@ Any column present on `daily_data` can be used, and expressions are ANDed (same 
 }
 ```
 
-**Mutually exclusive with `lost_sales_ensemble.enabled=True`.** When `lost_sales_ensemble.enabled=True`, the ensemble blends two lost-sales models and picks in-stock/total-days per row from whichever model was selected — this does not compose with `instock_source`'s separate-table override, which assumes a single lost-sales source. Only one of the two may be active; `materialize()` raises a `ValueError` if both are `True`.
+**Mutually exclusive with `lost_sales_ensemble.enabled=True`.** The ensemble branch blends in-stock/total-days from the chosen fast/slow model alongside lost sales, and uses the chosen model's `total_days` to decide whether a pair-week exists — neither of which is computed when `instock_source` is on. Only one of the two may be active; `materialize()` raises a `ValueError` if both are `True`.
 
 ### `inventory_warehouse`
 
@@ -1028,7 +1028,7 @@ If you see slow runs, check: (1) scope table path is correct so defined scope is
 
 ## Known limitations
 
-- **`defined_scope.grain = "product"`**: the scope universe is `distinct(product_id)` and applies to every store selling the in-scope products across the window; instock/lost-sales pairs are inferred from lost-sales weekly data.
+- **`defined_scope.grain = "product"`**: the scope universe is `distinct(product_id)` and applies to every store selling the in-scope products across the window; instock/lost-sales pairs come from each source's own weekly data.
 - **Incremental skip vs notebook output**: Saved Delta can retain old values for overlapping period keys while the notebook shows fresh `kpi_long` — set `allow_overwrite_existing=True` to replace.
 - **YTD with a single year**: degrades gracefully to "no comparison" rather than erroring — the `"ytd"` period_type rows in `kpi_long` still show whatever data is present.
 - **Weekly tab with sparse weeks**: the Weekly period tab's display trim (`weekly_display_weeks`) shows the N most recent weeks **present in `kpi_long`**, not necessarily consecutive fiscal weeks when weekly coverage is sparse (e.g. after a narrow `run_min_date` or partial backfill). There is no WoW comparison table to be affected by this — see [Selecting which comparisons to run](#selecting-which-comparisons-to-run).

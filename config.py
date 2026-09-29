@@ -993,8 +993,9 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     if lse.get("enabled") and instock_source_enabled:
         raise ValueError(
             "lost_sales_ensemble.enabled and instock_source.enabled cannot both be True: "
-            "the fast/slow blend picks in_stock/total_days per-row from whichever model was "
-            "chosen, which instock_source's separate-table override does not compose with. "
+            "the fast/slow blend selects in_stock/total_days from the chosen model and uses its "
+            "total_days to decide row existence, neither of which is computed when "
+            "instock_source is on. "
             "Use at most one of the two."
         )
     if lse.get("enabled"):

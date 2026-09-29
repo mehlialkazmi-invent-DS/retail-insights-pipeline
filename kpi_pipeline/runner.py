@@ -68,6 +68,7 @@ class KPIRunner:
     def _reset_run_caches(self) -> None:
         self.ctx.daily_data_raw = None
         self.ctx.lost_sales_weekly_base = None
+        self.ctx.instock_weekly_base = None
         self.ctx.inventory_warehouse_raw = None
         self.ctx.item_family_raw = None
         self.ctx.inventory_warehouse_rolled = None
