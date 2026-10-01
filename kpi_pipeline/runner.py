@@ -11,13 +11,19 @@ from pyspark.sql import SparkSession
 from kpi_pipeline.comparable import build_comparable_pairs
 from kpi_pipeline.comparisons import build_comparisons, build_scope_diff
 from kpi_pipeline.context import KPIContext
-from kpi_pipeline.fiscal import build_fiscal_and_products
+from kpi_pipeline.fiscal import apply_report_end_mode, build_fiscal_and_products
 from kpi_pipeline.html_report import render_kpi_html
 from kpi_pipeline.fiscal import build_fiscal_week_only
 from kpi_pipeline.io import build_save_plan, load_saved_outputs, save_outputs
 from kpi_pipeline.kpi_long import build_kpi_long, trim_periods_to_recent
 from kpi_pipeline.pipeline import build_pipeline_frames
-from kpi_pipeline.scope import apply_scope_adjustments, build_defined_scope, build_hybrid_scope, scope_summary_by_origin
+from kpi_pipeline.scope import (
+    apply_scope_adjustments,
+    build_blocked_days,
+    build_defined_scope,
+    build_hybrid_scope,
+    scope_summary_by_origin,
+)
 from kpi_pipeline.scope_debug import scope_universe_counts
 
 
@@ -77,10 +83,16 @@ class KPIRunner:
         s = self.settings
         print("CUSTOMER:", s["CUSTOMER"])
         print("AS_OF_DATE:", s["AS_OF_DATE"], "| run_week:", s["RUN_WEEK_START_DATE"], "->", s["RUN_WEEK_END_DATE"])
-        print("REPORT_END_DATE (last full week, Saturday):", s["REPORT_END_DATE"])
+        print(
+            "REPORT_END_DATE:",
+            s["REPORT_END_DATE"],
+            "| report_end:",
+            s["REPORT_END_MODE"],
+            "(complete_month cuts it back when build_dimensions runs)",
+        )
         print("REPORT_START_DATE (Sun):", s["REPORT_START_DATE"], "| RUN_MIN_DATE (Sun):", s["RUN_MIN_DATE"])
         print(
-            "EFFECTIVE window (Sun -> Sat):",
+            "EFFECTIVE window:",
             s["EFFECTIVE_REPORT_START_DATE"],
             "->",
             s["REPORT_END_DATE"],
@@ -97,7 +109,10 @@ class KPIRunner:
                 "AND rule; skip filter when pair weeks <=",
                 s["SCOPE_MIN_WEEKS_FOR_FILTER"],
             )
+        print("SCOPE SOURCE:", s["SCOPE_SOURCE"])
         print("DEFINED_SCOPE path:", s["DEFINED_SCOPE"]["path"])
+        print("BLOCKED_SCOPE:", s["BLOCKED_SCOPE"])
+        print("INSTOCK_DAILY:", s["INSTOCK_DAILY"])
         print("SLICE_DIMENSIONS:", s["SLICE_DIMENSIONS"])
         print("COMPARISONS:", s.get("COMPARISON_KINDS", ["yoy", "ytd"]))
         if s["SAVE_OUTPUTS"]:
@@ -162,6 +177,7 @@ class KPIRunner:
         """Load saved Delta outputs and prepare ctx for HTML report only (no pipeline compute)."""
         if fund_paste is None:
             raise ValueError("fund_paste is required for html_only mode (to resolve output paths).")
+        apply_report_end_mode(self.ctx)
         load_saved_outputs(self.ctx, fund_paste)
         self._infer_active_slices_from_kpi_long()
         build_fiscal_week_only(self.ctx)
@@ -190,10 +206,12 @@ class KPIRunner:
         return self.ctx
 
     def build_dimensions(self) -> None:
+        apply_report_end_mode(self.ctx)
         build_fiscal_and_products(self.ctx)
 
     def build_scopes(self, fund_paste=None) -> None:
         build_defined_scope(self.ctx)
+        build_blocked_days(self.ctx)
         build_hybrid_scope(self.ctx)
         apply_scope_adjustments(self.ctx, fund_paste=fund_paste)
 
@@ -256,7 +274,9 @@ class KPIRunner:
             print("Run the pipeline first (runner.run) before generating the HTML report.")
             return None
 
-        filename = self.settings.get("HTML_REPORT_FILENAME", "kpi_report.html")
+        filename = self.settings["HTML_REPORT_FILENAME_TEMPLATE"].format(
+            customer=self.settings["CUSTOMER"], report_end=self.settings["REPORT_END_DATE"]
+        )
         out_path = Path(local_dir) / filename
         written = render_kpi_html(
             self.ctx,
@@ -266,8 +286,9 @@ class KPIRunner:
         )
 
         # Optionally also copy to the datastore path
-        datastore_path = self.settings.get("HTML_REPORT_OUTPUT_PATH")
-        if datastore_path:
+        datastore_dir = self.settings["HTML_REPORT_OUTPUT_DIR"]
+        if datastore_dir:
+            datastore_path = f"{datastore_dir.rstrip('/')}/{filename}"
             try:
                 _write_text_to_datastore(
                     self.ctx.spark,

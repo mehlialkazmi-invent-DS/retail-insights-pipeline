@@ -5,6 +5,7 @@ Each row: period_type | period | dimension | dimension_value | METRIC_COLS...
 
 from __future__ import annotations
 
+import datetime
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -18,6 +19,7 @@ from kpi_pipeline.metrics import build_kpi_table
 PERIODS: List[Tuple[str, str]] = [
     ("annual", "Year"),
     ("quarter", "period_key"),
+    ("half", "half_key"),
     ("monthly", "month_key"),
     ("weekly", "Year_Week"),
     ("ytd", "Year"),
@@ -26,6 +28,10 @@ PERIODS: List[Tuple[str, str]] = [
 
 def _with_period_key(df: DataFrame) -> DataFrame:
     return df.withColumn("period_key", F.concat_ws("-", F.col("Year").cast("string"), F.col("Fiscal_Quarter").cast("string")))
+
+
+def _with_half_key(df: DataFrame) -> DataFrame:
+    return df.withColumn("half_key", F.concat_ws("-", F.col("Year").cast("string"), F.col("Fiscal_Half").cast("string")))
 
 
 def _with_month_key(df: DataFrame) -> DataFrame:
@@ -51,13 +57,15 @@ def _drop_incomplete_periods(
     """Drop every row belonging to a (Year, ``period_col``) that has not fully elapsed as of
     REPORT_END_DATE (fiscal.complete_fiscal_periods).
 
-    Why the Quarter/Monthly trend tabs need it: REPORT_END_DATE is a week boundary that almost
-    never lands on a quarter or month boundary, so without this the trailing row of those tabs is
+    Why the Quarter/Half/Monthly trend tabs need it: REPORT_END_DATE is a week boundary that almost
+    never lands on a quarter, half or month boundary (report_end="complete_month" aligns it to a
+    month, not to a quarter or half), so without this the trailing row of those tabs is
     routinely a period only a week or two in — a 1-week "quarter" plotted next to full 13-week
     ones. That row now simply doesn't appear until the period closes.
 
-    Weekly needs no equivalent (REPORT_END_DATE is the last completed Saturday, so the trailing
-    week is always whole), and YTD has its own apples-to-apples quarter filter above.
+    Weekly needs no equivalent while REPORT_END_DATE is a Saturday (the trailing week is whole);
+    see _drop_partial_trailing_week for the civil-calendar complete_month cut. YTD has its own
+    apples-to-apples month filter in _period_frames.
     """
     complete = F.broadcast(ctx.complete_fiscal_periods[period_col])
     out = dict(frames)
@@ -66,7 +74,28 @@ def _drop_incomplete_periods(
     return out
 
 
+def _drop_partial_trailing_week(ctx: KPIContext, frames: Dict[str, DataFrame]) -> Dict[str, DataFrame]:
+    """Weekly tab: keep only weeks that end on or before the last Saturday on or before
+    REPORT_END_DATE.
+
+    report_end="complete_month" without a fiscal calendar cuts REPORT_END_DATE at a calendar month
+    end, which is usually mid-week; the week straddling it is clipped to a partial week that would
+    otherwise sit next to whole ones. A no-op when REPORT_END_DATE is already a Saturday.
+    """
+    end = ctx.settings["REPORT_END_DATE"]
+    last_saturday = end - datetime.timedelta(days=(end.weekday() + 2) % 7)
+    whole_weeks = F.broadcast(
+        ctx.fiscal_week.filter(F.col("week_end_date") <= F.lit(last_saturday)).select("Year_Week")
+    )
+    out = dict(frames)
+    for key in _PERIOD_METRIC_FRAMES:
+        out[key] = out[key].join(whole_weeks, on="Year_Week", how="left_semi")
+    return out
+
+
 def _period_frames(ctx: KPIContext, frames: Dict[str, DataFrame], period_name: str) -> Dict[str, DataFrame]:
+    if period_name == "weekly" and ctx.settings["REPORT_END_MODE"] == "complete_month" and not ctx.settings["USE_FISCAL_CALENDAR"]:
+        return _drop_partial_trailing_week(ctx, frames)
     if period_name == "quarter":
         out = dict(frames)
         out["scoped_daily"] = _with_period_key(frames["scoped_daily"])
@@ -75,6 +104,14 @@ def _period_frames(ctx: KPIContext, frames: Dict[str, DataFrame], period_name: s
         out["dc_daily"] = _with_period_key(frames["dc_daily"])
         out["dc_inst"] = _with_period_key(frames["dc_inst"])
         return _drop_incomplete_periods(ctx, out, "Fiscal_Quarter")
+    if period_name == "half":
+        out = dict(frames)
+        out["scoped_daily"] = _with_half_key(frames["scoped_daily"])
+        out["inst_data"] = _with_half_key(frames["inst_data"])
+        out["lost_base"] = _with_half_key(frames["lost_base"])
+        out["dc_daily"] = _with_half_key(frames["dc_daily"])
+        out["dc_inst"] = _with_half_key(frames["dc_inst"])
+        return _drop_incomplete_periods(ctx, out, "Fiscal_Half")
     if period_name == "monthly":
         out = dict(frames)
         out["scoped_daily"] = _with_month_key(frames["scoped_daily"])
@@ -108,6 +145,9 @@ def _period_label(period_name: str, row: pd.Series) -> str:
     if period_name == "quarter":
         y, q = str(row["period_key"]).split("-")
         return f"{int(y)}-Q{int(q)}"
+    if period_name == "half":
+        y, h = str(row["half_key"]).split("-")
+        return f"{int(y)}-H{int(h)}"
     if period_name == "monthly":
         return str(row["month_key"])
     if period_name == "ytd":
@@ -122,6 +162,7 @@ def trim_periods_to_recent(kpi_long: pd.DataFrame, ctx: KPIContext) -> pd.DataFr
         ("weekly", settings.get("HTML_REPORT_WEEKLY_DISPLAY_WEEKS"), True),
         ("monthly", settings.get("HTML_REPORT_MONTHLY_DISPLAY_MONTHS"), False),
         ("quarter", settings.get("HTML_REPORT_QUARTERLY_DISPLAY_QUARTERS"), False),
+        ("half", settings["HTML_REPORT_HALF_DISPLAY_HALVES"], False),
         ("annual", settings.get("HTML_REPORT_YEARLY_DISPLAY_YEARS"), False),
     ]
 
@@ -177,7 +218,8 @@ def _filter_frames_for_dimension(
 
 
 def build_kpi_long(ctx: KPIContext, frames: Dict[str, DataFrame]) -> pd.DataFrame:
-    """Build kpi_long for every (root, cut) combination across annual/quarter/monthly/weekly/ytd periods.
+    """Build kpi_long for every (root, cut) combination across annual/quarter/half/monthly/weekly/ytd periods
+    (half only when fiscal_calendar.half_periods is on).
 
     Roots: "overall" (no restriction, always first) plus one per ctx.root_definitions entry (e.g.
     "nvrout", "comp") -- each restricts the population to rows where that dimension_source's
@@ -198,6 +240,8 @@ def build_kpi_long(ctx: KPIContext, frames: Dict[str, DataFrame]) -> pd.DataFram
     value_filters = ctx.settings.get("SLICE_VALUE_FILTERS", {}) or {}
     rows: List[dict] = []
     for period_name, period_col in PERIODS:
+        if period_name == "half" and not ctx.settings["HALF_PERIODS"]:
+            continue
         pf = _period_frames(ctx, frames, period_name)
         for root_def in roots:
             if root_def is None:

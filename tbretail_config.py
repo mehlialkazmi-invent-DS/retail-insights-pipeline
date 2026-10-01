@@ -1,56 +1,122 @@
-# Generic reference config for the retail-insights-pipeline toolkit -- a starting point for a
-# NEW customer, not any specific customer's own deployed values. Copy this file, then replace
-# every placeholder below with your own paths/business rules; see README.md for full docs on
-# every CONFIG key.
-# Usage (Databricks, same folder as main.ipynb): %run ./config
+# TBretail customer config for the retail-insights-pipeline toolkit.
+# Usage (Databricks, same folder as main.ipynb): %run ./tbretail_config
 #                                                 settings = materialize(fund.paste)
+# See retail-insights-pipeline/README.md for full documentation.
 #
-# GETTING STARTED — minimum edits before your first run:
-#   1. customer: your customer's slug (used to resolve the datastore bucket by default).
-#   2. path_segments: point every entry at your own tables (defined_scope, daily_data,
-#      products, lost_sales at minimum).
-#   3. defined_scope: column names on YOUR scope table (product_col/store_col/date_col/etc).
-#   4. reporting_window.as_of_date: today, or whatever date you want the report to run through.
+# SETUP CHECKLIST (one-time, before first run):
+#   1. Export JAB product IDs → CSV.
+#      In Databricks, run a quick cell to join the JAB Excel against products and
+#      write product_id values to the workspace path below, e.g.:
 #
-# Excluding stores: there is no dedicated "exclude these stores" key. To keep a store out of every
-# metric (e.g. an e-com fulfillment "store" with no real shelf inventory), add a store_id exclusion
-# to input_filters.daily_data -- it applies everywhere daily_data is read (scope building included).
-# To keep it out of in-stock only, use instock_daily.input_filters (when instock_daily is on). If
-# your lost-sales/instock source tables already exclude such stores upstream (common -- see
-# lost_sales_source/instock_source), nothing further is needed for those two metrics.
+#        from pyspark.sql import functions as F
+#        import pandas as pd
+#        jab_codes = load_jab_skuloc_itemcodes(NFG_EXCEL_PATH_JAB)  # from kpi_metrics notebook
+#        jab_ids = (
+#            spark.read.format("delta").load(PATH_PRODUCTS)
+#            .filter(F.col("product_code").isin(jab_codes))
+#            .select("product_id").distinct()
+#        )
+#        jab_ids.toPandas().to_csv(
+#            "/dbfs/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
+#            "KPI-NEW/data/jab_product_ids.csv", index=False
+#        )
+#      Then flip scope_adjustments.additions[0].enabled = True.
 #
-# OPTIONAL, gated features (all OFF/empty by default in this template — turn on as needed):
-#   scope_adjustments   — manual scope additions/removals from a CSV/Delta source, e.g. a
-#                         business-curated product list that should always be in (or out of)
-#                         scope regardless of what the scope table itself says. See the
-#                         disabled example below for the pattern (store_col=None + date_col/
-#                         year_col/week_col=None = "every store, every week" for that source's
-#                         product_ids).
-#   dimension_sources   — join an external table onto products to add a new slice dimension
-#                         that can also become its OWN root population tab (see README's
-#                         "Dimension sources -> roots" section) — e.g. a channel or program
-#                         flag from a table the products master doesn't itself carry.
-#   lost_sales_ensemble — blend a fast/slow lost-sales model pair by product sales-speed
-#                         cluster instead of reading a single lost-sales source as-is.
-#   instock_source      — read in-stock rate from a SEPARATE table instead of lost_sales_
-#                         source's own in_stock/total_days columns (e.g. when a different
-#                         pipeline computes instock than the one computing lost sales).
-#                         Supports fallback_sources to backfill weeks a rolling-window
-#                         source's primary column-set doesn't reach (see README).
-#   comparable_pairs    — like-for-like YTD over pairs present in EVERY year in the report
-#                         window (one shared universe across every consecutive-year link, not
-#                         a separate universe per link); requires 2+ years (run_min_date
-#                         spanning that far back) to have anything to compute.
-#   dc_instock          — DC in-stock rate (dc_in_stock_rate), gated. Expands inventory_warehouse
-#                         into a daily product x warehouse grid running from each pair's own first
-#                         stocked day to the report window's end, 0-filling the gaps as stockouts.
-#                         Requires path_segments.item_family. See README's "dc_instock" section.
+#   2. Export NON-COMP (NFG list) product IDs → CSV.
+#      In Databricks, run a quick cell to join the NFG Excel against products and
+#      write product_id values to the workspace path below, e.g.:
 #
-#   NOTE: inventory_warehouse's product_id is item-family-rolled onto its parent
-#   (path_segments.item_family) before being restricted to scope_core, matching defined_scope's
-#   own already-parent-rolled id space -- required whenever inventory_warehouse is configured,
-#   not just when dc_instock.enabled=True. Changes dc_mean_stock/WOS_DC/WOS_TOTAL for families
-#   with inventory split across old and current item codes. See README's "dc_instock" section.
+#        import pandas as pd
+#        from pyspark.sql import functions as F
+#        pdf_nfg = pd.read_excel(NFG_EXCEL_PATH)
+#        col_ic = [c for c in pdf_nfg.columns if str(c).strip().lower() == "itemcode"]
+#        item_col = col_ic[0] if col_ic else pdf_nfg.columns[2]
+#        nfg_codes = [
+#            c for c in pdf_nfg[item_col].dropna().astype(str).str.strip().unique()
+#            if c and c.lower() != "grand total"
+#        ]
+#        non_comp_ids = (
+#            spark.read.format("delta").load(PATH_PRODUCTS)
+#            .filter(F.col("product_code").isin(nfg_codes))
+#            .select("product_id").distinct()
+#        )
+#        non_comp_ids.toPandas().to_csv(
+#            "/dbfs/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
+#            "KPI-NEW/data/non_comp_product_ids.csv", index=False
+#        )
+#      Then flip scope_adjustments.removals[0].enabled = True.
+#
+#   3. Export NGF item product IDs → CSV (for dimension_sources["ngf_comp_split"]).
+#      Unlike step 2 above, this does NOT remove items from scope — NGF items stay in
+#      daily_data/scope and in the Overall numbers; they're just flagged so you can
+#      slice comp vs non-comp within the same report. Same join pattern as step 1/2:
+#
+#        import pandas as pd
+#        from pyspark.sql import functions as F
+#        pdf_ngf = pd.read_excel(NGF_EXCEL_PATH)  # your NGF item list
+#        ngf_codes = [str(c).strip() for c in pdf_ngf["itemcode"].dropna().unique()]
+#        ngf_ids = (
+#            spark.read.format("delta").load(PATH_PRODUCTS)
+#            .filter(F.col("product_code").isin(ngf_codes))
+#            .select("product_id").distinct()
+#        )
+#        ngf_ids.toPandas().to_csv(
+#            "/dbfs/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
+#            "KPI-NEW/data/ngf_product_ids.csv", index=False
+#        )
+#      Then flip dimension_sources (the "ngf_comp_split" entry).enabled = True.
+#      The entry's "fillna": {"is_comp": "yes"} imputes non-NGF products to 'yes' —
+#      without it they'd come back NULL, since this CSV only covers NGF items.
+#      NOTE: the actually-configured dimension_sources[1].path below currently points at
+#      non_comp_ids_20260817.csv (the step-2 NON-COMP file), not ngf_product_ids.csv as
+#      exported above — unclear whether that's deliberate reuse or the CSV in step 3 was
+#      never actually generated/wired in. Verify before treating either as correct.
+#
+#   4. Update reporting_window.as_of_date before each run.
+#
+# WHAT THIS CONFIG PRODUCES (verified against the actual settings below):
+#   Scope:       the platform operation/scope (scope_source.mode=operation_scope, solution 21, latest
+#                Sunday run, main items only, active products only) at product_store grain
+#                (use_hybrid_scope=False, no backfill); JAB additions (additions[0], on); an
+#                UNDOCUMENTED second addition unioning NON-COMP / NGF products into scope
+#                (additions[1], on — see CAUTION comment at that block, unconfirmed with a human);
+#                the nvrout_scope_backfill addition (additions[2], on). Additions are not
+#                operation-scope pairs (no main-item / active filter, no scope_start, no blocks) and
+#                each product-only addition spans every store with a daily row, but they belong to the
+#                one scope every metric uses, in-stock included: in-stock counts them from their
+#                first daily row. NON-COMP removal itself is OFF (removals[0].enabled=False),
+#                despite scope_adjustments' own comment saying NFG/NON-COMP products "are excluded
+#                from KPI scope".
+#   Lost sales:  read directly from future_visibility's report_dfu (its own pre-blended
+#                fast/slow ensemble output) via lost_sales_source — lost_sales_ensemble
+#                below is OFF; this repo no longer runs its own fast/slow blend.
+#   Blocked:     UI blocked scope (blocked_scope, client rule: a block applies only when it starts on or
+#                after the pair's scope start) removes the blocked days from every daily-data-derived
+#                metric and from in-stock. lost_sales_source (report_dfu, weekly, no store) is not
+#                filtered by it.
+#   Instock:     built from noob/daily-data by instock_daily (OH or goods-in-transit, count start =
+#                earlier of scope start and first daily row, ECOM stores excluded from in-stock only,
+#                scope additions included, counted from their first daily row)
+#                instead of report_dfu (instock_source is OFF; its config is kept for a switch back).
+#                metrics.population_filters excludes NON-COMP (IS_COMP=='no') from in_stock_rate
+#                specifically — even in the unrestricted "overall" root —
+#                to match kpi-skill-toolkit's own Overall instock population (nvr_ids ∪
+#                comp_ids_primary, NON-COMP excluded by design). NON-COMP still counts toward
+#                every other Overall metric (sales, inventory, lost_sales_pct, etc.), same as
+#                kpi-skill-toolkit; lost sales excludes ECOM only (via report_dfu and sales_filter).
+#   Service metrics (WOS, turnover, mean_stock, instock, lost sales %): every metric uses all
+#                scoped stores, except that ECOM stores 829 / 639 / 917 are left out of in-stock
+#                only (instock_daily.input_filters). Add a store_id exclusion to
+#                input_filters.daily_data to drop a store from every metric.
+#   Dimensions:  is_nvrout (NVROUT vs COMP), brand, SMW (KNG vs SMW)
+#   Window:      reporting_window.report_end="complete_month": every metric and view ends on the last
+#                complete fiscal month; half_periods on (Half tab, H1 = Q1-Q2, H2 = Q3-Q4).
+#   Comparisons: YoY / YTD (plus quarter / half period values on their own tabs)
+#   Comparable:  like-for-like pairs present in every qualifying year, kinds ytd / yoy / quarter /
+#                half, over an all-years pair universe
+#   Report:      TBretail KPI Report HTML with all slices and comparable tables (root labels
+#                comp -> LFL, nvrout -> NVROUT; wos_revenue / weighted_instock_rate /
+#                dc_in_stock_rate removed; dc_instock off; dimension_labels brand -> Banner)
 
 import copy
 import datetime
@@ -58,26 +124,20 @@ import os
 from typing import Any, Callable, Dict, Optional
 
 # Period-over-period comparison kinds the pipeline can produce, in canonical order.
-# QoQ/MoM/WoW comparison tables were dropped for simplicity — the Quarter/Monthly/Weekly period
-# tabs already show recent-period value trends, covering "recent quarters/months/weeks" without
-# a separate delta table.
+# Kept in sync with retail-insights-pipeline/config.py. QoQ/MoM/WoW comparison tables were
+# dropped for simplicity — the Quarter/Monthly/Weekly period tabs already show recent-period
+# value trends, covering "recent quarters/months/weeks" without a separate delta table.
 COMPARISON_KINDS_ALL = ("yoy", "ytd")
 
-# Comparable-pairs (like-for-like) kinds the pipeline can produce, in canonical order. Each is its
-# own same-pairs-across-years population, computed independently:
-#   ytd     — pairs present in every year of the window, compared on each year's elapsed window.
-#   yoy     — pairs present in every year of the window, compared on the full year.
-#   quarter — for each quarter number, pairs present in every year that HAS that quarter number,
-#             compared within that quarter's own year-set (independent per quarter number).
-#   half    — same as quarter, per half number (H1 = fiscal quarters 1-2, H2 = 3-4). Needs
-#             fiscal_calendar.half_periods=True.
+# Comparable-pairs (like-for-like) kinds the pipeline can produce, in canonical order. Kept in
+# sync with retail-insights-pipeline/config.py -- see its COMPARABLE_KINDS_ALL comment.
 COMPARABLE_KINDS_ALL = ("ytd", "yoy", "quarter", "half")
 
 CONFIG: Dict[str, Any] = {
     # =============================================================================
     # IDENTITY & RUN WINDOW
     # =============================================================================
-    "customer": "your_customer",  # datastore bucket defaults to /mnt/invent-{customer}-datastore
+    "customer": "tbretail",
     "run": {
         # full       = compute KPIs from source Delta tables (default)
         # html_only  = load saved outputs from output.path_segments and render HTML only
@@ -86,44 +146,36 @@ CONFIG: Dict[str, Any] = {
     "reporting_window": {
         # Update as_of_date before each run. REPORT_END_DATE resolves to the last
         # completed Saturday on or before this date.
-        "as_of_date": "2026-09-01",
-        "run_min_date": None,  # None = YTD from Jan 1; e.g. "2024-01-01" for multi-year
-        # as_of          = the report ends at the last completed Saturday (REPORT_END_DATE above).
-        # complete_month = the report ends at the last day of the most recent fully elapsed month on
-        #                  or before that Saturday, and every metric and view (monthly, quarter,
-        #                  half, YTD, annual, weekly, comparisons, comparable, daily in-stock, blocked
-        #                  days) stops there. With a fiscal calendar the month is a fiscal month (the
-        #                  upload must extend past that Saturday and run_min_date must reach the start
-        #                  of the cut month). Without one it is a calendar month: the cut is usually
-        #                  mid-week, the clipped trailing week is dropped from the Weekly tab, and
-        #                  months are bucketed by each week's start date.
-        "report_end": "as_of",
+        "as_of_date": "2026-08-02",
+        "run_min_date": "2025-02-08",  # None = YTD from Jan 1; e.g. "2025-01-01" for multi-year
+        # complete_month: the report ends at the last day of the most recent fully elapsed fiscal
+        # month on or before the last completed Saturday; every metric and view stops there. The
+        # fiscal_cal upload must extend past that Saturday and run_min_date must reach the start of
+        # the cut month. See config.py's reporting_window.report_end.
+        "report_end": "complete_month",
     },
     # =============================================================================
     # CALENDAR
     # =============================================================================
     "fiscal_calendar": {
         "use_fiscal_calendar": True,
-        # True adds the "half" period type (H1 = fiscal quarters 1-2, H2 = 3-4): a Half tab and the
-        # "half" comparable_pairs kind. Only complete halves are shown, like quarters.
-        "half_periods": False,
-        # Your fiscal_cal upload's column names (used since use_fiscal_calendar=True above).
-        # Each is auto-detected/optional -- read when present, derived when absent. If your
-        # fiscal year is calendar-offset (e.g. doesn't start in January), set month_name_col so
-        # the Monthly tab reads a real display label verbatim instead of deriving one from the
-        # (fiscal, not calendar) month number -- a fiscal month number doesn't reliably map to
-        # a real calendar month once the fiscal year itself is offset.
+        # Adds the Half tab (H1 = fiscal quarters 1-2, H2 = 3-4) and the "half" comparable kind.
+        "half_periods": True,
+        # tbretail's fiscal_cal upload columns (used since use_fiscal_calendar=True above). Each
+        # is auto-detected/optional -- read when present, derived when absent. tbretail's fiscal
+        # year runs Feb-Jan, so fiscal month/quarter numbers don't match the real calendar (fiscal
+        # month 07 has been observed spanning real 8/2-8/29) -- month_name_col is read verbatim
+        # for the Monthly tab label for exactly that reason, instead of deriving one from the
+        # (fiscal, not calendar) month number.
         "column_map": {
             "quarter_col": "Quarter",
             "month_col": "Month",
             "month_name_col": "month_name",
         },
-        # Column-name map for the RAW daily-data table. "date" is always required -- read
-        # unconditionally on both the fiscal and civil paths (kpi_pipeline/pipeline.py,
-        # kpi_pipeline/scope.py). "week" is only consulted on the CIVIL path
-        # (use_fiscal_calendar=False). No "year" key: Year always comes from `date`
-        # (F.year(date)), never a raw source year column -- that column can carry the ISO
-        # week-year (late-December weeks labelled as the next year). See fiscal.py.
+        # Column-name map for the RAW noob/daily-data table -- only consulted on the CIVIL path
+        # (use_fiscal_calendar=False, not tbretail's setting above). No "year" key: Year always
+        # comes from `date` (F.year(date)), never a raw source year column -- that column can
+        # carry the ISO week-year (late-December weeks labelled as the next year). See fiscal.py.
         "daily_time_columns": {
             "date": "date",
             "week": "week",
@@ -133,9 +185,7 @@ CONFIG: Dict[str, Any] = {
     # SCOPE & POPULATION
     # =============================================================================
     "score_scope": {
-        # Used when scope.use_hybrid_scope=True (missing-week backfill under hybrid scope,
-        # see "scope" below) OR scope.run_scope_diff=True (defined-vs-score diagnostic) --
-        # either one alone triggers score-scope building (kpi_pipeline/scope.py's need_score).
+        # Only consulted for the MISSING weeks under hybrid scope (see "scope" below).
         "min_percentile": 0.2,
         "min_weeks_for_filter": 2,
     },
@@ -158,6 +208,8 @@ CONFIG: Dict[str, Any] = {
         #                           (strict); weeks come from date_col (or year_col/week_col).
         # Week-agnostic grains span the whole report window; product_store_week is the only grain
         # whose hybrid backfill fills weeks the scope table does not cover.
+        # product_store: operation_scope mode (scope_source below) is pair-level, and the daily
+        # in-stock / blocked scope need the store dimension.
         "grain": "product_store",
         "product_col": "product_id",
         "store_col": "store_id",        # required for product_store / product_store_week grains
@@ -167,31 +219,25 @@ CONFIG: Dict[str, Any] = {
         "date_col": "week_start_date",
         "year_col": None,
         "week_col": None,
-        # product_store_week only: if the scope source's own earliest available week (across
-        # every pair) starts later than the report window's start, only the pairs tied to that
-        # earliest week are assumed in scope back to the window's start -- a data-availability
-        # limit of the source, not a per-pair signal. A pair whose own first-seen week is later
-        # still (a new store/product) is left untouched (see kpi_pipeline/scope.py's
-        # _defined_scope_weekly). True by default (matches product/product_store's own
-        # always-whole-window behaviour). Set False for a deployment with EXISTING
-        # product_store_week history saved before this option existed -- switching it on for such
-        # a deployment mixes two scope definitions in one incrementally-merged table; a fresh
-        # product_store_week adoption is unaffected either way.
+        # product_store_week only -- no-op at our current grain ("product_store"). See config.py.
         "backfill_leading_gap": True,
     },
     "scope_adjustments": {
         # ---------------------------------------------------------------------------
-        # ADDITIONS: force specific products into scope regardless of the defined scope
-        # table (e.g. a business-curated "always report on these" list). Disabled example
-        # below shows the pattern -- store_col=None + date_col/year_col/week_col=None means
-        # "every store, every week in the report window" for this source's product_ids.
+        # ADDITIONS: JAB products (from NFG_EXCEL_PATH_JAB)
         # ---------------------------------------------------------------------------
+        # These are replenishment products whose product_codes start with "JAB".
+        # They are included in scope regardless of the defined scope table.
+        # See SETUP CHECKLIST at the top of this file for how to create the CSV.
         "additions": [
             {
-                "enabled": False,  # flip on once path points at a real table/CSV
-                "label": "example_addition",
+                "enabled": True,  # flip to True after creating the CSV
+                "label": "jab_products",
                 "source": "csv",
-                "path": "/Workspace/Shared/your_project/data/addition_product_ids.csv",
+                "path": (
+                    "/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
+                    "KPI-NEW/data/jab_product_ids.csv"
+                ),
                 "location": "workspace",
                 "csv_options": {"header": True, "inferSchema": True},
                 "join_keys": ["product_id"],
@@ -201,17 +247,65 @@ CONFIG: Dict[str, Any] = {
                 "year_col": None,
                 "week_col": None,
             },
+            # CAUTION -- UNCONFIRMED, needs a decision before this repo is shared further:
+            # this entry points at the SAME CSV as the "REMOVALS: NON-COMP products" block
+            # below, which says NFG/NON-COMP products "are excluded from KPI scope" -- but
+            # placing it here, as an ADDITION with store_col=None, does the opposite: it
+            # unions every (product, store, week) selling these products into scope,
+            # unconditionally, regardless of removals[0] below (currently disabled). It is
+            # not mentioned in the SETUP CHECKLIST above, unlike every other adjustment in
+            # this file. This looks like an accidental copy of removals[0] into additions
+            # with the label swapped, but that has NOT been confirmed with a human -- do
+            # not disable or "fix" this without checking, since it currently affects which
+            # products count toward live production KPI numbers.
+            {
+                "enabled": True,  # flip to True after creating the CSV
+                "label": "NGF products",
+                "source": "csv",
+                "path": (
+                    "/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
+                    "KPI-NEW/data/non_comp_ids_20260817.csv"
+                ),
+                "location": "workspace",
+                "csv_options": {"header": True, "inferSchema": True},
+                "join_keys": ["product_id"],
+                "product_col": "product_id",
+                "store_col": None,
+                "date_col": None,
+                "year_col": None,
+                "week_col": None,
+            }, 
+            
+            {
+                "enabled": True,
+                "label": "nvrout_scope_backfill",
+                "source": "csv",          # or "delta" if you have a Delta table instead
+                "path": "/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
+                    "KPI-NEW/data/nvrout_product_ids.csv",
+                "location": "workspace",  # "datastore" if it's a Delta table under the bucket instead
+                "csv_options": {"header": True, "inferSchema": True},
+                "join_keys": ["product_id"],
+                "product_col": "product_id",
+                "store_col": None,        # None = union this product in for ALL stores/weeks, unconditionally
+                "date_col": None,
+                "year_col": None,
+                "week_col": None,
+            }
         ],
         # ---------------------------------------------------------------------------
-        # REMOVALS: exclude specific products from scope (e.g. a business-curated
-        # "never report on these" list). Same shape/mechanics as additions above.
+        # REMOVALS: NON-COMP products (from NFG_EXCEL_PATH / NFG Excel list)
         # ---------------------------------------------------------------------------
+        # Products on the NFG (Non-Future-Growth) list are excluded from KPI scope.
+        # After removal, is_nvrout='yes' = NVROUT segment; is_nvrout='no' = COMP segment.
+        # See SETUP CHECKLIST at the top of this file for how to create the CSV.
         "removals": [
             {
-                "enabled": False,  # flip on once path points at a real table/CSV
-                "label": "example_removal",
+                "enabled": False,  # flip to True after creating the CSV
                 "source": "csv",
-                "path": "/Workspace/Shared/your_project/data/removal_product_ids.csv",
+                "path": (
+                    "/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
+                    "KPI-NEW/data/non_comp_ids_20260817.csv"
+                ),
                 "location": "workspace",
                 "csv_options": {"header": True, "inferSchema": True},
                 "join_keys": ["product_id"],
@@ -220,7 +314,7 @@ CONFIG: Dict[str, Any] = {
                 "date_col": None,
                 "year_col": None,
                 "week_col": None,
-            },
+            }
         ],
     },
     # =============================================================================
@@ -229,10 +323,9 @@ CONFIG: Dict[str, Any] = {
     "path_segments": {
         "fiscal": ["one_time_uploads", "fiscal_cal"],
         "daily_data": ["noob", "daily-data"],
-        # DC/warehouse daily inventory -- backs dc_mean_stock/total_mean_stock/WOS_DC/WOS_TOTAL.
-        # product_id is item-family-rolled onto its parent before restricting to scope_core
-        # (already parent-rolled) -- required whenever this is configured, not gated by
-        # dc_instock.enabled.
+        # DC/warehouse daily inventory (product_id, warehouse_id, date, inventory) -- backs
+        # dc_mean_stock/total_mean_stock/WOS_DC/WOS_TOTAL. No column mapping needed (unlike
+        # lost_sales_source/instock_source): source columns are already canonical.
         "inventory_warehouse": ["operation", "inventory_warehouse"],
         # Parent/child item-family map -- superseded/child products (is_main=false) roll up onto
         # parent_id. Used by the inventory_warehouse rollup; read unconditionally.
@@ -242,12 +335,10 @@ CONFIG: Dict[str, Any] = {
         # Store goods-in-transit snapshots backing instock_daily.git_date_shift_days.
         "goods_in_transit": ["operation", "goods_in_transit"],
         "products": ["master-data", "products"],
-        # Add a model_id=... path segment here if your lost-sales table is partitioned by model.
-        "lost_sales": ["noob", "lost-sales"],
+        "lost_sales": ["reporting", "future_visibility", "reporting_inv_fc_dfu", "report_dfu"],
         "defined_scope": ["analysis", "instock_rate", "instock_rate_scope"],
         # product_agg_level -> product_id map for lost_sales_source/instock_source's
-        # product_agg_level_col (see README) -- only needed if either source is keyed by a
-        # planning/DFU level instead of product_id.
+        # product_agg_level_col (see README).
         "product_planning_level": ["operation", "product_planning_level"],
     },
     "input_filters": {
@@ -255,7 +346,8 @@ CONFIG: Dict[str, Any] = {
         # NOTE: when lost_sales_ensemble.enabled=True, this "lost_sales" filter list is
         # applied to BOTH the fast (path_segments.lost_sales) and slow
         # (lost_sales_ensemble.slow_path_segments) sources — same schema, same filters.
-        "defined_scope": [],
+        # NOT applied while scope_source.mode="operation_scope" (read only in "defined_scope" mode).
+        "defined_scope": ["week_start_date < '2026-08-02'"],
         "lost_sales": [],
         "daily_data": ["usable = 1"],
         "inventory_warehouse": [],
@@ -264,72 +356,76 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     # LOST-SALES SOURCE — column mapping for the raw lost-sales table
     # ---------------------------------------------------------------------------
-    # Downstream code always sees canonical column names regardless of this mapping (see
-    # README). Defaults below match a typical noob/lost-sales schema -- override only the
-    # columns your own table names differently.
-    # product_col / product_agg_level_col: configure exactly ONE, never both. If the source has
-    # a native product_id-level column, set product_col to it (product_col always takes
-    # precedence when present -- see README). If it doesn't (keyed by planning/DFU level
-    # instead), set product_col to None and set product_agg_level_col -- the pipeline joins it
-    # to path_segments.product_planning_level to derive product_id (see README).
+    # path_segments.lost_sales points at report_dfu (future_visibility's own pre-blended
+    # fast/slow ensemble output), not the raw noob/lost-sales model tables -- replaces
+    # lost_sales_ensemble below (now off) so lost_sales comes from this ONE source instead
+    # of retail-insights-pipeline running its own separate blend.
+    #
+    # in_stock_col/total_days_col below are UNUSED while instock_daily.enabled=True (or
+    # instock_source.enabled=True) -- _aggregate_lost_sales_pairweek skips them in those modes.
+    # Left populated anyway so this block is self-sufficient if in-stock moves back to this table.
+    #
+    # product_col="product_id": report_dfu has a genuine, native product_id column (confirmed
+    # directly against the live table) -- no DFU/planning-level join needed here at all, so
+    # product_agg_level_col stays None. If a future source ever DOES only carry a DFU/
+    # planning-level key with a real one-to-many relationship to product_id, set
+    # product_col=None and set product_agg_level_col instead -- configure exactly one of the
+    # two, never both (product_col always wins when set and present on the source). See README
+    # and _map_product_agg_level_to_product_id's docstring (kpi_pipeline/inputs.py), which fails
+    # loudly if neither is usable, or if product_agg_level_col is configured but not present.
+    #
+    # CAUTION -- store_col=None: lost_sales is an absolute count; report_dfu has no store_id,
+    # so this pair-week's value gets broadcast across every scoped store of the product and
+    # OVER-COUNTS if later summed across stores (same risk documented on instock_source below,
+    # but that one is a ratio -- safe there, NOT safe here).
     "lost_sales_source": {
-        "week_col": "week_start_date",
-        "product_col": "product_id",
-        "store_col": "store_id",
+        "week_col": "TY_week_start_date",
+        "product_col": None,
+        "store_col": None,  # see CAUTION above
         "lost_sales_col": "lost_sales",
-        "in_stock_col": "in_stock",
-        "total_days_col": "details.total_days",  # supports a dotted nested-struct path
-        "product_agg_level_col": None,
+        "in_stock_col": "TY_total_days_instock",  # actual, not sim_instock_days
+        "total_days_col": "TY_total_day",         # actual, not sim_total_days
+        "product_agg_level_col": 'product_agg_level',  # not needed -- report_dfu has a native product_id column
         # Spark SQL expressions narrowing the DAILY-DATA sales that form the OTHER half of
-        # lost_sales_pct's denominator (lost_sales / (sales + lost_sales)). Applies to nothing
-        # else -- total_sales_quantity, mean_stock, WOS and friends keep the full population.
+        # lost_sales_pct's denominator (lost_sales / (sales + lost_sales)). Nothing else changes.
         #
-        # Set this when the lost-sales table covers a NARROWER population than daily_data does.
-        # A model built to exclude e-commerce, for example, gives a numerator with no ecom while
-        # daily_data's sales still carry it, inflating the denominator and reading lost_sales_pct
-        # LOW. Excluding the same stores here puts both halves on one population, e.g.:
-        #   "sales_filter": ["store_id NOT IN (9001, 9002)"]
-        # Any column present on daily_data can be used. Empty = no narrowing.
-        "sales_filter": [],
+        # report_dfu's lost_sales comes from model_id=top_down_excluding_ecom, so the numerator
+        # carries no ecom while daily_data's sales still do -- inflating the denominator and
+        # reading lost_sales_pct LOW. This excludes the same three ecom stores the model itself
+        # drops, copied from the script that produces it (customer-analysis-tbretail's
+        # store_replenishment/future_visibility/lost_sales_product_120dayslookback.py:66, and the
+        # identical filter in _365dayslookback.py:67). Keep the two in sync if that list changes.
+        "sales_filter": ["store_id NOT IN (829, 639, 917)"],
     },
     # ---------------------------------------------------------------------------
     # INSTOCK SOURCE — optional override to read in-stock days from a DIFFERENT table
     # ---------------------------------------------------------------------------
-    # OFF by default: in-stock/total-days come from lost_sales_source above. Turn this on
-    # only when a DIFFERENT pipeline computes instock than the one computing lost sales.
-    # Mutually exclusive with lost_sales_ensemble below.
+    # OFF for tbretail (instock_daily below replaces it); kept configured for a switch back. When on,
+    # it reads report_dfu directly (same table as lost_sales_source), but
+    # unlike that block, uses fallback_sources so in-stock reaches back further than
+    # TY_ alone would -- LY_/LLY_ backfill weeks that have rolled off TY_'s own trailing
+    # window (see README's fallback_sources docs). lost_sales itself stays on
+    # lost_sales_source above (its own TY_ column is trusted across the full date range,
+    # no LY_/LLY_ backfill needed there -- see that block's own comments). Mutually
+    # exclusive with lost_sales_ensemble below (off, no conflict).
     #
-    # Real-world example (one deployment's actual config, kept here to illustrate
-    # fallback_sources -- adapt the path/columns for your own source, don't copy verbatim):
-    #   "enabled": True,
-    #   "path_segments": ["reporting", "future_visibility", "some_report_table"],
-    #   "week_col": "TY_week_start_date",
-    #   "in_stock_col": "TY_total_days_instock",
-    #   "total_days_col": "TY_total_day",
-    #   "product_agg_level_col": "product_agg_level",
-    #   "store_col": None,
-    #   # fallback_sources: additional column-sets from the SAME table, appended in order to
-    #   # fill weeks the primary column-set doesn't have (e.g. a rolling-window source whose
-    #   # TY_ only reaches back so far, backfilled by LY_/LLY_ columns carrying the identical
-    #   # formula for the calendar week 52/104 weeks earlier -- see README). Each fallback
-    #   # entry inherits product_col/store_col/product_agg_level_col from above unless
-    #   # overridden.
-    #   "fallback_sources": [
-    #       {"week_col": "LY_week_start_date", "in_stock_col": "LY_total_days_instock", "total_days_col": "LY_total_day"},
-    #       {"week_col": "LLY_week_start_date", "in_stock_col": "LLY_total_days_instock", "total_days_col": "LLY_total_day"},
-    #   ],
-    # product_col / product_agg_level_col: same "configure exactly one" rule as
-    # lost_sales_source above -- product_col (when set and present on the source) always wins.
+    # product_col="product_id": report_dfu has a genuine, native product_id column (confirmed
+    # directly against the live table) -- no DFU/planning-level join needed, product_agg_level_col
+    # stays None. Same fact as lost_sales_source above (same table); same "configure exactly
+    # one of product_col / product_agg_level_col" rule applies here too.
     "instock_source": {
-        "enabled": False,
-        "path_segments": None,  # required when enabled=True, e.g. ["some", "instock", "table"]
-        "week_col": "week_start_date",
-        "product_col": "product_id",
-        "store_col": "store_id",
-        "in_stock_col": "in_stock",
-        "total_days_col": "total_days",
-        "product_agg_level_col": None,
-        "fallback_sources": [],  # optional additional column-sets from the same table (see above)
+        "enabled": False,  # replaced by instock_daily below; kept configured for an easy switch back
+        "path_segments": ["reporting", "future_visibility", "reporting_inv_fc_dfu", "report_dfu"],
+        "week_col": "TY_week_start_date",
+        "product_col": None,
+        "store_col": None,
+        "in_stock_col": "TY_total_days_instock",  # actual, not sim_instock_days
+        "total_days_col": "TY_total_day",         # actual, not sim_total_days
+        "product_agg_level_col": 'product_agg_level',  # not needed -- report_dfu has a native product_id column
+        "fallback_sources": [
+            {"week_col": "LY_week_start_date", "in_stock_col": "LY_total_days_instock", "total_days_col": "LY_total_day"},
+            {"week_col": "LLY_week_start_date", "in_stock_col": "LLY_total_days_instock", "total_days_col": "LLY_total_day"},
+        ],
     },
     # ---------------------------------------------------------------------------
     # ITEM FAMILY SOURCE — parent/child product rollup for every DC frame
@@ -344,17 +440,15 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     # ITEM FAMILY ROLLUP — per-source toggle for the child->parent product_id rollup
     # ---------------------------------------------------------------------------
-    # inventory_warehouse defaults ON (preserves today's always-on behaviour).
+    # inventory_warehouse defaults ON (preserves the previous always-on behaviour).
     # daily_data defaults ON too -- build_scoped_daily's own join to already-parent-rolled
     # scope_core/ctx.products_attr otherwise silently DROPS any daily-data row still carrying a
     # child/superseded product_id (a pre-existing bug; this toggle fixes it by default). Turning
     # it on can shift historical numbers for any product with a supersede history.
     # lost_sales defaults OFF -- report_dfu already does its own supersede substitution upstream,
     # so a second rollup here would likely be a no-op; kept available as an opt-in safety net.
-    # defined_scope defaults OFF for the same reason -- a client's scope source may already be
-    # rolled to parent product_id upstream (as tbretail's is); this is an opt-in safety net for a
-    # client whose scope source isn't. Requires path_segments.item_family whenever any of the
-    # four is True.
+    # defined_scope defaults OFF too -- our scope source is already rolled to parent product_id
+    # upstream. Requires path_segments.item_family whenever any of the four is True.
     "item_family_rollup": {
         "daily_data": True,
         "lost_sales": False,
@@ -362,12 +456,11 @@ CONFIG: Dict[str, Any] = {
         "defined_scope": False,
     },
     # ---------------------------------------------------------------------------
-    # DC INSTOCK — gated: DC in-stock rate from an expanded inventory_warehouse grid
+    # DC INSTOCK — DC in-stock rate from an expanded inventory_warehouse grid
     # ---------------------------------------------------------------------------
-    # OFF by default -- requires path_segments.item_family to point at a real table. Each pair's
-    # grid starts at its own first stocked day, so a pair ranged at a DC but never once stocked is
-    # absent rather than reading 0% (see README's "dc_instock" section). When disabled,
-    # dc_in_stock_rate is emitted as a literal null column so the output shape stays constant.
+    # OFF for tbretail (no DC in-stock metric in the report). When on, each pair's grid starts at its
+    # own first stocked day, so a pair ranged at a DC but never once stocked is absent rather than
+    # reading 0% (see README's "dc_instock").
     "dc_instock": {
         "enabled": False,
         "stock_threshold": 0,  # a day counts as "stocked" when inventory > stock_threshold
@@ -395,7 +488,7 @@ CONFIG: Dict[str, Any] = {
     # this one scope with its additions: in-stock counts an addition from its first daily row, with no
     # main-item, active or blocked-scope filter.
     "scope_source": {
-        "mode": "defined_scope",
+        "mode": "operation_scope",
         "solution_id": 21,
         "run_date": None,  # "YYYY-MM-DD" Sunday; None = latest Sunday on or before today
         "main_items_only": True,
@@ -404,9 +497,9 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     # BLOCKED SCOPE — UI blocks removed from every daily-data-derived metric
     # ---------------------------------------------------------------------------
-    # OFF by default (ui_parameters_path None); setting ui_parameters_path turns it on. Reads the UI
-    # parameter snapshot {ui_parameters_path}/blocked_scope/{product,product_destination,destination}
-    # (parquet; destination_id = store) for scope_source.solution_id.
+    # ON for tbretail (OFF in the generic config: ui_parameters_path None). Reads the UI parameter snapshot
+    # {ui_parameters_path}/blocked_scope/{product,product_destination,destination} (parquet;
+    # destination_id = store) for scope_source.solution_id.
     # Requires scope_source.mode="operation_scope" (blocks are matched to its pairs).
     #   rule "after_scope_start": a block applies to a pair only when block.start_date >=
     #                             the pair's scope_start (same day: applies); an earlier block is
@@ -418,13 +511,15 @@ CONFIG: Dict[str, Any] = {
     # filtered per day and are left as they are. Always set ui_parameters_path explicitly: the
     # newest snapshot folder can hold no blocks for this solution.
     "blocked_scope": {
-        "ui_parameters_path": None,  # path under the datastore root; None = blocked scope off
+        # Airflow variable ui_parameters_path (the newest folder, 2026-09-30-204511_..., has only
+        # solution 51 blocks).
+        "ui_parameters_path": "ui-data/parameter_config/2026-09-30-065549_23d44fd8-8e05-475b-835d-8812ffb50b21",
         "rule": "after_scope_start",
     },
     # ---------------------------------------------------------------------------
     # INSTOCK DAILY — in-stock rate built from daily-data (replaces the weekly in-stock read)
     # ---------------------------------------------------------------------------
-    # OFF by default. When on, in_stock_rate comes from noob/daily-data over the scope pairs
+    # ON for tbretail (OFF in the generic config): in_stock_rate comes from noob/daily-data over the scope pairs
     # (store-level scope grain required) instead of lost_sales_source / instock_source (turn
     # instock_source off). Output keeps the weekly in-stock shape, so metrics and population_filters
     # work unchanged. See README's "instock_daily" section.
@@ -444,28 +539,29 @@ CONFIG: Dict[str, Any] = {
     # Every scoped pair counts, scope_adjustments additions included: an added pair has no scope_start,
     # so it counts from its first daily row, and it gets no blocks.
     "instock_daily": {
-        "enabled": False,
+        "enabled": True,
         "git_date_shift_days": -1,
-        "count_start": "first_daily_row",  # "scope_start" / "earliest" need scope_source operation_scope
+        "count_start": "earliest",
         "require_daily_data": True,
-        "history_start": None,
+        # report_dfu's earliest week; pairs stocked before the window count from its start.
+        "history_start": "2024-01-21",
         "usable_only": True,
-        "input_filters": [],
+        # ECOM stores leave in-stock only (still counted in sales / inventory metrics).
+        "input_filters": ["store_id NOT IN (829, 639, 917)"],
     },
     # ---------------------------------------------------------------------------
     # LOST-SALES ENSEMBLE — blend two lost-sales models by product sales speed
     # ---------------------------------------------------------------------------
-    # OFF by default: lost_sales_source above is read as a single source, as-is. Turn this on
-    # to blend a fast-mover model (path_segments.lost_sales) with a slow-mover model (below) by
-    # each product's own sales-speed cluster instead -- fast movers (cluster in
-    # fast_mover_clusters) take the fast model; everyone else (other clusters AND products with
-    # no/NULL cluster) takes the slow model. All three aggregate fields (lost_sales, in_stock,
-    # total_days) for a given product/store/week always come from the SAME chosen model.
+    # OFF for TBretail: lost_sales_source above now reads report_dfu's already-blended
+    # output directly, so this repo no longer needs to run its own fast/slow blend. Left
+    # here, disabled, as the fallback path if report_dfu ever stops being usable as a source
+    # (e.g. scope/grain concerns -- see lost_sales_source's CAUTION comment above).
     "lost_sales_ensemble": {
         "enabled": False,
-        "slow_path_segments": ["noob", "lost-sales"],  # e.g. a longer-lookback model variant
-        # Product sales-speed source. "long" = a long-format attributes table (one row per
-        # product_id x attribute_name); "wide" = the cluster is already its own column.
+        "slow_path_segments": ["noob", "lost-sales", "model_id=top_down_excluding_ecom_365days"],
+        # Product sales-speed source. TBretail's speed_cluster_path_segments below is the
+        # platform's long-format attributes table (one row per product_id x attribute_name) —
+        # speed_cluster_format="long" is the matching shape.
         "speed_cluster_path_segments": ["noob", "product-cluster-attributes-snapshot"],
         "speed_cluster_format": "long",
         "speed_cluster_attribute_name": "sales_speed",
@@ -478,13 +574,12 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     # SLICES — dimensions sourced from master-data/products
     # ---------------------------------------------------------------------------
+    # brand:     raw column on products table
+    # SMW: derived — KNG vs SMW split (same logic as v4 notebook)
     "slices": {
-        "dimensions": ["brand"],  # any column(s) on your products table
+        "dimensions": ["brand"],
         "derived_dimensions": {
-            # Example: a SQL CASE expression evaluated against the products table, producing
-            # a new cut dimension not present as a raw column. Replace with your own, or
-            # remove this entry if you don't need any derived dimensions.
-            "example_derived": "CASE WHEN brand = 'A' THEN 'Group A' ELSE 'Other' END",
+            "SMW": "CASE WHEN brand = 'KNG' THEN 'KNG' ELSE 'SMW' END",
         },
         # Restrict which values of a slice dimension appear in the breakdown (that
         # dimension only; Overall and other slices are unaffected). Two shapes:
@@ -494,28 +589,64 @@ CONFIG: Dict[str, Any] = {
         "value_filters": {},
     },
     # ---------------------------------------------------------------------------
-    # DIMENSION SOURCES — optional external tables that become named ROOT populations
+    # DIMENSION SOURCES — NVROUT flag from operation/extended_product
     # ---------------------------------------------------------------------------
-    # Gated feature: disabled example below shows the pattern. Each enabled source is
-    # left-joined onto products by join_key, contributes new slice dimension(s), and — via
-    # root_values — can also become its own root population tab (see README's "Dimension
-    # sources -> roots" section) instead of an ordinary flat cut.
+    # is_nvrout = 'yes' → NVROUT products
+    # is_nvrout = 'no'  → COMP products (once NON-COMP removed via scope_adjustments)
+    # is_nvrout = NULL  → products not present in extended_product (check coverage)
+    #
+    # IMPORTANT: extended_product must have one row per product_id for this flag to
+    # be accurate. If a product can have multiple program values across rows, pre-
+    # aggregate the table to a single NVROUT membership flag per product_id and
+    # point "path" at that table instead of path_segments. The toolkit dedups
+    # extended_product by product_id before joining, keeping an arbitrary row.
     "dimension_sources": [
         {
-            "enabled": False,
-            "label": "example_dimension_source",
+            "enabled": True,
+            "label": "extended_product",
             "source": "delta",
-            "path_segments": ["operation", "some_attribute_table"],
+            "path_segments": ["operation", "extended_product"],
             "join_key": "product_id",
             "columns": [],
             "derived": {
-                # Products absent from the source get NULL, not the ELSE branch -- fillna
-                # (below) imputes that if you need a clean two-value split with no NULLs.
-                "IS_EXAMPLE_FLAG": "CASE WHEN some_column = 'X' THEN 'yes' ELSE 'no' END",
+                # Products absent from extended_product get NULL, not 'no'.
+                # If you need a clean yes/no split with no NULLs, make the source
+                # cover the full product universe or replace this with a pre-agg table.
+                "IS_NVROUT": "CASE WHEN program LIKE '%NVROUT%' THEN 'yes' ELSE 'no' END",
             },
-            "fillna": {"IS_EXAMPLE_FLAG": "no"},
-            # Root "example_root" = IS_EXAMPLE_FLAG=='yes' only ('no'/NULL aren't their own root).
-            "root_values": {"IS_EXAMPLE_FLAG": {"yes": "example_root"}},
+            "fillna": {"IS_NVROUT": "no"},
+            # Root "nvrout" = IS_NVROUT=='yes' only ('no'/NULL aren't their own root).
+            "root_values": {"IS_NVROUT": {"yes": "nvrout"}},
+        },
+        # ---------------------------------------------------------------------------
+        # NGF list -> COMP vs NON-COMP split (does NOT remove anything from scope;
+        # NGF items stay in daily_data/scope and in the Overall numbers).
+        #
+        # derived SQL runs against the SOURCE table's own rows, before the left join.
+        # Since this CSV only lists NGF product_ids, "derived" only ever fires for NGF
+        # rows -> is_comp = 'no'. Every other product has no row in this CSV at all, so
+        # after the left join it would get NULL, not 'yes' — fillna (below) imputes that
+        # NULL to 'yes' instead, giving a clean two-value is_comp split with no NULLs,
+        # despite the source only covering one side of the split.
+        # ---------------------------------------------------------------------------
+        {
+            "enabled": True,  # flip to True after creating the CSV
+            "label": "ngf_comp_split",
+            "source": "csv",
+            "path": (
+                "/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
+                "KPI-NEW/data/non_comp_ids_20260817.csv"
+            ),
+            "location": "workspace",
+            "csv_options": {"header": True, "inferSchema": True},
+            "join_key": "product_id",
+            "columns": [],
+            "derived": {
+                "IS_COMP": "'no'",
+            },
+            "fillna": {"IS_COMP": "yes"},
+            # Root "comp" = IS_COMP=='yes' only (NON-COMP isn't its own root).
+            "root_values": {"IS_COMP": {"yes": "comp"}},
         },
     ],
     # =============================================================================
@@ -529,30 +660,15 @@ CONFIG: Dict[str, Any] = {
         "enabled": ["yoy", "ytd"],
     },
     "comparable_pairs": {
-        # OFF by default -- requires run_min_date to span at least 2 years (e.g. "2024-01-01"
-        # to cover a 2024-vs-2025 link) to have anything to compute. Like-for-like: recomputes
-        # metrics over only the (product_id, store_id) pairs present in EVERY year of the run
-        # window -- one shared universe reused across every consecutive-year link, not a separate
-        # universe per link.
-        "enabled": False,
-        # Which comparable kinds to compute -- see COMPARABLE_KINDS_ALL above. "quarter" builds
-        # its own pair universe per quarter number (a pair must appear in that quarter of every
-        # year that has it, independent of the other quarter numbers); "half" does the same per
-        # half number.
-        "kinds": ["ytd"],
-        # grain — what a "same pair across every year" actually means. Independent of
-        # defined_scope.grain above (scoped_daily carries store_id whatever the scope grain):
-        #   "product_store" (default) -> the population is the distinct (product_id, store_id)
-        #                     pairs present in every qualifying year. A product that opened or
-        #                     closed in one store drops that store's rows from every year.
-        #   "product"      -> the population is the distinct product_id values present in every
-        #                     qualifying year; every store of a qualifying product is then kept.
-        #                     Same-store movement is NOT isolated -- a product that gained or lost
-        #                     stores between the compared years still shifts the metrics. Use it
-        #                     when the store estate itself churns enough that a pair-level
-        #                     intersection leaves too small a population to be meaningful.
-        # Only the store-side population is affected; dc_daily/dc_inst keep their own
-        # (product_id, warehouse_id) universe under both values (DC has no store dimension).
+        # Like-for-like: recomputes metrics over only the pairs present in EVERY qualifying year —
+        # the same concept as v4's _pairs_same_calendar_years / sameytd. Requires run_min_date to
+        # span at least 2 years (e.g. "2024-01-01" for a comparable 2024-vs-2025 link).
+        "enabled": True,
+        # ytd (existing) + yoy (full window year) + quarter / half (independent per quarter / half
+        # number, only years where that quarter / half is fully elapsed count). See config.py's
+        # COMPARABLE_KINDS_ALL.
+        "kinds": ["ytd", "yoy", "quarter", "half"],
+        # "product_store" (default) or "product" -- see config.py's comparable_pairs.grain comment.
         "grain": "product_store",
     },
     # =============================================================================
@@ -574,14 +690,11 @@ CONFIG: Dict[str, Any] = {
             "dc_mean_stock",
             "total_mean_stock",
             "WOS",
-            "wos_revenue",
             "wos_cost",
             "WOS_DC",
             "WOS_TOTAL",
             "inventory_turnover_rate",
             "in_stock_rate",
-            "weighted_instock_rate",
-            "dc_in_stock_rate",
             "lost_sales_pct",
         ],
         "scope_diff_metrics": [
@@ -594,7 +707,6 @@ CONFIG: Dict[str, Any] = {
             "WOS_DC",
             "WOS_TOTAL",
             "in_stock_rate",
-            "dc_in_stock_rate",
             "lost_sales_pct",
         ],
         "labels": {
@@ -606,87 +718,67 @@ CONFIG: Dict[str, Any] = {
             "mean_stock": "Daily stock avg (M units)",
             "mean_stock_retail": "Daily stock avg retail (M $)",
             "mean_stock_cost": "Daily stock avg cost (M $)",
-            "dc_mean_stock": "Daily DC stock avg (M units)",
-            "total_mean_stock": "Daily total stock avg (M units)",
+            "dc_mean_stock": "Daily DC stock avg (units)",
+            "total_mean_stock": "Daily total stock avg (units)",
             "WOS": "WOS (units)",
-            "wos_revenue": "WOS revenue",
             "wos_cost": "WOS cost",
             "WOS_DC": "WOS (DC)",
             "WOS_TOTAL": "WOS (Total)",
             "inventory_turnover_rate": "Inventory Turnover Rate",
             "in_stock_rate": "In-Stock Rate",
-            "weighted_instock_rate": "Weighted In-Stock Rate",
-            "dc_in_stock_rate": "DC In-Stock Rate",
             "lost_sales_pct": "Lost Sales %",
             "distinct_product_count": "Distinct products",
             "distinct_store_count": "Distinct stores",
             "distinct_pair_count": "Distinct pairs",
         },
-        "pp_change_metrics": ["in_stock_rate", "weighted_instock_rate", "dc_in_stock_rate", "lost_sales_pct"],
+        "pp_change_metrics": ["in_stock_rate", "lost_sales_pct"],
         # ---------------------------------------------------------------------------
-        # POPULATION FILTERS — restrict specific metrics to a narrower product population
+        # POPULATION FILTERS — narrow ONE metric's own population, on top of root/cut
         # ---------------------------------------------------------------------------
-        # Optional. Excludes/includes products from ONE metric's calculation without touching
-        # scope, roots, or any other metric -- e.g. "in-stock rate should never count NON-COMP
-        # products, even in the Overall root" or "WOS without NVROUT". Applied ON TOP OF
-        # whatever root/cut is already in effect (so it's a no-op inside a root that already
-        # restricts to the same value, e.g. filtering IS_COMP inside the "comp" root).
-        #
-        # Shape: {metric_col: {dim_col: value_filter_spec}} -- dim_col is any dimension_sources
-        # or slices column already joined onto products (e.g. "IS_COMP", "IS_NVROUT", "brand").
-        # value_filter_spec is the SAME shape as slices.value_filters: a list (include-only) or
-        # a dict with include/exclude/keep_null.
-        #
-        # CONSTRAINT: metric_cols computed in one shared aggregation pass can only be filtered
-        # TOGETHER, not independently of each other -- see kpi_pipeline/filters.py's
-        # METRIC_FILTER_GROUPS for the exact groupings:
-        #   sales group:  total_sales_quantity, total_sales_revenue, total_inventory, AUR, AUC,
-        #                 distinct_product_count, distinct_store_count, distinct_pair_count
-        #   wos group:    WOS, wos_revenue, wos_cost
-        #   wos_dc_total group: WOS_DC, WOS_TOTAL
-        #   mean_stock group: mean_stock, mean_stock_retail, mean_stock_cost
-        #   dc_inventory group: dc_mean_stock, total_mean_stock
-        #   (inventory_turnover_rate, in_stock_rate, weighted_instock_rate, dc_in_stock_rate,
-        #    lost_sales_pct are each their own independent group.)
-        # Setting an entry on any one column in a group applies it to the whole group; setting
-        # conflicting specs on two columns in the same group fails loudly at runtime.
-        #
-        # Example -- exclude NON-COMP from both in-stock metrics, WOS without NVROUT:
-        #   "population_filters": {
-        #       "in_stock_rate":         {"IS_COMP": {"exclude": ["no"]}},
-        #       "weighted_instock_rate": {"IS_COMP": {"exclude": ["no"]}},
-        #       "WOS":                   {"IS_NVROUT": {"exclude": ["yes"]}},
-        #   },
-        "population_filters": {},
+        # kpi-skill-toolkit's Overall in-stock deliberately excludes NON-COMP products
+        # (inst_products = nvr_ids ∪ comp_ids_primary, "# should not have non comp" —
+        # kpi_metrics_script_main notebooks). This pipeline's "overall" root applies no
+        # restriction of its own, so NON-COMP products (added to scope via the
+        # "NGF products" scope_adjustments addition above, NON-COMP removal disabled)
+        # were counting toward Overall's in-stock rate — the confirmed cause of the
+        # 2026-09-03/04 Overall-instock-only mismatch (COMP/NVROUT matched throughout,
+        # since NON-COMP was never part of either of those roots to begin with).
+        # IS_COMP=='no' -> NON-COMP (dimension_sources "ngf_comp_split" below);
+        # excluding it here brings Overall's instock population in line with
+        # kpi-skill-toolkit's, without touching scope, roots, or any other metric.
+        "population_filters": {
+            "in_stock_rate": {"IS_COMP": {"exclude": ["no"]}},
+        },
     },
     # =============================================================================
     # OUTPUT & REPORTING
     # =============================================================================
     "output": {
         "save_outputs": True,
-        "path_segments": ["analysis", "kpi_reports", "outputs"],
-        "run_date": None,
-        "save_mode": "initial",
+        "path_segments": ["analysis", "tbretail_kpis", "outputs"],
+        "run_date": '2026-09-14',
+        "save_mode": "full_refresh",
         "allow_overwrite_existing": True,
         "recompute_comparisons_from_history": True,
     },
     "html_report": {
         "enabled": True,
         "filename": "kpi_report_{customer}_{report_end}.html",
-        "report_title": "KPI Report",  # customize per client, e.g. "Acme Corp KPI Report"
+        "report_title": "TBretail KPI Report",
         "output_path_segments": None,
         "metric_definitions": {},
-        # Set to 3 or 4 to cap if the report gets too wide with many years in view.
+        # Show all years to cover the 2024 / 2025 / 2026 multi-year view.
+        # Set to 3 or 4 to cap if the report gets too wide.
         "weekly_display_weeks": 5,
         "monthly_display_months": 5,
         "quarterly_display_quarters": 5,
         "half_display_halves": 4,
         "yearly_display_years": None,
         # root id -> tab label; roots not listed fall back to "Overall" / the root id.
-        "root_labels": {},
+        "root_labels": {"comp": "LFL", "nvrout": "NVROUT"},
         # slice dimension name -> tab label, display only (saved outputs keep the dimension name),
         # e.g. {"brand": "Banner"}; dimensions not listed show their name title-cased.
-        "dimension_labels": {},
+        "dimension_labels": {"brand": "Banner"},
     },
 }
 
@@ -893,16 +985,6 @@ def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
         ins["in_stock_col"] = os.environ["KPI_INSTOCK_IN_STOCK_COL"].strip()
     if "KPI_INSTOCK_TOTAL_DAYS_COL" in os.environ:
         ins["total_days_col"] = os.environ["KPI_INSTOCK_TOTAL_DAYS_COL"].strip()
-
-    ifr = out.setdefault("item_family_rollup", {})
-    if "KPI_ITEM_FAMILY_ROLLUP_DAILY_DATA" in os.environ:
-        ifr["daily_data"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_DAILY_DATA"])
-    if "KPI_ITEM_FAMILY_ROLLUP_LOST_SALES" in os.environ:
-        ifr["lost_sales"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_LOST_SALES"])
-    if "KPI_ITEM_FAMILY_ROLLUP_INVENTORY_WAREHOUSE" in os.environ:
-        ifr["inventory_warehouse"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_INVENTORY_WAREHOUSE"])
-    if "KPI_ITEM_FAMILY_ROLLUP_DEFINED_SCOPE" in os.environ:
-        ifr["defined_scope"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_DEFINED_SCOPE"])
 
     op = out.setdefault("output", {})
     if "KPI_SAVE_OUTPUTS" in os.environ:
@@ -1278,8 +1360,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         )
 
     # Selected comparable-pairs kinds — validated and normalised to canonical order. Only
-    # meaningful when comparable_pairs.enabled=True; resolves to an empty list when disabled (no
-    # need to force a non-empty kinds list on an off feature).
+    # meaningful when comparable_pairs.enabled=True; resolves to an empty list when disabled.
     comparable_pairs_cfg = cfg.get("comparable_pairs", {}) or {}
     comparable_pairs_enabled = bool(comparable_pairs_cfg.get("enabled", False))
     requested_comparable_kinds = comparable_pairs_cfg.get("kinds")
@@ -1300,15 +1381,10 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             "comparable_pairs.kinds resolved to an empty list while comparable_pairs.enabled=True; "
             f"choose at least one of {list(COMPARABLE_KINDS_ALL)}"
         )
-
-    # Grain of the comparable same-pairs population itself (NOT defined_scope.grain -- see the
-    # comparable_pairs config block). Validated the same way defined_scope.grain is, above.
     comparable_pairs_grain = comparable_pairs_cfg.get("grain", "product_store")
-    valid_comparable_grains = {"product", "product_store"}
-    if comparable_pairs_grain not in valid_comparable_grains:
+    if comparable_pairs_grain not in ("product_store", "product"):
         raise ValueError(
-            f"comparable_pairs.grain must be one of {sorted(valid_comparable_grains)}; "
-            f"got {comparable_pairs_grain!r}"
+            f"comparable_pairs.grain must be one of ['product', 'product_store']; got {comparable_pairs_grain!r}"
         )
 
     half_periods = bool(cfg["fiscal_calendar"]["half_periods"])
@@ -1396,8 +1472,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "SPEED_CLUSTER_VALUE_COL": lse.get("speed_cluster_value_col", "product_speed_cluster"),
         "LOST_SALES_COLUMN_MAP": lost_sales_column_map,
         "LOST_SALES_SALES_FILTER": lost_sales_sales_filter,
-        "INSTOCK_SOURCE_ENABLED": instock_source_enabled,
-        "INSTOCK_SOURCE_COLUMN_MAP": instock_source_column_map,
         "ITEM_FAMILY_COLUMN_MAP": item_family_column_map,
         "ITEM_FAMILY_ROLLUP": item_family_rollup,
         "SCOPE_SOURCE": scope_source,
@@ -1405,6 +1479,8 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "INSTOCK_DAILY": instock_daily,
         "DC_INSTOCK_ENABLED": dc_instock_enabled,
         "DC_INSTOCK_STOCK_THRESHOLD": dc_instock_stock_threshold,
+        "INSTOCK_SOURCE_ENABLED": instock_source_enabled,
+        "INSTOCK_SOURCE_COLUMN_MAP": instock_source_column_map,
         **paths,
         "DEFINED_SCOPE": defined_scope,
         "INPUT_FILTERS": cfg.get("input_filters", {}),

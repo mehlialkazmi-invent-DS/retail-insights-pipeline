@@ -30,15 +30,22 @@ class KPIContext:
     # absent for a given dimension_source column.
     root_definitions: List[Dict[str, Any]] = field(default_factory=list)
     available_fiscal_months: Optional[List[int]] = None
-    # {"Fiscal_Quarter": df, "Fiscal_Month": df} -- the (Year, period) pairs that have FULLY
-    # ELAPSED as of REPORT_END_DATE (fiscal.complete_fiscal_periods). Semi-joined onto every metric
-    # frame by kpi_long._period_frames so the Quarter/Monthly value-trend tabs never carry an
-    # in-progress trailing period. Set by fiscal.build_fiscal_and_products; stays None in html_only
-    # mode, which renders saved rows and never period-frames a Spark frame.
+    # {"Fiscal_Quarter": df, "Fiscal_Month": df, plus "Fiscal_Half": df when half_periods} -- the (Year, period) pairs that
+    # have FULLY ELAPSED as of REPORT_END_DATE (fiscal.complete_fiscal_periods). Semi-joined onto
+    # every metric frame by kpi_long._period_frames so the Quarter/Half/Monthly value-trend tabs
+    # never carry an in-progress trailing period. Set by fiscal.build_fiscal_and_products; stays
+    # None in html_only mode, which renders saved rows and never period-frames a Spark frame.
     complete_fiscal_periods: Optional[Dict[str, DataFrame]] = None
 
     defined_scope_keys: Optional[DataFrame] = None
     scope_keys: List[str] = field(default_factory=list)
+    # scope_source.mode="operation_scope" only: (product_id, store_id, scope_start) of the platform
+    # scope after the main-item / active filters. Source of each pair's scope start date for the
+    # blocked-scope rule and the daily in-stock count start.
+    operation_scope_pairs: Optional[DataFrame] = None
+    # blocked_scope.ui_parameters_path set only: cached (product_id, store_id, date) days removed
+    # from every daily-data-derived metric. None when blocked scope is off.
+    blocked_days: Optional[DataFrame] = None
 
     scope_adjustments_applied: bool = False
     scope_before_adjustments: Optional[DataFrame] = None
@@ -61,19 +68,21 @@ class KPIContext:
 
     # Gated comparable-pairs (like-for-like) output: metrics over only the pairs present in every
     # year of the run window. comparable_kpi_long carries ALL enabled kinds (comparable_pairs.kinds
-    # -- see config.py), tagged by its own comparison_type column ("ytd"/"yoy"/"quarter");
-    # comparable_comparison_{ytd,yoy,quarter} are that kind's own long-format comparison rows.
+    # -- see config.py), tagged by its own comparison_type column ("ytd"/"yoy"/"quarter"/"half");
+    # comparable_comparison_{ytd,yoy,quarter,half} are that kind's own long-format comparison rows.
     # Populated only when comparable_pairs.enabled=True and the kind is in comparable_pairs.kinds.
     comparable_kpi_long: Optional[pd.DataFrame] = None
     comparable_comparison_ytd: Optional[pd.DataFrame] = None
     comparable_comparison_yoy: Optional[pd.DataFrame] = None
     comparable_comparison_quarter: Optional[pd.DataFrame] = None
+    comparable_comparison_half: Optional[pd.DataFrame] = None
 
     yoy_display: Optional[pd.DataFrame] = None
     ytd_display: Optional[pd.DataFrame] = None
     comparable_ytd_display: Optional[pd.DataFrame] = None
     comparable_yoy_display: Optional[pd.DataFrame] = None
     comparable_quarter_display: Optional[pd.DataFrame] = None
+    comparable_half_display: Optional[pd.DataFrame] = None
     save_plan: Optional[Any] = None
 
     daily_data_raw: Optional[DataFrame] = None

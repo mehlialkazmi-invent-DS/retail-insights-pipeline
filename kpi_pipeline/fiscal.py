@@ -36,7 +36,7 @@ def _build_fiscal_week_frame(
     used when it names a column actually present on daily_grain; otherwise that fiscal attribute is
     derived instead. This lets every client's fiscal_cal upload -- with or without any of these
     columns -- and the no-upload fallback both resolve to the same output shape (Fiscal_Quarter,
-    Fiscal_Month[, Fiscal_Month_Name]). See config.py's fiscal_calendar.column_map.
+    Fiscal_Half, Fiscal_Month[, Fiscal_Month_Name]). See config.py's fiscal_calendar.column_map.
 
     Derivation fallbacks:
       * Fiscal_Month: F.month(week_start_date) -- the real calendar month. This IS correct as-is
@@ -45,6 +45,7 @@ def _build_fiscal_week_frame(
       * Fiscal_Quarter: ceil(Fiscal_Month / 3), computed from Fiscal_Month (whichever source
         produced it above) rather than from `date` directly, so quarter and month stay internally
         consistent with each other regardless of which one actually came from the upload.
+      * Fiscal_Half: Fiscal_Quarter 1-2 -> 1, 3-4 -> 2, always derived from Fiscal_Quarter.
       * Fiscal_Month_Name: no derivation here -- see html_report._build_month_display_labels,
         which derives a display name from the majority real calendar month across each fiscal
         month's actual dates when this column is absent.
@@ -98,7 +99,7 @@ def _build_fiscal_week_frame(
             "Fiscal_Quarter", ((F.col("Fiscal_Month") - F.lit(1)) / F.lit(3)).cast("int") + F.lit(1)
         )
 
-    return frame
+    return frame.withColumn("Fiscal_Half", ((F.col("Fiscal_Quarter") - F.lit(1)) / F.lit(2)).cast("int") + F.lit(1))
 
 
 def _fiscal_upload_column_map(ctx: KPIContext) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -147,7 +148,7 @@ def _compute_available_fiscal_months(ctx: KPIContext) -> List[int]:
     Delegates to complete_fiscal_periods -- NOT ctx.fiscal_week directly, which is itself clipped
     to [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] and so would trivially treat every period in
     the window as complete. This was a live bug (in-progress periods always read as elapsed) fixed
-    alongside comparable.py's analogous _complete_quarter_years.
+    alongside comparable.py's analogous _complete_period_years.
     """
     fw = ctx.fiscal_week
     latest_year = fw.agg(F.max("Year")).collect()[0][0]
@@ -155,9 +156,12 @@ def _compute_available_fiscal_months(ctx: KPIContext) -> List[int]:
     return sorted(int(r["Fiscal_Month"]) for r in complete.select("Fiscal_Month").collect())
 
 
-# Period columns a (Year, period) completeness set is computed for — the two fiscal rollups the
-# Quarter/Monthly value-trend tabs group by (see kpi_long._period_frames).
-COMPLETE_PERIOD_COLUMNS = ("Fiscal_Quarter", "Fiscal_Month")
+# Period columns a (Year, period) completeness set is computed for — the fiscal rollups the
+# Quarter/Half/Monthly value-trend tabs group by (see kpi_long._period_frames).
+COMPLETE_PERIOD_COLUMNS = ("Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month")
+
+# Civil-calendar path only: calendar months per period column, to derive period bounds analytically.
+_MONTHS_PER_PERIOD = {"Fiscal_Month": 1, "Fiscal_Quarter": 3, "Fiscal_Half": 6}
 
 
 def _fiscal_period_bounds(ctx: KPIContext, period_col: str) -> DataFrame:
@@ -188,8 +192,8 @@ def _fiscal_period_bounds(ctx: KPIContext, period_col: str) -> DataFrame:
       * daily-data time grain (use_fiscal_calendar=False) — no calendar exists beyond the data, but
         on that path Fiscal_Month IS the real calendar month of the week start and Fiscal_Quarter
         is ceil(month/3) (see _build_fiscal_week_frame's derivation fallbacks), so the period
-        start/end are the first/last day of that calendar month / of the quarter's first/third
-        month — computable analytically, no calendar lookup needed.
+        start/end are the first/last day of that calendar month / of the quarter's or half's first
+        and last month — computable analytically, no calendar lookup needed.
     """
     if ctx.settings["USE_FISCAL_CALENDAR"]:
         quarter_col, month_col, month_name_col = _fiscal_upload_column_map(ctx)
@@ -204,7 +208,7 @@ def _fiscal_period_bounds(ctx: KPIContext, period_col: str) -> DataFrame:
             F.max("week_end_date").alias("period_end"),
         )
 
-    months_in_period = 3 if period_col == "Fiscal_Quarter" else 1
+    months_in_period = _MONTHS_PER_PERIOD[period_col]
     last_month_number = F.col(period_col) * F.lit(months_in_period)
     first_month_number = last_month_number - F.lit(months_in_period) + F.lit(1)
     return (
@@ -231,7 +235,7 @@ def complete_fiscal_periods(ctx: KPIContext, period_col: str) -> DataFrame:
 
     Semi-join this onto a metric frame to drop every row belonging to a period that is either
     still in progress at the window's trailing edge or truncated at its leading edge — what keeps
-    an incomplete quarter/month off the Quarter and Monthly value-trend tabs
+    an incomplete quarter/half/month off the Quarter, Half and Monthly value-trend tabs
     (kpi_long._period_frames). Every pair well inside the window is trivially complete; only the
     one or two nearest either edge are ever at risk.
 
@@ -240,8 +244,9 @@ def complete_fiscal_periods(ctx: KPIContext, period_col: str) -> DataFrame:
     over for the latest year", then applied to every year so YTD stays apples-to-apples) — that
     function DOES delegate to this same helper (at Fiscal_Month grain) for its own per-pair check,
     it just then reduces the result to a plain list of month numbers for the latest year only. The
-    Weekly tab needs neither: REPORT_END_DATE is the last completed Saturday, so a partial week
-    never exists.
+    Weekly tab needs no completeness set: REPORT_END_DATE is a Saturday, except with
+    report_end="complete_month" on the civil calendar, where kpi_long._period_frames drops the
+    trailing partial week instead.
     """
     start = ctx.settings["EFFECTIVE_REPORT_START_DATE"]
     end = ctx.settings["REPORT_END_DATE"]
@@ -250,6 +255,98 @@ def complete_fiscal_periods(ctx: KPIContext, period_col: str) -> DataFrame:
         .filter((F.col("period_start") >= F.lit(start)) & (F.col("period_end") <= F.lit(end)))
         .select("Year", period_col)
     )
+
+
+def _civil_month_cut(end: datetime.date) -> datetime.date:
+    """Last day of the most recent complete calendar month on or before ``end``."""
+    if (end + datetime.timedelta(days=1)).day == 1:
+        return end
+    return end.replace(day=1) - datetime.timedelta(days=1)
+
+
+def apply_report_end_mode(ctx: KPIContext) -> None:
+    """report_end="complete_month": cut REPORT_END_DATE back to the last day of the most recent
+    fully elapsed month on or before it.
+
+    Must run before anything reads REPORT_END_DATE (build_fiscal_and_products, the scopes, the
+    daily in-stock and blocked-days windows, the saved-outputs HTML in html_only mode): they all
+    read the cut date from ctx.settings. Running it again on an already cut date changes nothing.
+
+    Fiscal calendar (use_fiscal_calendar=True): month bounds come from _fiscal_period_bounds, i.e.
+    the UNCLIPPED fiscal_cal upload, so a month still in progress at REPORT_END_DATE reports its
+    real (later) last day and is excluded. The upload must extend past REPORT_END_DATE: an upload
+    ending earlier would make its own last date look like a month end. Fiscal months are whole
+    weeks, so the cut date stays the Saturday that ends a week.
+
+    Civil calendar (use_fiscal_calendar=False): no calendar exists beyond the data, so the cut is
+    the last day of the previous calendar month (or REPORT_END_DATE itself when it is a month end).
+    That is usually not a Saturday: the last week is clipped at the cut, and kpi_long drops the
+    clipped trailing Weekly column. Months are bucketed by each week's start date, so this is a
+    calendar-month cut, not exact calendar-month totals.
+
+    Raises when no month ends inside the window, and when the cut month starts before
+    EFFECTIVE_REPORT_START_DATE (fiscal: the month's period_start; civil: the 1st of the cut month):
+    that month would be reported with its first days missing.
+    """
+    s = ctx.settings
+    if s["REPORT_END_MODE"] == "as_of":
+        return
+    end = s["REPORT_END_DATE"]
+    if s["USE_FISCAL_CALENDAR"]:
+        upload_end = _read_fiscal_cal_upload(ctx, s["PATH_FISCAL"]).agg(F.max("date")).collect()[0][0]
+        if upload_end is None or upload_end <= end:
+            raise ValueError(
+                f"report_end='complete_month': the fiscal_cal upload ends {upload_end}; it must extend past "
+                f"REPORT_END_DATE {end} so the month containing it can be classified."
+            )
+        cut_month = (
+            _fiscal_period_bounds(ctx, "Fiscal_Month")
+            .filter(F.col("period_end") <= F.lit(end))
+            .orderBy(F.col("period_end").desc())
+            .select("period_start", "period_end")
+            .first()
+        )
+        cut, cut_month_start = (None, None) if cut_month is None else (cut_month["period_end"], cut_month["period_start"])
+    else:
+        cut = _civil_month_cut(end)
+        cut_month_start = cut.replace(day=1)
+    start = s["EFFECTIVE_REPORT_START_DATE"]
+    if cut is None or cut < start:
+        raise ValueError(
+            f"report_end='complete_month': no month ends between {start} and {end}; "
+            "widen run_min_date or move as_of_date."
+        )
+    if cut_month_start < start:
+        raise ValueError(
+            f"report_end='complete_month': the cut month {cut_month_start}..{cut} starts before the report "
+            f"start {start}, so its first days are outside the window; widen run_min_date to {cut_month_start} "
+            "or earlier, or move as_of_date."
+        )
+    print(f"report_end=complete_month: REPORT_END_DATE {end} -> {cut}")
+    s["REPORT_END_DATE"] = cut
+
+
+def require_complete_time_grain(
+    ctx: KPIContext, fiscal_cal: DataFrame, start: datetime.date, end: datetime.date, grain_label: str
+) -> None:
+    """Raise when ``fiscal_cal`` lacks any date between ``start`` and ``end``.
+
+    A missing date silently drops out of every daily metric and shifts the week bounds the
+    in-stock denominator is counted from. On the daily-data path the calendar is only the dates
+    present in daily-data, so a gap there means missing source data.
+    """
+    expected = ctx.spark.range(1).select(F.explode(F.sequence(F.lit(start), F.lit(end))).alias("date"))
+    missing = [
+        r["date"]
+        for r in expected.join(fiscal_cal.select("date").distinct(), on="date", how="left_anti")
+        .orderBy("date")
+        .collect()
+    ]
+    if missing:
+        raise ValueError(
+            f"time grain ({grain_label}) is missing {len(missing)} date(s) between {start} and {end}: "
+            f"{[str(d) for d in missing[:20]]}"
+        )
 
 
 def build_fiscal_cal_and_week_from_upload(
@@ -313,6 +410,7 @@ def build_fiscal_week_only(ctx: KPIContext) -> None:
 
     ctx.fiscal_cal = fiscal_cal.cache()
     ctx.fiscal_week = fiscal_week.cache()
+    require_complete_time_grain(ctx, ctx.fiscal_cal, start, end, grain_label)
     print("html_only time grain:", grain_label, "| fiscal weeks:", ctx.fiscal_week.count())
 
 
@@ -466,6 +564,7 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
 
     ctx.fiscal_cal = fiscal_cal.cache()
     ctx.fiscal_week = fiscal_week.cache()
+    require_complete_time_grain(ctx, ctx.fiscal_cal, start, end, grain_label)
 
     null_quarter_weeks = ctx.fiscal_week.filter(F.col("Fiscal_Quarter").isNull()).count()
     if null_quarter_weeks > 0:
@@ -493,12 +592,13 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
     ctx.complete_fiscal_periods = {
         period_col: complete_fiscal_periods(ctx, period_col).cache()
         for period_col in COMPLETE_PERIOD_COLUMNS
+        if period_col != "Fiscal_Half" or s["HALF_PERIODS"]
     }
     latest_complete = {
         period_col: pairs.agg(F.max(F.struct("Year", period_col)).alias("latest")).collect()[0]["latest"]
         for period_col, pairs in ctx.complete_fiscal_periods.items()
     }
-    print("latest fully elapsed fiscal period (Quarter/Monthly trend tabs end here):", latest_complete)
+    print("latest fully elapsed fiscal period (Quarter/Half/Monthly trend tabs end here):", latest_complete)
 
     products_raw = ctx.spark.read.format("delta").load(s["PATH_PRODUCTS"])
     slice_dims = s["SLICE_DIMENSIONS"]

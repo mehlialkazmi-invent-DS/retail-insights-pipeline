@@ -6,10 +6,10 @@ Entry point
 
 Produces a self-contained, offline HTML file with:
   * Executive-style header (client, reporting window, scope, slices)
-  * CSS-only major tabs: Annual / YTD / Quarter / Monthly / Weekly / Metric Details
+  * CSS-only major tabs: Annual / YTD / Quarter / Half / Monthly / Weekly / Metric Details
   * Within each period tab: dimension tabs (Overall + every slice column in data)
   * Within each slice dimension: vertical value tabs (one KPI panel per value)
-  * Quarter/Monthly/Weekly tabs are value trends only, limited to the most recent N periods
+  * Quarter/Half/Monthly/Weekly tabs are value trends only, limited to the most recent N periods
     (configurable, default 5) — no comparison table on these tabs
   * KPI tables with category row coloring (revenue / service / inventory / scale)
   * Comparison section on the Annual (YoY) and YTD panels only
@@ -255,6 +255,51 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
 }
 
 
+# Metrics computed from the scoped daily-data rows, i.e. the ones blocked scope removes days from.
+_BLOCKED_DAY_METRICS = (
+    "total_sales_revenue", "total_sales_quantity", "AUR", "AUC", "total_inventory", "mean_stock",
+    "mean_stock_retail", "mean_stock_cost", "WOS", "wos_revenue", "wos_cost", "inventory_turnover_rate",
+)
+
+
+def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    """Definition overrides that depend on the run's settings: the daily in-stock method
+    (instock_daily) and the blocked-days note on the daily-data metrics (blocked_scope)."""
+    out: Dict[str, Dict[str, str]] = {}
+    if settings["BLOCKED_SCOPE"]["path"] is not None:
+        for metric in _BLOCKED_DAY_METRICS:
+            base = DEFAULT_METRIC_DEFINITIONS[metric]
+            out[metric] = {
+                **base,
+                "definition": base["definition"] + " Days blocked in the UI blocked scope are excluded.",
+            }
+    cfg = settings["INSTOCK_DAILY"]
+    if cfg["enabled"]:
+        in_stock = "on-hand inventory > 0"
+        if cfg["git_date_shift_days"] is not None:
+            in_stock += " or store goods in transit > 0"
+        excluded = " and ".join(
+            (["Blocked days"] if settings["BLOCKED_SCOPE"]["path"] is not None else [])
+            + (["unusable days"] if cfg["usable_only"] else [])
+        )
+        excluded = excluded[:1].upper() + excluded[1:]
+        store_scope = "All scoped stores"
+        if cfg["input_filters"]:
+            store_scope += " (input filter: " + " AND ".join(cfg["input_filters"]) + ")"
+        out["in_stock_rate"] = {
+            "label": "In-Stock Rate",
+            "definition": (
+                f"Share of counted store-days on which the product was in stock ({in_stock}), "
+                "from daily inventory. Each product-store pair counts from its count start; a day "
+                "without a daily record is out of stock."
+                + (f" {excluded} are excluded." if excluded else "")
+            ),
+            "store_scope": store_scope,
+            "formula": "Σ(in_stock_days) ÷ Σ(available_days)",
+        }
+    return out
+
+
 # ---------------------------------------------------------------------------
 # CSS
 # ---------------------------------------------------------------------------
@@ -480,7 +525,7 @@ _CSS_BASE = """\
   .kpi-table td {
     padding: 9px 13px;
     border-bottom: 1px solid #eef2f8;
-    text-align: right;
+    text-align: center;
     white-space: nowrap;
   }
   .kpi-table thead th {
@@ -492,7 +537,7 @@ _CSS_BASE = """\
     text-transform: uppercase;
   }
   .kpi-table .cell-kpi {
-    text-align: left;
+    text-align: center;
     min-width: 200px;
     max-width: 300px;
     white-space: normal;
@@ -536,15 +581,15 @@ _CSS_BASE = """\
     font-size: .73rem;
     letter-spacing: .04em;
     text-transform: uppercase;
-    text-align: left;
+    text-align: center;
   }
-  .cmp-table td { text-align: right; }
-  .cmp-table td:first-child { text-align: left; }
+  .cmp-table td { text-align: center; }
   .chg-pos { color: var(--good); font-weight: 700; }
   .chg-neg { color: var(--bad);  font-weight: 700; }
 
   /* --- Comparable (like-for-like) group divider: separates it from the value trend / regular
-     comparison tables above it, especially now that "quarter" can render several sub-tables. --- */
+     comparison tables above it, especially now that "quarter" / "half" render one sub-table per
+     period number. --- */
   .cmp-group-divider {
     margin-top: 30px;
     padding-top: 16px;
@@ -554,6 +599,23 @@ _CSS_BASE = """\
     margin: 0 0 12px;
     font-size: .8rem;
     font-weight: 800;
+    color: var(--ink);
+  }
+
+  /* --- One like-for-like block per quarter / half number: heading, then a rule and extra space
+     between consecutive blocks so Q1 / Q2 / ... (H1 / H2) read as separate tables. --- */
+  .cmp-period-block .cmp-section { margin-top: 12px; }
+  .cmp-period-block + .cmp-period-block {
+    margin-top: 36px;
+    padding-top: 22px;
+    border-top: 2px solid var(--border);
+  }
+  .cmp-period-heading {
+    margin: 0 0 4px;
+    font-size: .95rem;
+    font-weight: 800;
+    letter-spacing: 0;
+    text-transform: none;
     color: var(--ink);
   }
 
@@ -577,8 +639,9 @@ _CSS_BASE = """\
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: .04em;
-    text-align: left;
+    text-align: center;
   }
+  .def-table td { text-align: center; }
   .def-table td:first-child { font-weight: 600; white-space: nowrap; min-width: 160px; }
   .scope-badge {
     display: inline-block;
@@ -614,13 +677,24 @@ _CSS_BASE = """\
 """
 
 
+def _tab_label(text: Any) -> str:
+    """Capitalize each all-lowercase word of a tab label; words with capitals (LFL, YTD, SMW) stay as they are."""
+    return " ".join(w[:1].upper() + w[1:] if w.islower() else w for w in str(text).split(" "))
+
+
+def _root_display_label(root: str, root_display_labels: Dict[str, str]) -> str:
+    return root_display_labels.get(root, "Overall" if root == "overall" else root)
+
+
 def _safe_id(*parts: str) -> str:
     """Build a CSS-safe id fragment from arbitrary strings."""
     raw = "-".join(str(p) for p in parts)
     return re.sub(r"[^a-zA-Z0-9_-]", "-", raw)
 
 
-def _dim_label(dimension: str) -> str:
+def _dim_label(dimension: str, dimension_labels: Dict[str, str]) -> str:
+    if dimension in dimension_labels:
+        return dimension_labels[dimension]
     if dimension == "overall":
         return "Overall"
     return dimension.replace("_", " ").title()
@@ -1053,6 +1127,7 @@ def _comparable_wide_html(
     comp_label: str,
     period_type: Optional[str] = None,
     month_display_by_period: Optional[Dict[str, str]] = None,
+    title: Optional[str] = None,
 ) -> str:
     """One consolidated comparable-pairs (like-for-like) YTD table: N value columns (one per
     year in the report window, from comparable_kpi_long -- reuses _pivot_single_value, the same
@@ -1061,6 +1136,9 @@ def _comparable_wide_html(
     ONE table, instead of N-1 separate 2-column stacked tables. Same value+delta layout as
     _comparison_wide_html's regular-comparison table, just sourced from comparable_kpi_long (a
     separate restricted population) instead of the panel's own already-pivoted value table.
+
+    ``title`` replaces the default "<comp_label> Comparison" caption with a heading (used for the
+    per-quarter / per-half blocks, see _comparable_numbered_section_html).
     """
     if comparable_comp_df is None or comparable_comp_df.empty:
         return ""
@@ -1117,9 +1195,14 @@ def _comparable_wide_html(
             f"</tr>"
         )
 
+    caption = (
+        f"<p class='cmp-label cmp-period-heading'>{_esc(title)}</p>"
+        if title
+        else f"<p class='cmp-label'>{_esc(comp_label)} Comparison</p>"
+    )
     return (
         "<div class='cmp-section'>"
-        f"<p class='cmp-label'>{_esc(comp_label)} Comparison</p>"
+        f"{caption}"
         "<div class='table-wrap'>"
         f"<table class='cmp-table'>{head}<tbody>{''.join(rows)}</tbody></table>"
         "</div>"
@@ -1127,43 +1210,52 @@ def _comparable_wide_html(
     )
 
 
-def _comparable_quarter_section_html(
+_NUMBERED_PERIOD_PREFIX = {"quarter": "Q", "half": "H"}
+
+
+def _comparable_numbered_section_html(
     comparable_kpi_long: Optional[pd.DataFrame],
     comparable_comp_df: Optional[pd.DataFrame],
     dimension: str,
     dimension_value: str,
     metric_cols: List[str],
     labels: Dict[str, str],
+    period_type: str,
     month_display_by_period: Optional[Dict[str, str]] = None,
 ) -> str:
-    """One narrow value+delta table PER quarter number (Q1, Q2, ...) via _comparable_wide_html,
-    instead of a single table mixing every quarter's periods and links together -- each quarter
-    number has its own independent same-pairs population and year-set (see comparable.py's
-    build_comparable_pairs), and a combined table would grow a value column per quarter-year and
-    a delta column per quarter-link, quickly becoming unreadable. A quarter with no qualifying
-    data (fewer than 2 years having it, or 0 common pairs) simply contributes no table."""
+    """One narrow value+delta block PER quarter / half number (Q1, Q2, ... / H1, H2) via
+    _comparable_wide_html, instead of a single table mixing every period's columns and links
+    together -- each number has its own independent same-pairs population and year-set (see
+    comparable.py's build_comparable_pairs), and a combined table would grow a value column per
+    period-year and a delta column per link, quickly becoming unreadable. Each block carries a
+    "Q1 · Like-for-like" heading and is separated from the next by a rule (.cmp-period-block).
+    A number with no qualifying data (fewer than 2 years having it, or 0 common pairs) simply
+    contributes no block."""
+    prefix = _NUMBERED_PERIOD_PREFIX[period_type]
+    tag_col = f"{period_type}_number"
     if (
         comparable_comp_df is None
         or comparable_comp_df.empty
-        or "quarter_number" not in comparable_comp_df.columns
+        or tag_col not in comparable_comp_df.columns
     ):
         return ""
     sections: List[str] = []
-    for q in sorted(int(q) for q in comparable_comp_df["quarter_number"].dropna().unique()):
-        comp_q = comparable_comp_df[comparable_comp_df["quarter_number"] == q]
-        kpi_q = (
-            comparable_kpi_long[comparable_kpi_long["quarter_number"] == q]
+    for n in sorted(int(n) for n in comparable_comp_df[tag_col].dropna().unique()):
+        comp_n = comparable_comp_df[comparable_comp_df[tag_col] == n]
+        kpi_n = (
+            comparable_kpi_long[comparable_kpi_long[tag_col] == n]
             if comparable_kpi_long is not None
             and not comparable_kpi_long.empty
-            and "quarter_number" in comparable_kpi_long.columns
+            and tag_col in comparable_kpi_long.columns
             else pd.DataFrame()
         )
         html = _comparable_wide_html(
-            kpi_q, comp_q, dimension, dimension_value, metric_cols, labels,
-            f"Q{q}", "quarter", month_display_by_period,
+            kpi_n, comp_n, dimension, dimension_value, metric_cols, labels,
+            f"{prefix}{n}", period_type, month_display_by_period,
+            title=f"{prefix}{n} · Like-for-like",
         )
         if html:
-            sections.append(html)
+            sections.append(f"<div class='cmp-period-block'>{html}</div>")
     return "".join(sections)
 
 
@@ -1193,10 +1285,10 @@ def _value_panel_content(
         sub, periods, comp_df, dimension, dimension_value, metric_cols, labels, comp_label,
         period_type, month_display_by_period,
     ) or _kpi_table_html(sub, periods, metric_cols, labels, period_type, month_display_by_period)
-    if period_type == "quarter":
-        comparable_cmp = _comparable_quarter_section_html(
+    if period_type in _NUMBERED_PERIOD_PREFIX:
+        comparable_cmp = _comparable_numbered_section_html(
             comparable_kpi_long, comparable_comp_df, dimension, dimension_value, metric_cols, labels,
-            month_display_by_period,
+            period_type, month_display_by_period,
         )
     else:
         comparable_cmp = _comparable_wide_html(
@@ -1246,7 +1338,7 @@ def _value_tabs_html(
 
     tab_labels = "".join(
         f"<label for='kpi-val-{_safe_id(root, period_type, dimension, str(i))}' class='value-tab'>"
-        f"{_esc(str(v))}</label>"
+        f"{_esc(_tab_label(v))}</label>"
         for i, v in enumerate(values)
     )
 
@@ -1282,6 +1374,8 @@ def _period_tab_html(
     month_display_by_period: Optional[Dict[str, str]] = None,
     root: str = "overall",
     comparable_kpi_long: Optional[pd.DataFrame] = None,
+    *,
+    dimension_labels: Dict[str, str],
 ) -> str:
     pt_id = _safe_id(root, period_type)
 
@@ -1293,7 +1387,7 @@ def _period_tab_html(
 
     tab_labels = "".join(
         f"<label for='kpi-dim-{_safe_id(root, period_type, dim)}' class='dim-tab'>"
-        f"{_esc(_dim_label(dim))}</label>"
+        f"{_esc(_tab_label(_dim_label(dim, dimension_labels)))}</label>"
         for dim in dims
     )
     tab_bar = f"<div class='dim-tab-bar dim-tab-bar-{pt_id}'>{tab_labels}</div>"
@@ -1344,8 +1438,10 @@ def _build_root_period_tabs(
     month_display_by_period: Dict[str, str],
     extra_tab: Optional[Tuple[str, str, str]] = None,
     comparable_kpi_long_map: Optional[Dict[str, Optional[pd.DataFrame]]] = None,
+    *,
+    dimension_labels: Dict[str, str],
 ) -> Tuple[str, str]:
-    """Build (css, body_html) for one root's Annual/Quarter/Month/YTD/Weekly tab group, already
+    """Build (css, body_html) for one root's Annual/Quarter/Half/Month/YTD/Weekly tab group, already
     filtered to that root's rows. `extra_tab` (id, label, panel_html) -- used for "Metric Details"
     when there's only one root (see render_kpi_html) -- is appended into the SAME radio group so
     it sits as a peer of the period tabs, exactly matching the pre-roots layout; with more than
@@ -1365,13 +1461,13 @@ def _build_root_period_tabs(
         for i, pt in enumerate(period_types)
     )
     tab_labels = "".join(
-        f"<label for='kpi-tab-{_safe_id(root, pt)}' class='top-tab'>{_esc(_PERIOD_LABELS.get(pt, pt.title()))}</label>"
+        f"<label for='kpi-tab-{_safe_id(root, pt)}' class='top-tab'>{_esc(_tab_label(_PERIOD_LABELS.get(pt, pt)))}</label>"
         for pt in period_types
     )
     comparable_kpi_long_map = comparable_kpi_long_map or {}
     period_panels = "".join(
         f"<div class='top-panel top-panel-{_safe_id(root, pt)}'>"
-        f"{_period_tab_html(kpi_long_root, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period, comparable_comp_map.get(pt), _COMPARABLE_LABELS.get(pt, ''), month_display_by_period, root, comparable_kpi_long_map.get(pt))}"
+        f"{_period_tab_html(kpi_long_root, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period, comparable_comp_map.get(pt), _COMPARABLE_LABELS.get(pt, ''), month_display_by_period, root, comparable_kpi_long_map.get(pt), dimension_labels=dimension_labels)}"
         f"</div>"
         for pt in period_types
     )
@@ -1379,7 +1475,7 @@ def _build_root_period_tabs(
     if extra_tab is not None:
         extra_id, extra_label, extra_panel_html = extra_tab
         radios += f"<input type='radio' class='top-tab-anchor' name='{group_name}' id='kpi-tab-{extra_id}'>"
-        tab_labels += f"<label for='kpi-tab-{extra_id}' class='top-tab'>{_esc(extra_label)}</label>"
+        tab_labels += f"<label for='kpi-tab-{extra_id}' class='top-tab'>{_esc(_tab_label(extra_label))}</label>"
         period_panels += f"<div class='top-panel top-panel-{extra_id}'>{extra_panel_html}</div>"
         css += "\n" + _DETAILS_TAB_CSS
 
@@ -1431,13 +1527,16 @@ def _report_info_html(
     as_of = settings.get("AS_OF_DATE", "—")
     report_start = settings.get("EFFECTIVE_REPORT_START_DATE", "—")
     report_end = settings.get("REPORT_END_DATE", "—")
-    scope_mode = (
-        "Hybrid"
-        if settings.get("USE_HYBRID_SCOPE")
-        else "Defined only"
-    )
+    if settings.get("USE_HYBRID_SCOPE"):
+        scope_mode = "Hybrid"
+    elif settings["SCOPE_SOURCE"]["mode"] == "operation_scope":
+        scope_mode = "Operation scope"
+    else:
+        scope_mode = "Defined only"
     slice_dims = inferred_dimensions or active_slice_dimensions or settings.get("SLICE_DIMENSIONS") or []
-    slice_labels = ", ".join(_dim_label(d) for d in slice_dims if d != "overall") or "Overall only"
+    slice_labels = ", ".join(
+        _tab_label(_dim_label(d, settings["HTML_REPORT_DIMENSION_LABELS"])) for d in slice_dims if d != "overall"
+    ) or "Overall only"
     generated = datetime.datetime.now().strftime("%d %b %Y, %H:%M")
 
     return f"""<div class="header-top">
@@ -1474,8 +1573,15 @@ def _report_info_html(
     </div>"""
 
 
-_PERIOD_ORDER = ["annual", "ytd", "quarter", "monthly", "weekly"]
-_PERIOD_LABELS = {"annual": "Annual", "ytd": "YTD", "quarter": "Quarter", "monthly": "Monthly", "weekly": "Weekly"}
+_PERIOD_ORDER = ["annual", "ytd", "quarter", "half", "monthly", "weekly"]
+_PERIOD_LABELS = {
+    "annual": "Annual",
+    "ytd": "YTD",
+    "quarter": "Quarter",
+    "half": "Half",
+    "monthly": "Monthly",
+    "weekly": "Weekly",
+}
 _PERIOD_COMP_LABEL = {"annual": "YoY", "ytd": "YTD"}
 _COMPARABLE_LABELS = {"ytd": "Comparable YTD", "annual": "Comparable YoY"}
 
@@ -1483,6 +1589,7 @@ _TURNOVER_PERIOD_LABELS = {
     "annual": "Annual Inventory Turnover Rate",
     "ytd": "YTD Inventory Turnover Rate",
     "quarter": "Quarterly Inventory Turnover Rate",
+    "half": "Half-Yearly Inventory Turnover Rate",
     "monthly": "Monthly Inventory Turnover Rate",
     "weekly": "Weekly Inventory Turnover Rate",
 }
@@ -1528,6 +1635,7 @@ def render_kpi_html(
 
     defs: Dict[str, Dict[str, str]] = {
         **DEFAULT_METRIC_DEFINITIONS,
+        **_settings_metric_definitions(settings),
         **(metric_definitions or {}),
     }
 
@@ -1551,14 +1659,15 @@ def render_kpi_html(
     period_types = [pt for pt in _PERIOD_ORDER if pt in present_period_types]
 
     if not period_types:
-        raise ValueError("kpi_long contains no recognised period_types (annual/quarter/monthly/weekly).")
+        raise ValueError("kpi_long contains no recognised period_types (annual/quarter/half/monthly/weekly).")
 
-    # Quarter/Monthly/Weekly tabs show the raw value trend only (no comparison table) — the
+    # Quarter/Half/Monthly/Weekly tabs show the raw value trend only (no comparison table) — the
     # display-trimmed period tabs already cover "recent quarters/months/weeks" reporting.
     comp_map: Dict[str, Optional[pd.DataFrame]] = {
         "annual": ctx.comparison_yoy,
         "ytd": getattr(ctx, "comparison_ytd", None),
         "quarter": None,
+        "half": None,
         "monthly": None,
         "weekly": None,
     }
@@ -1579,6 +1688,7 @@ def render_kpi_html(
         "annual": getattr(ctx, "comparable_comparison_yoy", None),
         "ytd": getattr(ctx, "comparable_comparison_ytd", None),
         "quarter": getattr(ctx, "comparable_comparison_quarter", None),
+        "half": getattr(ctx, "comparable_comparison_half", None),
         "monthly": None,
         "weekly": None,
     }
@@ -1586,6 +1696,7 @@ def render_kpi_html(
         "annual": _comparable_kpi_long_for("yoy"),
         "ytd": _comparable_kpi_long_for("ytd"),
         "quarter": _comparable_kpi_long_for("quarter"),
+        "half": _comparable_kpi_long_for("half"),
         "monthly": None,
         "weekly": None,
     }
@@ -1604,8 +1715,10 @@ def render_kpi_html(
     # kpi_long (defensive; should normally be all of them). A single root (the common case for a
     # client with no root-producing dimension_sources configured) renders exactly as before --
     # no extra tab layer. More than one root gets its own outer tab, each containing its own
-    # complete Annual/Quarter/Month/YTD/Weekly tab set, mirroring kpi-skill-toolkit's NVROUT/COMP
+    # complete Annual/YTD/Quarter/Half/Monthly/Weekly tab set, mirroring kpi-skill-toolkit's NVROUT/COMP
     # major tabs (see kpi_pipeline/kpi_long.build_kpi_long for how these rows were produced).
+    root_display_labels: Dict[str, str] = settings["HTML_REPORT_ROOT_LABELS"]
+    dimension_labels: Dict[str, str] = settings["HTML_REPORT_DIMENSION_LABELS"]
     present_roots = set(kpi_long["root"].unique()) if "root" in kpi_long.columns else {"overall"}
     roots = [r for r in (["overall"] + [rd["root"] for rd in ctx.root_definitions]) if r in present_roots]
     if not roots:
@@ -1627,6 +1740,7 @@ def render_kpi_html(
             week_start_by_period, month_display_by_period,
             extra_tab=("details", "Metric Details", metric_details_html),
             comparable_kpi_long_map=_comp_df_for_root(comparable_kpi_long_map, root),
+            dimension_labels=dimension_labels,
         )
         main_panel = f"<div class='panel'>{body}</div>"
     else:
@@ -1639,6 +1753,7 @@ def render_kpi_html(
                 _comp_df_for_root(comp_map, root), _comp_df_for_root(comparable_comp_map, root),
                 week_start_by_period, month_display_by_period,
                 comparable_kpi_long_map=_comp_df_for_root(comparable_kpi_long_map, root),
+                dimension_labels=dimension_labels,
             )
             css_parts.append(css)
             root_panels.append((root, body))
@@ -1650,13 +1765,13 @@ def render_kpi_html(
         )
         root_radios += "<input type='radio' class='top-tab-anchor' name='kpi-root' id='kpi-root-details'>"
 
-        root_labels = "".join(
+        root_labels_html = "".join(
             f"<label for='kpi-root-{_safe_id(root)}' class='top-tab'>"
-            f"{_esc('Overall' if root == 'overall' else root)}</label>"
+            f"{_esc(_tab_label(_root_display_label(root, root_display_labels)))}</label>"
             for root, _ in root_panels
         )
-        root_labels += "<label for='kpi-root-details' class='top-tab'>Metric Details</label>"
-        root_tab_bar = f"<div class='top-tab-bar'>{root_labels}</div>"
+        root_labels_html += "<label for='kpi-root-details' class='top-tab'>Metric Details</label>"
+        root_tab_bar = f"<div class='top-tab-bar'>{root_labels_html}</div>"
 
         root_panels_html = "".join(
             f"<div class='top-panel top-panel-root-{_safe_id(root)}'><div class='panel'>{body}</div></div>"

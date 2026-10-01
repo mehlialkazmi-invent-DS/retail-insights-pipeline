@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 from typing import Any, Dict, List, Optional
 
 from pyspark.sql import DataFrame, SparkSession
@@ -387,6 +388,108 @@ def get_item_family_raw(ctx) -> DataFrame:
     if ctx.item_family_raw is None:
         ctx.item_family_raw = read_item_family_source(ctx.spark, ctx.settings, quiet=True).cache()
     return ctx.item_family_raw
+
+
+def read_operation_scope_source(spark: SparkSession, settings: Dict[str, Any], run_date) -> DataFrame:
+    """Platform scope table (operation/scope): the solution's rows for one run_date that are still
+    open on it (end_date null or >= run_date), as (product_id, store_id, start_date).
+
+    Fails loudly when the solution has no rows for run_date -- a wrong solution_id or run_date must
+    not silently produce an empty report.
+    """
+    cfg = settings["SCOPE_SOURCE"]
+    path = settings["PATH_SCOPE"]
+    print(f"reading operation scope: {path} (solution_id={cfg['solution_id']}, run_date={run_date})")
+    rows = (
+        spark.read.format("delta").load(path)
+        .filter((F.col("solution_id") == cfg["solution_id"]) & (F.col("run_date") == F.lit(run_date)))
+        .filter(F.col("end_date").isNull() | (F.col("end_date") >= F.lit(run_date)))
+        .select("product_id", F.col("location_id").alias("store_id"), F.to_date("start_date").alias("start_date"))
+    )
+    if rows.limit(1).count() == 0:
+        raise ValueError(
+            f"No operation scope rows for solution_id={cfg['solution_id']} run_date={run_date} at {path}; "
+            "check scope_source.solution_id / scope_source.run_date."
+        )
+    return rows
+
+
+def read_active_product_ids(spark: SparkSession, settings: Dict[str, Any]) -> DataFrame:
+    return (
+        spark.read.format("delta").load(settings["PATH_PRODUCTS"])
+        .filter(F.col("is_active") == True)  # noqa: E712
+        .select("product_id")
+        .distinct()
+    )
+
+
+BLOCKED_SCOPE_KINDS = {
+    "product": ["product_id"],
+    "product_destination": ["product_id", "store_id"],
+    "destination": ["store_id"],
+}
+
+
+def read_blocked_scope_source(spark: SparkSession, settings: Dict[str, Any], kind: str) -> DataFrame:
+    """One kind of the UI blocked-scope snapshot ({ui_parameters_path}/blocked_scope/{kind}) for the
+    configured solution, as (<key columns of the kind>, block_start, block_end). destination_id is the
+    store. Fails loudly (Spark read error) when the snapshot folder is missing.
+    """
+    key_cols = BLOCKED_SCOPE_KINDS[kind]
+    path = f"{settings['BLOCKED_SCOPE']['path']}/{kind}"
+    print(f"reading blocked_scope/{kind}: {path}")
+    key_exprs = {
+        "product_id": F.col("product_id").cast("int"),
+        "store_id": F.col("destination_id").cast("int"),
+    }
+    blocks = (
+        spark.read.parquet(path)
+        .filter(F.col("solution_id") == settings["SCOPE_SOURCE"]["solution_id"])
+        .select(
+            *[key_exprs[c].alias(c) for c in key_cols],
+            F.to_date("start_date").alias("block_start"),
+            F.to_date("end_date").alias("block_end"),
+        )
+    )
+    if blocks.filter(F.col("block_start").isNull()).limit(1).count() > 0:
+        raise ValueError(f"blocked_scope/{kind} has rows without start_date at {path}")
+    return blocks
+
+
+def read_goods_in_transit_source(spark: SparkSession, settings: Dict[str, Any]) -> DataFrame:
+    """Raw operation/goods_in_transit (snapshot per date; destination_type 0 = store, 1 = warehouse)."""
+    path = settings["PATH_GOODS_IN_TRANSIT"]
+    print(f"reading goods_in_transit: {path}")
+    return spark.read.format("delta").load(path)
+
+
+def get_instock_daily_raw(ctx) -> DataFrame:
+    """Daily-data read for the daily in-stock metric: product_id, store_id, date, inventory and
+    an is_usable flag (usable == 1, null counts as unusable), limited to history_start..report end.
+
+    The range is filtered on the raw date column, before to_date, so Delta file pruning applies.
+    Not cached here: build_instock_daily caches the frame after its scope join.
+
+    Deliberately NOT the input_filters.daily_data read that get_daily_data_raw uses: that filter
+    typically drops unusable days (usable = 1), but the daily in-stock method needs to see them so
+    they can leave the store-day denominator. Not item-family-rolled either: scope pairs are family
+    mains and only their own daily rows count.
+    """
+    s = ctx.settings
+    date_col = s["DAILY_TIME_COLUMNS"]["date"]
+    history_start = s["INSTOCK_DAILY"]["history_start"] or s["EFFECTIVE_REPORT_START_DATE"]
+    day_after_end = s["REPORT_END_DATE"] + datetime.timedelta(days=1)
+    raw = ctx.spark.read.format("delta").load(s["PATH_DAILY_DATA"])
+    return (
+        raw.filter((F.col(date_col) >= F.lit(history_start.isoformat())) & (F.col(date_col) < F.lit(day_after_end.isoformat())))
+        .select(
+            "product_id",
+            "store_id",
+            F.to_date(F.col(date_col)).alias("date"),
+            "inventory",
+            (F.coalesce(F.col("usable"), F.lit(0)) == 1).alias("is_usable"),
+        )
+    )
 
 
 def preview_input_table(

@@ -1,4 +1,4 @@
-"""Gated 'comparable pairs' (like-for-like) comparisons — ytd / yoy / quarter.
+"""Gated 'comparable pairs' (like-for-like) comparisons — ytd / yoy / quarter / half.
 
 Each enabled kind (see config.py's comparable_pairs.kinds / COMPARABLE_KINDS_ALL) recomputes
 metrics over only the pairs present in EVERY qualifying year for that kind -- not just the two
@@ -11,11 +11,12 @@ years of a given link -- then compares each consecutive-year link within that sh
             Annual/YoY tab), chained across every consecutive pair of years (not just the latest
             two, unlike the regular non-comparable YoY comparison in comparisons.py).
   quarter — computed independently PER QUARTER NUMBER: for quarter Q, only years where Q falls
-            entirely inside the report window count (see _complete_quarter_years -- a partial
+            entirely inside the report window count (see _complete_period_years -- a partial
             quarter at either window boundary is excluded outright, since REPORT_END_DATE is a
             week boundary that essentially never aligns to a quarter boundary). A pair must be
             present in quarter Q of every one of those years; each quarter number has its own
             fully independent population and year-chain.
+  half    — exactly like quarter, per HALF NUMBER (H1 = fiscal quarters 1-2, H2 = 3-4).
 
 The same-pairs population's own grain is comparable_pairs.grain (config.py), NOT defined_scope.grain:
 
@@ -31,7 +32,7 @@ Frames with no store_id of their own are restricted to that universe's distinct 
 (as is every frame under grain="product"); dc_daily/dc_inst each keep their own independent
 (product_id, warehouse_id) universe under both grains. See _restrict_frames's docstring.
 
-Produced for a kind only with >=2 qualifying years (quarter: >=2 years with that quarter number),
+Produced for a kind only with >=2 qualifying years (quarter/half: >=2 years with that number),
 gracefully skipped otherwise. Gated overall by comparable_pairs.enabled, per-kind by
 comparable_pairs.kinds.
 
@@ -39,12 +40,14 @@ comparable_kpi_long rows carry link_prior_year/link_current_year so the incremen
 (period_type, period, root, dimension, dimension_value, link_prior_year, link_current_year)
 doesn't collide across links -- a year appears as "current" in one link and "prior" in the next,
 both sharing the same restricted population, and the link tag is what tells those rows apart.
-Quarter rows also carry a plain (non-key) quarter_number column for the HTML renderer to group by
--- period_type ("quarter") + period ("2024-Q1"-style) already disambiguate the row key on their own.
+Quarter rows also carry a plain (non-key) quarter_number column, half rows a half_number column, for
+the HTML renderer to group by -- period_type ("quarter"/"half") + period ("2024-Q1"/"2024-H1"-style)
+already disambiguate the row key on their own.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -74,6 +77,23 @@ _KIND_CTX_ATTRS: Dict[str, Tuple[str, str, str]] = {
     "ytd": ("ytd", "comparable_comparison_ytd", "comparable_ytd_display"),
     "yoy": ("annual", "comparable_comparison_yoy", "comparable_yoy_display"),
     "quarter": ("quarter", "comparable_comparison_quarter", "comparable_quarter_display"),
+    "half": ("half", "comparable_comparison_half", "comparable_half_display"),
+}
+
+
+@dataclass(frozen=True)
+class _NumberedKind:
+    """A comparable kind computed independently per period number (quarter 1-4, half 1-2)."""
+
+    period_col: str  # kpi_long._period_frames key column carrying "<Year>-<number>"
+    number_col: str  # fiscal_week column holding the period number
+    tag_col: str  # plain column the number is tagged on in comparable_kpi_long / the comparison rows
+    prefix: str  # "Q" / "H" in period labels
+
+
+_NUMBERED_KINDS: Dict[str, _NumberedKind] = {
+    "quarter": _NumberedKind("period_key", "Fiscal_Quarter", "quarter_number", "Q"),
+    "half": _NumberedKind("half_key", "Fiscal_Half", "half_number", "H"),
 }
 
 
@@ -137,31 +157,30 @@ def _restrict_frames(
     return out
 
 
-def _complete_quarter_years(ctx: KPIContext, quarter: int) -> List[int]:
-    """Years for which fiscal quarter ``quarter`` falls ENTIRELY within the report window
-    ([EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE]) -- every one of that quarter's real
-    calendar weeks is available, not a partial slice truncated at either window boundary.
+def _complete_period_years(ctx: KPIContext, kind: str, number: int) -> List[int]:
+    """Years for which fiscal quarter/half ``number`` (per ``kind``) falls ENTIRELY within the
+    report window ([EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE]) -- every one of that period's
+    real calendar weeks is available, not a partial slice truncated at either window boundary.
 
-    REPORT_END_DATE is a week boundary (last completed Saturday), never quarter-aligned, so the
-    latest year's occurrence of whichever quarter is currently in progress is virtually always
-    partial -- comparing it against a prior year's FULL quarter would silently produce a wildly
-    wrong "like-for-like" delta (a quarter 6 weeks in compared to a full 13-week quarter). The
-    window's own start can truncate the earliest year's quarter the same way if run_min_date
-    doesn't fall on a quarter boundary.
+    REPORT_END_DATE is a week boundary (last completed Saturday, or the end of the last complete
+    month), never quarter- or half-aligned, so the latest year's occurrence of whichever
+    quarter/half is currently in progress is virtually always partial -- comparing it against a
+    prior year's FULL quarter would silently produce a wildly wrong "like-for-like" delta (a
+    quarter 6 weeks in compared to a full 13-week quarter). The window's own start can truncate
+    the earliest year's quarter the same way if run_min_date doesn't fall on a quarter boundary.
 
-    Delegates to fiscal.complete_fiscal_periods -- NOT ctx.fiscal_week directly. ctx.fiscal_week is
-    itself clipped to [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] (see
+    Reads ctx.complete_fiscal_periods (fiscal.complete_fiscal_periods, built once per run) -- NOT
+    ctx.fiscal_week directly. ctx.fiscal_week is itself clipped to [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] (see
     fiscal.build_fiscal_cal_and_week_from_upload), so a week_start_date/week_end_date queried from
-    it can never fall outside the window in the first place -- any quarter present at all would
+    it can never fall outside the window in the first place -- any period present at all would
     trivially pass a bounds check like "q_start >= start and q_end <= end" whether it's really
     complete or not. fiscal.complete_fiscal_periods re-reads the calendar unclipped specifically to
-    avoid this; a quarter that's genuinely fully closed but happens to have all-zero
-    sales/inventory still counts, and a quarter still in progress never counts even if its partial
+    avoid this; a period that's genuinely fully closed but happens to have all-zero
+    sales/inventory still counts, and a period still in progress never counts even if its partial
     weeks already have real data.
     """
-    from kpi_pipeline.fiscal import complete_fiscal_periods
-
-    complete = complete_fiscal_periods(ctx, "Fiscal_Quarter").filter(F.col("Fiscal_Quarter") == quarter)
+    number_col = _NUMBERED_KINDS[kind].number_col
+    complete = ctx.complete_fiscal_periods[number_col].filter(F.col(number_col) == number)
     return sorted(r["Year"] for r in complete.select("Year").distinct().collect())
 
 
@@ -186,7 +205,7 @@ def _comparable_period_rows(
 ) -> pd.DataFrame:
     """kpi_long-shaped rows (every root x cut, mirrors kpi_long.build_kpi_long) matching
     ``period_filter``, tagged with ``period_type`` (the kpi_long period_type this kind renders
-    under -- "ytd"/"annual"/"quarter") and labelled via kpi_long._period_label(period_type, ...)."""
+    under -- "ytd"/"annual"/"quarter"/"half") and labelled via kpi_long._period_label(period_type, ...)."""
     value_filters = ctx.settings.get("SLICE_VALUE_FILTERS", {}) or {}
     cuts: List[Tuple[str, List[str]]] = [("overall", [])] + [(d, [d]) for d in ctx.cut_dimensions]
     roots: List[Optional[Dict[str, str]]] = [None] + list(ctx.root_definitions)
@@ -269,8 +288,9 @@ def _comparisons_for_link(
     return display, save_parts
 
 
-def _period_key_fns(comparison_type: str, quarter: Optional[int] = None):
-    """(period_key_fn, display_label_fn, change_label_fn) for one comparable kind."""
+def _period_key_fns(comparison_type: str, number: Optional[int] = None):
+    """(period_key_fn, display_label_fn, change_label_fn) for one comparable kind (``number`` is
+    the quarter/half number for the quarter/half kinds)."""
     if comparison_type == "ytd":
         return (
             lambda y: f"YTD-{y}",
@@ -283,11 +303,12 @@ def _period_key_fns(comparison_type: str, quarter: Optional[int] = None):
             lambda y: str(y),
             lambda y: f"YoY {y}",
         )
-    if comparison_type == "quarter":
+    if comparison_type in _NUMBERED_KINDS:
+        prefix = _NUMBERED_KINDS[comparison_type].prefix
         return (
-            lambda y: f"{y}-Q{quarter}",
-            lambda y: f"{y} Q{quarter}",
-            lambda y: f"Q{quarter} {y}",
+            lambda y: f"{y}-{prefix}{number}",
+            lambda y: f"{y} {prefix}{number}",
+            lambda y: f"{prefix}{number} {y}",
         )
     raise ValueError(f"unknown comparable comparison_type {comparison_type!r}")
 
@@ -296,32 +317,33 @@ def _build_comparable_kind(
     ctx: KPIContext,
     comparison_type: str,
     metric_cols: List[str],
-    quarter: Optional[int] = None,
+    number: Optional[int] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Compute one comparable kind's (kpi_long rows, comparison save rows, overall display) —
-    empty frames if there are fewer than 2 qualifying years or 0 common pairs. ``quarter`` is
-    required (and only meaningful) for comparison_type="quarter".
+    empty frames if there are fewer than 2 qualifying years or 0 common pairs. ``number`` (the
+    quarter / half number) is required (and only meaningful) for comparison_type="quarter"/"half".
 
     The store-side universe's keys come from comparable_pairs.grain, resolved ONCE here and
     threaded through _intersect_years/_restrict_frames. comparable_pair_count therefore counts
     common pairs under grain="product_store" and common PRODUCTS under grain="product"."""
     period_type, _, _ = _KIND_CTX_ATTRS[comparison_type]
     pair_keys = _GRAIN_PAIR_KEYS[ctx.settings["COMPARABLE_PAIRS_GRAIN"]]
-    period_col = "period_key" if comparison_type == "quarter" else "Year"
+    numbered = _NUMBERED_KINDS.get(comparison_type)
+    period_col = numbered.period_col if numbered else "Year"
     pf = _period_frames(ctx, ctx.hybrid_frames, period_type)
 
-    def _q(frame: DataFrame) -> DataFrame:
-        return frame.filter(F.col("Fiscal_Quarter") == quarter) if comparison_type == "quarter" else frame
+    def _in_number(frame: DataFrame) -> DataFrame:
+        return frame.filter(F.col(numbered.number_col) == number) if numbered else frame
 
-    scoped_daily_pop = _q(pf["scoped_daily"])
-    dc_daily_pop = _q(pf["dc_daily"])
-    dc_inst_pop = _q(pf["dc_inst"])
+    scoped_daily_pop = _in_number(pf["scoped_daily"])
+    dc_daily_pop = _in_number(pf["dc_daily"])
+    dc_inst_pop = _in_number(pf["dc_inst"])
 
     years = sorted(r["Year"] for r in scoped_daily_pop.select("Year").distinct().collect())
-    if comparison_type == "quarter":
-        # Drop any year whose occurrence of this quarter is only partially inside the report
-        # window (see _complete_quarter_years) -- never compare a partial quarter to a full one.
-        complete_years = set(_complete_quarter_years(ctx, quarter))
+    if numbered:
+        # Drop any year whose occurrence of this quarter/half is only partially inside the report
+        # window (see _complete_period_years) -- never compare a partial period to a full one.
+        complete_years = set(_complete_period_years(ctx, comparison_type, number))
         years = [y for y in years if y in complete_years]
     if len(years) < 2:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -344,8 +366,8 @@ def _build_comparable_kind(
 
     for prior_year, current_year in zip(years, years[1:]):
         period_filter = F.col("Year").isin([prior_year, current_year])
-        if comparison_type == "quarter":
-            period_filter = period_filter & (F.col("Fiscal_Quarter") == quarter)
+        if numbered:
+            period_filter = period_filter & (F.col(numbered.number_col) == number)
         rows = _comparable_period_rows(ctx, restricted, period_filter, metric_cols, period_type, period_col)
 
         tagged = rows.copy()
@@ -353,18 +375,18 @@ def _build_comparable_kind(
         tagged["comparable_pair_count"] = pair_count
         tagged["link_prior_year"] = prior_year
         tagged["link_current_year"] = current_year
-        if comparison_type == "quarter":
-            tagged["quarter_number"] = quarter
+        if numbered:
+            tagged[numbered.tag_col] = number
         kpi_parts.append(tagged)
 
-        period_key_fn, display_label_fn, change_label_fn = _period_key_fns(comparison_type, quarter)
+        period_key_fn, display_label_fn, change_label_fn = _period_key_fns(comparison_type, number)
         disp, parts = _comparisons_for_link(
             ctx, rows, prior_year, current_year, metric_cols,
             comparison_type, period_key_fn, display_label_fn, change_label_fn,
         )
-        if comparison_type == "quarter":
+        if numbered:
             for p in parts:
-                p["quarter_number"] = quarter
+                p[numbered.tag_col] = number
         save_parts.extend(parts)
         if not disp.empty:
             display = disp  # latest link's overall display wins, full detail is in the save table
@@ -411,7 +433,7 @@ def build_comparable_pairs(ctx: KPIContext) -> None:
     for kind in kinds:
         period_type, save_attr, display_attr = _KIND_CTX_ATTRS[kind]
 
-        if kind != "quarter":
+        if kind not in _NUMBERED_KINDS:
             kpi_rows, save_rows, display = _build_comparable_kind(ctx, kind, metric_cols)
             if not kpi_rows.empty:
                 kpi_long_parts.append(kpi_rows)
@@ -421,32 +443,33 @@ def build_comparable_pairs(ctx: KPIContext) -> None:
             summary.append(f"{kind}={pair_count} {unit}" if pair_count else f"{kind}=n/a")
             continue
 
-        # quarter: fully independent per quarter number. Fiscal_Quarter is already a plain column
-        # on scoped_daily (from build_scoped_daily's fiscal_week join) -- no need to build the
-        # "quarter"-period-framed variant (_with_period_key) just to read it.
-        quarters = sorted(
-            r["Fiscal_Quarter"]
-            for r in ctx.hybrid_frames["scoped_daily"].select("Fiscal_Quarter").distinct().collect()
+        # quarter / half: fully independent per period number. The number column is already a
+        # plain column on scoped_daily (from build_scoped_daily's fiscal_week join) -- no need to
+        # build the period-framed variant (_with_period_key) just to read it.
+        numbered = _NUMBERED_KINDS[kind]
+        numbers = sorted(
+            r[numbered.number_col]
+            for r in ctx.hybrid_frames["scoped_daily"].select(numbered.number_col).distinct().collect()
         )
-        q_kpi_parts: List[pd.DataFrame] = []
-        q_save_parts: List[pd.DataFrame] = []
-        q_display = pd.DataFrame()
-        q_summary = []
-        for q in quarters:
-            kpi_rows, save_rows, display = _build_comparable_kind(ctx, "quarter", metric_cols, quarter=q)
+        n_kpi_parts: List[pd.DataFrame] = []
+        n_save_parts: List[pd.DataFrame] = []
+        n_display = pd.DataFrame()
+        n_summary = []
+        for n in numbers:
+            kpi_rows, save_rows, display = _build_comparable_kind(ctx, kind, metric_cols, number=n)
             if not kpi_rows.empty:
-                q_kpi_parts.append(kpi_rows)
+                n_kpi_parts.append(kpi_rows)
                 pair_count = int(kpi_rows["comparable_pair_count"].iloc[0])
-                q_summary.append(f"Q{q}={pair_count} {unit}")
+                n_summary.append(f"{numbered.prefix}{n}={pair_count} {unit}")
             if not save_rows.empty:
-                q_save_parts.append(save_rows)
+                n_save_parts.append(save_rows)
             if not display.empty:
-                q_display = display  # last quarter with data wins for the top-level display slot
-        if q_kpi_parts:
-            kpi_long_parts.append(pd.concat(q_kpi_parts, ignore_index=True))
-        setattr(ctx, save_attr, pd.concat(q_save_parts, ignore_index=True) if q_save_parts else pd.DataFrame())
-        setattr(ctx, display_attr, q_display)
-        summary.append("quarter=(" + ", ".join(q_summary) + ")" if q_summary else "quarter=n/a")
+                n_display = display  # last number with data wins for the top-level display slot
+        if n_kpi_parts:
+            kpi_long_parts.append(pd.concat(n_kpi_parts, ignore_index=True))
+        setattr(ctx, save_attr, pd.concat(n_save_parts, ignore_index=True) if n_save_parts else pd.DataFrame())
+        setattr(ctx, display_attr, n_display)
+        summary.append(f"{kind}=(" + ", ".join(n_summary) + ")" if n_summary else f"{kind}=n/a")
 
     ctx.comparable_kpi_long = pd.concat(kpi_long_parts, ignore_index=True) if kpi_long_parts else pd.DataFrame()
     print("comparable pairs:", " | ".join(summary) if summary else "(none)")
@@ -467,7 +490,7 @@ def rebuild_comparable_kind_from_saved_rows(
     save_parts: List[pd.DataFrame] = []
     display = pd.DataFrame()
 
-    if comparison_type != "quarter":
+    if comparison_type not in _NUMBERED_KINDS:
         links = (
             rows[["link_prior_year", "link_current_year"]]
             .drop_duplicates()
@@ -485,26 +508,27 @@ def rebuild_comparable_kind_from_saved_rows(
             if not disp.empty:
                 display = disp
     else:
-        for q in sorted(rows["quarter_number"].dropna().unique()):
-            q = int(q)
-            q_rows = rows[rows["quarter_number"] == q]
+        tag_col = _NUMBERED_KINDS[comparison_type].tag_col
+        for n in sorted(rows[tag_col].dropna().unique()):
+            n = int(n)
+            n_rows = rows[rows[tag_col] == n]
             links = (
-                q_rows[["link_prior_year", "link_current_year"]]
+                n_rows[["link_prior_year", "link_current_year"]]
                 .drop_duplicates()
                 .sort_values(["link_current_year", "link_prior_year"])
             )
-            period_key_fn, display_label_fn, change_label_fn = _period_key_fns("quarter", q)
+            period_key_fn, display_label_fn, change_label_fn = _period_key_fns(comparison_type, n)
             for _, link in links.iterrows():
                 prior_year, current_year = int(link["link_prior_year"]), int(link["link_current_year"])
-                link_rows = q_rows[
-                    (q_rows["link_prior_year"] == prior_year) & (q_rows["link_current_year"] == current_year)
+                link_rows = n_rows[
+                    (n_rows["link_prior_year"] == prior_year) & (n_rows["link_current_year"] == current_year)
                 ]
                 disp, parts = _comparisons_for_link(
                     ctx, link_rows, prior_year, current_year, metric_cols,
-                    "quarter", period_key_fn, display_label_fn, change_label_fn,
+                    comparison_type, period_key_fn, display_label_fn, change_label_fn,
                 )
                 for p in parts:
-                    p["quarter_number"] = q
+                    p[tag_col] = n
                 save_parts.extend(parts)
                 if not disp.empty:
                     display = disp

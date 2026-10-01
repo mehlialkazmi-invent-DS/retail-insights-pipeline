@@ -15,7 +15,7 @@ saved history, not just the current run window.
 
 The same pattern applies to the comparable (like-for-like) tables: ``comparable_kpi_long`` is
 merged incrementally across runs just like ``kpi_long``, and each enabled kind's own
-``comparable_comparison_{kind}`` (ytd/yoy/quarter — see config.py's comparable_pairs.kinds) is
+``comparable_comparison_{kind}`` (ytd/yoy/quarter/half — see config.py's comparable_pairs.kinds) is
 then recomputed from the merged ``comparable_kpi_long``. A single-week refresh therefore produces
 a comparable comparison relative to the full saved history.
 """
@@ -81,8 +81,9 @@ TABLE_ROW_KEYS: Dict[str, Sequence[str]] = {
     "scope_diff": ("Year", "metric"),
     # link_prior_year/link_current_year included: the same year appears once as "current" and once
     # as "prior" across adjacent links (same all-years-restricted population) -- the link tag is
-    # what distinguishes those two rows. quarter_number isn't needed in the key: period_type+period
-    # ("quarter"+"2024-Q1") already disambiguates it; kept as a plain column for the HTML renderer.
+    # what distinguishes those two rows. quarter_number / half_number aren't needed in the key:
+    # period_type+period ("quarter"+"2024-Q1", "half"+"2024-H1") already disambiguate them; kept as
+    # plain columns for the HTML renderer.
     "comparable_kpi_long": (
         "comparison_type", "period_type", "period", "root", "dimension", "dimension_value",
         "link_prior_year", "link_current_year",
@@ -93,11 +94,15 @@ TABLE_ROW_KEYS: Dict[str, Sequence[str]] = {
     "comparable_comparison_yoy": (
         "comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period",
     ),
-    # quarter_number included here (unlike comparable_kpi_long) to keep the key symmetric rather
-    # than relying on current_period's display-label format to disambiguate quarters.
+    # quarter_number / half_number included here (unlike comparable_kpi_long) to keep the key
+    # symmetric rather than relying on current_period's display-label format to disambiguate them.
     "comparable_comparison_quarter": (
         "comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period",
         "quarter_number",
+    ),
+    "comparable_comparison_half": (
+        "comparison_type", "root", "dimension", "dimension_value", "metric_key", "current_period",
+        "half_number",
     ),
 }
 
@@ -111,6 +116,7 @@ COMPARISON_TABLES: Tuple[str, ...] = ("comparison_yoy", "comparison_ytd")
 # the same pattern as regular comparisons from kpi_long. One table per comparable_pairs.kinds entry.
 COMPARABLE_COMPARISON_TABLES: Tuple[str, ...] = (
     "comparable_comparison_ytd", "comparable_comparison_yoy", "comparable_comparison_quarter",
+    "comparable_comparison_half",
 )
 
 
@@ -480,6 +486,7 @@ _SAVED_OUTPUT_TABLES = {
     "comparable_comparison_ytd": "comparable_comparison_ytd",
     "comparable_comparison_yoy": "comparable_comparison_yoy",
     "comparable_comparison_quarter": "comparable_comparison_quarter",
+    "comparable_comparison_half": "comparable_comparison_half",
 }
 
 
@@ -559,6 +566,7 @@ _COMPARABLE_KIND_ATTRS = {
     "ytd": ("comparable_comparison_ytd", "comparable_ytd_display"),
     "yoy": ("comparable_comparison_yoy", "comparable_yoy_display"),
     "quarter": ("comparable_comparison_quarter", "comparable_quarter_display"),
+    "half": ("comparable_comparison_half", "comparable_half_display"),
 }
 
 
@@ -569,8 +577,8 @@ def _recompute_comparable_comparisons_from_saved_history(ctx: KPIContext, fund_p
     Mirrors ``_recompute_comparisons_from_saved_history``: after ``comparable_kpi_long`` has been
     incrementally merged onto prior history, reload it and rebuild each kind's comparison from
     every link present (each link's rows already carry that link's own pair-restricted metric
-    values, tagged via link_prior_year/link_current_year, plus quarter_number for the quarter
-    kind) so the saved comparable numbers reflect the full accumulated history, not just the
+    values, tagged via link_prior_year/link_current_year, plus quarter_number / half_number for
+    the quarter / half kinds) so the saved comparable numbers reflect the full accumulated history, not just the
     current run window.
     """
     from kpi_pipeline.comparable import rebuild_comparable_kind_from_saved_rows

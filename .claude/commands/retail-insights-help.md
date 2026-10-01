@@ -6,8 +6,9 @@ description: >-
   Covers onboarding, config editing, scope modes, metric computation, the
   roots/cuts report structure (dimension_sources as named population tabs
   like NVROUT/COMP, slices as breakdowns within every root), fiscal calendar
-  column mapping, HTML report, output saves, comparable pairs, performance
-  patterns, and how to add/change anything.
+  column mapping, operation scope, blocked scope, daily in-stock (instock_daily),
+  report_end=complete_month, half periods, HTML report, output saves, comparable
+  pairs, performance patterns, and how to add/change anything.
   Use when a user asks to: set up, modify, run, debug, explain, or extend this
   KPI pipeline; configure it with AI; onboard to it quickly; or understand what
   a specific metric means.
@@ -42,14 +43,14 @@ If you are a new DS picking this up for the first time:
 ```
 config.py          → materialize(fund.paste) → settings dict
 main.ipynb         Cell 1: config summary
-                   Cell 2: input previews (defined_scope, lost_sales, daily_data)
+                   Cell 2: input previews (defined_scope or operation scope, lost_sales, daily_data)
                    (before Cell 3): scope debug — distinct product/store counts per slice
                    Cell 3: runner.run() — full pipeline (+ scope adjustment logs)
                    (after Cell 3): scope summary display
                    Cell 4: save plan preview (when save_outputs=True)
                    Cell 5: Delta write
                    (unnumbered): kpi_long sample, YoY / YTD comparisons,
-                                 comparable pairs (ytd/yoy/quarter), scope diff
+                                 comparable pairs (ytd/yoy/quarter/half), scope diff
                    Cell 6: HTML report
 
 kpi_pipeline/
@@ -57,9 +58,10 @@ kpi_pipeline/
   runner.py        KPIRunner: build_dimensions → build_scopes → build_kpis →
                               build_comparisons → build_comparable_pairs →
                               build_scope_comparison → build_html_report
-                   run.mode=html_only → load_saved_outputs + build_fiscal_week_only
-                   (html_only also re-infers cut_dimensions/root_definitions from the
-                   loaded kpi_long's own columns, since fiscal.py never runs)
+                   run.mode=html_only → apply_report_end_mode + load_saved_outputs +
+                   build_fiscal_week_only (html_only also re-infers cut_dimensions/
+                   root_definitions from the loaded kpi_long's own columns, since
+                   fiscal.build_fiscal_and_products does not run)
   fiscal.py        fiscal_cal + fiscal_week frames; product attributes + cut dimensions;
                    dimension_sources left-join → ROOT columns (not cuts, see §3.4);
                    _resolve_root_definitions: root_values (named) or auto-discovery
@@ -68,18 +70,26 @@ kpi_pipeline/
                    each optional/auto-detected, derived when a client's fiscal_cal lacks it;
                    available_fiscal_months (elapsed-month set for YTD, from the latest year);
                    complete_fiscal_periods (per-(Year,period) fully-elapsed set for the Quarter/
-                   Monthly trend tabs, dict keyed by Fiscal_Quarter/Fiscal_Month — see §3.1)
+                   Half/Monthly trend tabs, dict keyed by Fiscal_Quarter/Fiscal_Half (only when
+                   half_periods)/Fiscal_Month — see §3.1);
+                   apply_report_end_mode (report_end=complete_month cut, run first in
+                   build_dimensions / run_html_only — §3.1a);
+                   require_complete_time_grain (fail-loud: every date in the window must be in the
+                   calendar)
   inputs.py        cached Delta reads (daily_data_raw, lost_sales_weekly_base) + input_filters;
                    prints the source date range for daily_data/lost_sales on every read
-  scope.py         defined scope, score scope (hybrid), manual adjustments
+  scope.py         defined scope, operation scope (scope_source), score scope (hybrid), manual
+                   adjustments, build_blocked_days (blocked_scope) — §3.2a/b
   scope_debug.py   scope_universe_counts: pre-flight distinct product/store counts per slice
                    (all active_slice_dimensions, root-defining columns included — this is a
                    raw diagnostic, unaware of the root/cut split the KPI step applies)
   pipeline.py      build_pipeline_frames: scoped_daily, inst_data, lost_base, dc_daily, dc_inst
                    per scope (dc_inst is dc_in_stock_rate's expanded inventory grid, gated by
-                   dc_instock.enabled -- see README's "dc_instock" config reference)
+                   dc_instock.enabled -- see README's "dc_instock" config reference);
+                   build_instock_daily builds inst_data from noob/daily-data when
+                   instock_daily.enabled (§3.2c); build_scoped_daily drops blocked days
   metrics.py       compute_kpis: sales, WOS, mean_stock, instock, weighted_instock_rate, WOS_DC/WOS_TOTAL, dc_mean_stock/total_mean_stock, dc_in_stock_rate
-  kpi_long.py      build_kpi_long: loops root × cut × annual/ytd/quarter/monthly/weekly →
+  kpi_long.py      build_kpi_long: loops root × cut × annual/ytd/quarter/half/monthly/weekly →
                    pandas. Roots = "overall" + ctx.root_definitions; cuts = "overall" +
                    ctx.cut_dimensions, applied identically within every root. Reuses
                    _filter_frames_for_dimension for BOTH root population restriction and a
@@ -90,9 +100,9 @@ kpi_pipeline/
                    (not sequential), chained across every consecutive year pair present — see
                    _consecutive_year_pairs. No QoQ/MoM/WoW comparison table exists — the
                    Quarter/Monthly/Weekly period tabs show value trends only.
-  comparable.py    build_comparable_pairs: like-for-like ytd/yoy/quarter, root × cut aware.
+  comparable.py    build_comparable_pairs: like-for-like ytd/yoy/quarter/half, root × cut aware.
                    ONE pair universe PER KIND (ytd/yoy: intersection across EVERY year in the
-                   window; quarter: per quarter-number, across years where that quarter is fully
+                   window; quarter/half: per quarter/half number, across years where that period is fully
                    elapsed — NOT restricted per root, computed once against the overall
                    population), shared by every consecutive-year link within that kind — see
                    rebuild_comparable_kind_from_saved_rows. Store-side grain (product_store vs
@@ -104,7 +114,11 @@ kpi_pipeline/
                    more than one root exists (Metric Details becomes a peer of the root tabs);
                    a single root (no root-producing dimension_sources) renders exactly as
                    before, period → dimension → value, Metric Details a peer of period tabs.
-                   Dimensions inferred from kpi_long via ctx.cut_dimensions.
+                   Dimensions inferred from kpi_long via ctx.cut_dimensions. All table cells
+                   centered; html_report.root_labels renames root tabs and
+                   html_report.dimension_labels renames dimension tabs (display only);
+                   _tab_label capitalizes every tab label; Metric Details text for in_stock_rate / blocked days is built
+                   from settings (_settings_metric_definitions).
 ```
 
 ---
@@ -119,6 +133,7 @@ When a user wants to configure the toolkit, ask them (or read from their message
 "reporting_window": {
     "as_of_date": "YYYY-MM-DD",   # run anchor → last completed Saturday on or before this date
     "run_min_date": "YYYY-MM-DD", # optional narrow start (Sunday-aligned); null/"" = full YTD from Jan 1
+    "report_end": "as_of",        # "as_of" (default) | "complete_month" — see §3.1a (env KPI_REPORT_END)
 }
 ```
 
@@ -142,7 +157,19 @@ When a user wants to configure the toolkit, ask them (or read from their message
 
 **Complete periods only — Quarter/Monthly trend tabs (`REPORT_END_DATE` itself is UNCHANGED, this is additive).** The Quarter/Monthly `kpi_long` `period_type` rows (value-trend tabs, not YTD — see below) previously showed whatever data existed up to `REPORT_END_DATE`, including an in-progress trailing quarter/month (a 1-week-old "quarter" plotted next to full 13-week ones). Now a `(Year, Fiscal_Quarter)`/`(Year, Fiscal_Month)` only appears once **fully elapsed on both edges** — not truncated at the trailing edge, and not truncated at the window's own start either (matters when `run_min_date` doesn't land on a period boundary). Mechanics: `fiscal.complete_fiscal_periods(ctx, period_col)` (cached per `Fiscal_Quarter`/`Fiscal_Month` on `ctx.complete_fiscal_periods`, set in `fiscal.build_fiscal_and_products`) is semi-joined onto every metric frame by `kpi_long._drop_incomplete_periods`, called from both `"quarter"`/`"monthly"` branches of `_period_frames`. Weekly needs no equivalent — `REPORT_END_DATE` already guarantees a whole trailing week.
 
-**Real pre-existing bug this fixed — plus a follow-up grain fix.** `fiscal._compute_available_fiscal_months` (YTD's own "which periods count" set, in production for a while as quarter-grain, since switched to month-grain) previously read week bounds from `ctx.fiscal_week`, which is itself clipped to `[EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE]` — so its completeness check was trivially true for any period present in the window at all, and never actually excluded an in-progress period. Now fixed: it delegates to the same unclipped `complete_fiscal_periods`. (`comparable.py`'s `_complete_quarter_years` — §3.6 — already did this correctly and was the template for the fix.) **Separately, the grain itself moved from quarter to month** (`available_fiscal_quarters` → `available_fiscal_months`; `kpi_long._with_ytd_filter` now filters `Fiscal_Month` membership, not `Fiscal_Quarter`) — quarter-grain understated YTD whenever the "current" quarter was in progress but had one or more of its own months already closed (virtually always, since `REPORT_END_DATE` essentially never lands on a quarter boundary). **Live impact:** both changes affect what the already-deployed report shows, not just future runs — a currently-visible partial trailing quarter/month row disappears from a freshly computed run, and YTD's own elapsed-period selection may shift since it's now genuinely checking completeness at the finer month grain. Under `save_mode="incremental"` + default `allow_overwrite_existing=False`, a stale partial-period row saved by a run *before* this fix stays in the merged Delta history (the new run doesn't reproduce that merge key, so nothing appends over or removes it) — `allow_overwrite_existing=True` or `full_refresh` to clear it. Whether a given run's own output changes at all depends on whether `reporting_window.as_of_date` happens to land on a fiscal period boundary in that customer's `fiscal_cal` upload — not something config alone can answer.
+**Real pre-existing bug this fixed — plus a follow-up grain fix.** `fiscal._compute_available_fiscal_months` (YTD's own "which periods count" set, in production for a while as quarter-grain, since switched to month-grain) previously read week bounds from `ctx.fiscal_week`, which is itself clipped to `[EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE]` — so its completeness check was trivially true for any period present in the window at all, and never actually excluded an in-progress period. Now fixed: it delegates to the same unclipped `complete_fiscal_periods`. (`comparable.py`'s `_complete_period_years` — §3.6 — already did this correctly and was the template for the fix.) **Separately, the grain itself moved from quarter to month** (`available_fiscal_quarters` → `available_fiscal_months`; `kpi_long._with_ytd_filter` now filters `Fiscal_Month` membership, not `Fiscal_Quarter`) — quarter-grain understated YTD whenever the "current" quarter was in progress but had one or more of its own months already closed (virtually always, since `REPORT_END_DATE` essentially never lands on a quarter boundary). **Live impact:** both changes affect what the already-deployed report shows, not just future runs — a currently-visible partial trailing quarter/month row disappears from a freshly computed run, and YTD's own elapsed-period selection may shift since it's now genuinely checking completeness at the finer month grain. Under `save_mode="incremental"` + default `allow_overwrite_existing=False`, a stale partial-period row saved by a run *before* this fix stays in the merged Delta history (the new run doesn't reproduce that merge key, so nothing appends over or removes it) — `allow_overwrite_existing=True` or `full_refresh` to clear it. Whether a given run's own output changes at all depends on whether `reporting_window.as_of_date` happens to land on a fiscal period boundary in that customer's `fiscal_cal` upload — not something config alone can answer.
+
+### 3.1a `report_end`, half periods, calendar checks
+
+**`reporting_window.report_end`** — `"as_of"` (default, today's behaviour) keeps `REPORT_END_DATE` at the last completed Saturday. `"complete_month"` cuts it back to the last day of the most recent fully elapsed month on or before that Saturday (`fiscal.apply_report_end_mode`, first call in `KPIRunner.build_dimensions` and `run_html_only`; it overwrites `settings["REPORT_END_DATE"]`, so scope, daily in-stock, blocked days, comparisons, comparable, HTML header all follow). YTD sums the complete months of every year; annual is year-to-date through the cut. `OUTPUT_RUN_DATE` still follows `as_of_date`.
+- **Fiscal calendar** (`use_fiscal_calendar=True`): month = fiscal month from the **unclipped** `fiscal_cal` upload. The upload must extend **past** the as-of Saturday or the run raises (`fiscal_cal upload ends X; it must extend past REPORT_END_DATE ...`), and `run_min_date` must reach the start of the cut month or it raises (`no month ends between ...` when none ends in the window; `the cut month ... starts before the report start` when the cut month begins before `EFFECTIVE_REPORT_START_DATE` — fiscal: the month's `period_start`, civil: the 1st) — so the weekly-refresh pattern (narrow `run_min_date`) does not work with it.
+- **No fiscal calendar** (`use_fiscal_calendar=False`): calendar month. The cut is usually mid-week; `kpi_long._drop_partial_trailing_week` drops the clipped trailing Weekly column. Months are bucketed by each week's start date, so it is a calendar-month **cut**, not exact calendar-month totals.
+- Incremental saves: with `incremental` + `allow_overwrite_existing=False`, switching from `as_of` to `complete_month` keeps the `as_of` versions of the current annual row and later weekly rows in history — use `full_refresh` for the switch (tbretail does).
+- HTML filename: `html_report.filename` is a template (`{customer}`, `{report_end}` only; anything else raises in `materialize()`), kept raw in `HTML_REPORT_FILENAME_TEMPLATE` and formatted by `KPIRunner.build_html_report` with the cut date; `HTML_REPORT_OUTPUT_DIR` is the optional datastore folder (from `output_path_segments`).
+
+**`fiscal_calendar.half_periods`** (default `False`; tbretail `True`; env `KPI_HALF_PERIODS`): adds `Fiscal_Half` (H1 = fiscal quarters 1-2, H2 = 3-4) on the fiscal week frame and every metric frame, a `half` `kpi_long` period type labelled `2025-H1` (complete halves only, same unclipped rule as quarters), a **Half** tab (`html_report.half_display_halves`, default 4; env `KPI_HTML_HALF_HALVES`) and the `half` comparable kind (§3.6). The Fiscal_Half completeness set is only computed when it is on; `comparable_pairs.kinds` containing `"half"` without it is rejected.
+
+**Calendar completeness (fail-loud).** `fiscal.require_complete_time_grain` raises `time grain (...) is missing N date(s) between START and END: [first 20]` when any date in the window is absent from the calendar. On the civil path the calendar is only the dates present in `noob/daily-data` (after `input_filters.daily_data`), so a gap means missing source data.
 
 ### 3.2 Scope mode
 
@@ -165,6 +192,49 @@ Score backfill parameters (hybrid or scope diff):
 }
 ```
 Inventory for the score filter is the **last available daily snapshot in the fiscal week** (`max_by(inventory, date)`), not Saturday-only — avoids false zero when `week_end_date` is missing from daily data.
+
+### 3.2a `scope_source` (operation scope)
+
+```python
+"scope_source": {
+    "mode": "defined_scope",   # "defined_scope" (default) | "operation_scope"
+    "solution_id": 21,         # also the solution of the blocked_scope snapshot (int, not bool)
+    "run_date": None,          # Sunday "YYYY-MM-DD"; None = latest Sunday on or before TODAY
+    "main_items_only": True,
+    "active_only": True,
+}
+```
+`operation_scope` builds the scope ONCE (`scope._operation_scope_pairs`) from `path_segments.scope` (`operation/scope`): the solution's rows for one `run_date` still open on it (`end_date` null or `>= run_date`), reduced to `(product_id, store_id)` with the latest `start_date` kept as `scope_start` (`ctx.operation_scope_pairs`). `main_items_only` drops sub-item rows (family members that are not the main — dropped, NOT rolled onto the main); `active_only` keeps `is_active = true`. Every metric uses this one scope. Grain `product` or `product_store` only (`product_store_week` rejected; daily in-stock and blocked days need `product_store`); the `defined_scope` table is not read.
+- `scope_adjustments`, `input_filters.daily_data` and `metrics.population_filters` still apply; **`input_filters.defined_scope` does NOT** (it is only read in `defined_scope` mode).
+- `run_date=None` uses today's Sunday, not the as-of date — a backdated run is not reproducible; set `run_date` for backfills.
+- **Scope additions are not operation-scope pairs:** they skip main-item / active filters, have no `scope_start`, receive no blocks, and a product-only addition (`store_col=None`) becomes every store with a daily-data row in the window. This widens every metric: additions are part of the one scope all metrics use, in-stock included (counted from their first daily row, with no main-item, active or blocked-scope filter).
+- tbretail: `operation_scope`, solution 21, main items only, active only, its additions kept on (user decision).
+
+### 3.2b `blocked_scope`
+
+```python
+"blocked_scope": {
+    "ui_parameters_path": None,        # path under the datastore root; None = OFF, set = ON
+    "rule": "after_scope_start",       # or "all"
+}
+```
+Reads `{ui_parameters_path}/blocked_scope/{product,product_destination,destination}` (parquet; `destination_id` = store) for `scope_source.solution_id`; requires `scope_source.mode="operation_scope"`. Rule `after_scope_start`: a block applies to a pair only if `block.start_date >= scope_start` (same day applies; an earlier block is ignored — the pair was set up again after it); `all` applies every matched block. An applied block removes the pair's days from `start_date` to `end_date` (null = open-ended), clipped to the report window, from **every daily-data-derived metric** (`build_scoped_daily`: sales, inventory, WOS, turnover, mean stock) **and** from daily in-stock (`ctx.blocked_days`, `scope.build_blocked_days`). With `main_items_only`, block `product_id`s are rolled to the family main before matching (the client reference script does not do this, so numbers can sit slightly below it). **Not filterable:** weekly sources with no store/day grain (`lost_sales_source`, e.g. `report_dfu`). A missing `blocked_scope/<kind>` folder fails the run. Pairs added by `scope_adjustments` are never blocked. Always set `ui_parameters_path` explicitly (the newest snapshot may hold no blocks for the solution).
+
+### 3.2c `instock_daily` (in-stock from daily-data)
+
+```python
+"instock_daily": {
+    "enabled": False,
+    "git_date_shift_days": -1,     # REQUIRED key: None = on-hand only; int (not bool) = also goods-in-transit, date shifted by it
+    "count_start": "first_daily_row",   # generic default; "scope_start" | "earliest" need operation scope
+    "require_daily_data": True,    # drop pairs with no daily row (required by first_daily_row)
+    "history_start": None,         # first day searched for a pair's first daily row; None = window start
+    "usable_only": True,           # unusable (usable != 1) days leave numerator AND denominator, once
+    "input_filters": [],           # Spark SQL on product_id / store_id only, narrows the in-stock pair universe
+}
+```
+Every key is required (indexed directly in `materialize()`, no silent defaults). Method (`pipeline.build_instock_daily`), per scope pair, every scoped pair counting (scope additions included: no `scope_start`, so they count from their first daily row, never blocked): (1) `input_filters` narrow the pair universe; (2) daily-data read WITHOUT `input_filters.daily_data` (that list usually holds `usable = 1`), filtered on the raw date column from `history_start` to `REPORT_END_DATE` (so Delta file pruning applies), not family-rolled, restricted to the pairs with blocked days removed, then cached; the run raises unless daily-data's latest date for those pairs reaches `REPORT_END_DATE`; (3) count start per `count_start`, clipped to the window start, `require_daily_data` drops pairs without a daily row; (4) store-days = count start → `REPORT_END_DATE`, a day without a row is out of stock, minus blocked and (with `usable_only`) unusable days; (5) in-stock day = `inventory > 0` on a usable day, OR (when `git_date_shift_days` is set) a day with store goods-in-transit (`operation/goods_in_transit`, `destination_type=0`, `quantity>0`, rolled to the family main; snapshot dated D+1 = end of day D) — a union, never a sum. Output has the old weekly `inst_data` shape (`stocked_pairs` / `available_days`), so metrics, `population_filters` and comparable work unchanged. Requires a store-level scope grain; incompatible with `instock_source.enabled` and `lost_sales_ensemble.enabled`. The HTML Metric Details text for In-Stock Rate is generated from these settings.
+- tbretail: on, `git_date_shift_days=-1`, `count_start="earliest"`, `history_start="2024-01-21"`, ECOM stores 829/639/917 excluded from in-stock only, scope additions (JAB, NGF products, `nvrout_scope_backfill`) counted like every other pair; `instock_source`, `dc_instock` off; `wos_revenue`, `weighted_instock_rate`, `dc_in_stock_rate` removed from `metric_cols`.
 
 ### 3.3 Defined scope column mapping
 
@@ -343,8 +413,8 @@ An entry on any one column in a group applies to the whole group; conflicting sp
 | `comparison_yoy` | YoY comparison rows, per root × cut |
 | `comparison_ytd` | YTD comparison rows, per root × cut (one row set per consecutive-year pair, elapsed-window sums) |
 | `scope_diff` | Defined vs score annual diff (only when `scope.run_scope_diff=True`) |
-| `comparable_kpi_long` | ONE shared table across every enabled `comparable_pairs.kinds` entry, tagged by `comparison_type` (`"ytd"`/`"yoy"`/`"quarter"`) + `comparable_pair_count` + `link_prior_year`/`link_current_year` (+ plain `quarter_number` for quarter rows), per root × cut (only when `comparable_pairs.enabled=True`) |
-| `comparable_comparison_ytd` / `_yoy` / `_quarter` | One comparison table per enabled kind, per root × cut (`_quarter` additionally keys on `quarter_number`) |
+| `comparable_kpi_long` | ONE shared table across every enabled `comparable_pairs.kinds` entry, tagged by `comparison_type` (`"ytd"`/`"yoy"`/`"quarter"`/`"half"`) + `comparable_pair_count` + `link_prior_year`/`link_current_year` (+ plain `quarter_number` / `half_number` for those rows), per root × cut (only when `comparable_pairs.enabled=True`) |
+| `comparable_comparison_ytd` / `_yoy` / `_quarter` / `_half` | One comparison table per enabled kind, per root × cut (`_quarter` additionally keys on `quarter_number`, `_half` on `half_number`) |
 
 No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — those aren't comparison kinds at all (only `yoy`/`ytd` are, see §3.5.1); comparable pairs is a separate feature with its own `ytd`/`yoy`/`quarter` kinds (§3.6).
 
@@ -357,7 +427,7 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — those are
 | `scope_diff` | `Year`, `metric` |
 | `comparable_kpi_long` | `comparison_type`, `period_type`, `period`, `root`, `dimension`, `dimension_value`, `link_prior_year`, `link_current_year` (the link tag is required — the same year appears once per adjacent link it participates in, even though every link within a kind shares one all-years-restricted population) |
 | `comparable_comparison_ytd` / `_yoy` | `comparison_type`, `root`, `dimension`, `dimension_value`, `metric_key`, `current_period` (same shape as `comparison_yoy`/`comparison_ytd` — no link tag needed here: `current_period` already embeds `current_year`, and each consecutive-year link has a distinct `current_year`, so it can't collide across links) |
-| `comparable_comparison_quarter` | Same as above **plus `quarter_number`** — needed because a given `current_period` can recur across different quarter numbers' independent year-sets |
+| `comparable_comparison_quarter` / `_half` | Same as above **plus `quarter_number` / `half_number`** — needed because a given `current_period` can recur across different quarter numbers' independent year-sets |
 
 **Save modes:**
 
@@ -371,7 +441,7 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — those are
 - Each weekly run loads the **latest existing `run_date` partition on or before** the current run, appends only new merge keys, and writes the full merged result to this run's `run_date` partition.
 - Each `run_date` partition is therefore a self-contained snapshot of the full merged history as of that run.
 - Comparison tables (`comparison_yoy`/`comparison_ytd`) are **recomputed from the merged `kpi_long` history** after the kpi_long save, then overwritten wholesale — so a single-week refresh can still produce YoY vs last year. Disable with `recompute_comparisons_from_history: False`.
-- `comparable_kpi_long` is merged incrementally like `kpi_long`; each enabled kind's `comparable_comparison_{ytd,yoy,quarter}` is then recomputed from the merged `comparable_kpi_long` (grouped by `link_prior_year`/`link_current_year`, and additionally `quarter_number` for `quarter` — see `rebuild_comparable_kind_from_saved_rows`). A single-week refresh can still produce a comparable comparison for any enabled kind relative to prior saved history.
+- `comparable_kpi_long` is merged incrementally like `kpi_long`; each enabled kind's `comparable_comparison_{ytd,yoy,quarter,half}` is then recomputed from the merged `comparable_kpi_long` (grouped by `link_prior_year`/`link_current_year`, and additionally `quarter_number` / `half_number` for `quarter` / `half` — see `rebuild_comparable_kind_from_saved_rows`). A single-week refresh can still produce a comparable comparison for any enabled kind relative to prior saved history.
 
 **Full refresh details:**
 - Replaces the **entire** Delta table — not "update 2026 inside a multi-year table."
@@ -415,13 +485,14 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — those are
 - Invalid/empty selection fails loudly in `materialize()`. Env override: `KPI_COMPARISONS="yoy,ytd"`.
 - Need a quarter-over-quarter or month-over-month percentage change? Compute it from consecutive `kpi_long` rows (`period_type="quarter"`/`"monthly"`) directly — there's no built-in comparison table for it.
 
-### 3.6 Comparable pairs (like-for-like: ytd / yoy / quarter)
+### 3.6 Comparable pairs (like-for-like: ytd / yoy / quarter / half)
 
-**Gated, opt-in** (default off). Metrics are recomputed over **only the pairs present in EVERY qualifying year**, then compared. Isolates like-for-like movement from mix shifts caused by new/closed pairs. Three independent kinds, selected via `comparable_pairs.kinds`:
+**Gated, opt-in** (default off). Metrics are recomputed over **only the pairs present in EVERY qualifying year**, then compared. Isolates like-for-like movement from mix shifts caused by new/closed pairs. Four independent kinds, selected via `comparable_pairs.kinds`:
 
 - **`ytd`** — pairs present in every window year, on each year's elapsed (fully-closed-months) window. Chains every consecutive year pair.
 - **`yoy`** — pairs present in every window year, on the FULL window year (not the YTD-elapsed subset). Chains every consecutive year pair too (not just the latest two, unlike the regular non-comparable YoY). Window-boundary years can themselves be partial — same accepted behaviour as the regular Annual/YoY tab, not something this corrects for.
-- **`quarter`** — computed INDEPENDENTLY per quarter number. For quarter Q, only years where Q falls **entirely inside the report window** count (`_complete_quarter_years` in `comparable.py`) — `REPORT_END_DATE` is a week boundary, never quarter-aligned, so the in-progress "current" quarter would otherwise be silently compared as if complete against a full prior-year quarter. Mirrors the same "fully elapsed" guard `ytd`'s own elapsed-period check already uses (`fiscal.py`'s `available_fiscal_months` — same helper, but at MONTH grain, not quarter grain), generalized here to check both window boundaries for an arbitrary quarter and year. A pair common across years for Q1 says nothing about Q2 — fully independent populations.
+- **`quarter`** — computed INDEPENDENTLY per quarter number. For quarter Q, only years where Q falls **entirely inside the report window** count (`_complete_period_years` in `comparable.py`) — `REPORT_END_DATE` is a week boundary, never quarter-aligned, so the in-progress "current" quarter would otherwise be silently compared as if complete against a full prior-year quarter. Mirrors the same "fully elapsed" guard `ytd`'s own elapsed-period check already uses (`fiscal.py`'s `available_fiscal_months` — same helper, but at MONTH grain, not quarter grain), generalized here to check both window boundaries for an arbitrary quarter and year. A pair common across years for Q1 says nothing about Q2 — fully independent populations.
+- **`half`** — the same as `quarter` per half number (H1/H2); needs `fiscal_calendar.half_periods=True` (rejected otherwise). A pair counts when scoped daily rows exist for it in every qualifying year after all scope steps. Both quarter and half read `ctx.complete_fiscal_periods`.
 
 There is no comparable QoQ/MoM/WoW — those aren't comparison kinds at all (see §3.5.1).
 
@@ -436,7 +507,7 @@ Only the store-side frames (`scoped_daily`/`inst_data`/`lost_base`/`scope_pairs`
 ```python
 "comparable_pairs": {
     "enabled": True,                       # default False
-    "kinds": ["ytd", "yoy", "quarter"],    # default ["ytd"]
+    "kinds": ["ytd", "yoy", "quarter", "half"],    # default ["ytd"]
     "grain": "product_store",              # default; "product" = same-pair population is product_id alone
 }
 ```
@@ -454,9 +525,9 @@ The restriction key is chosen **per frame**, from the columns that frame actuall
 - `dc_daily` / `dc_inst` → each gets its OWN independent `(product_id, warehouse_id)` all-years intersection (two separate universes, not one shared). DC/warehouse inventory has no store dimension, so neither can ever share the store-side keys. Both are item-family-rolled to parent `product_id` (same id space as `scope_core`) and both come from `inventory_warehouse`, but `dc_inst` still doesn't reuse `dc_daily`'s universe: `dc_inst` 0-fills every day from a pair's first stocked day to the end of the report window, so a pair that stopped being stocked partway through still has rows — all stockouts — in later years where `dc_daily` has none. Its per-year universe is a superset of `dc_daily`'s, and reusing that intersection would delete exactly the sustained stockouts `dc_in_stock_rate` exists to surface. See README's "dc_instock" section.
 
 **Outputs:**
-- `comparable_kpi_long` — ONE shared table across every enabled kind, tagged by `comparison_type` (`"ytd"`/`"yoy"`/`"quarter"`), + `comparable_pair_count` + `link_prior_year`/`link_current_year` (+ `quarter_number` for quarter rows).
-- `comparable_comparison_ytd` / `comparable_comparison_yoy` / `comparable_comparison_quarter` — one comparison table per enabled kind (same schema as `comparison_ytd`/`comparison_yoy`; the quarter table also keys on `quarter_number`).
-- HTML report — a "Comparable (Like-for-Like)" section, visually divided from the regular comparison table above it: one consolidated wide table on the Annual (`yoy`) and YTD (`ytd`) tabs; **one narrow table per quarter number** on the Quarter tab (a single table mixing all 4 quarters would need too many value/delta columns to stay readable).
+- `comparable_kpi_long` — ONE shared table across every enabled kind, tagged by `comparison_type` (`"ytd"`/`"yoy"`/`"quarter"`/`"half"`), + `comparable_pair_count` + `link_prior_year`/`link_current_year` (+ `quarter_number` / `half_number` for those rows).
+- `comparable_comparison_ytd` / `_yoy` / `_quarter` / `_half` — one comparison table per enabled kind (same schema as `comparison_ytd`/`comparison_yoy`; the quarter table also keys on `quarter_number`, the half table on `half_number`).
+- HTML report — a "Comparable (Like-for-Like)" section, visually divided from the regular comparison table above it: one consolidated wide table on the Annual (`yoy`) and YTD (`ytd`) tabs; **one narrow block per quarter number** on the Quarter tab and **per half number** on the Half tab (a single table mixing them would need too many value/delta columns to stay readable); each block has a heading (`Q1 · Like-for-like`, `H1 · Like-for-like`) and a rule between blocks.
 - Notebook — a "Comparable pairs (like-for-like)" cell.
 
 **Single-week run and history:** `comparable_kpi_long` is merged incrementally (same as `kpi_long`). A single-week refresh can still produce a comparable comparison for any enabled kind **relative to prior saved `comparable_kpi_long` history** — even if the current window only spans one week. Recomputation from saved history (`rebuild_comparable_kind_from_saved_rows`) is pure pandas grouped by `link_prior_year`/`link_current_year` (and `quarter_number` for `quarter`) — no Spark recomputation needed, since each link's rows already carry that link's own pair-restricted values. A given kind's comparison is skipped for the current run only when fewer than 2 qualifying years are present *and* there is no saved history covering more (`quarter`: fewer than 2 years where that quarter number is fully elapsed).
@@ -490,34 +561,42 @@ Environment override: `KPI_RUN_MODE=html_only`
 ```python
 "html_report": {
     "enabled": True,                                              # False = skip
-    "filename": "kpi_report_{customer}_{report_end}.html",        # {customer} and {report_end} interpolated
+    "filename": "kpi_report_{customer}_{report_end}.html",        # template: ONLY {customer} and {report_end}; formatted at write time with the final REPORT_END_DATE
     "report_title": None,                                         # None = "<CUSTOMER> KPI Report"
-    "output_path_segments": None,                                 # None = local only; or path segs to also save under datastore
+    "output_path_segments": None,                                 # None = local only; or the datastore FOLDER segments (filename is appended)
     "metric_definitions": {},                                     # override any entry in DEFAULT_METRIC_DEFINITIONS
     "weekly_display_weeks": 5,         # Weekly tab: most recent N weeks; null = all
     "monthly_display_months": 5,       # Monthly tab: most recent N months; null = all
     "quarterly_display_quarters": 5,   # Quarter tab: most recent N quarters; null = all
+    "half_display_halves": 4,          # Half tab (only with half_periods): most recent N halves; null = all
     "yearly_display_years": 5,         # Annual tab: most recent N years; null = all
+    "root_labels": {},                 # root id -> tab label, e.g. {"comp": "LFL", "nvrout": "NVROUT"}
+    "dimension_labels": {},            # slice dimension name -> tab label (display only), e.g. {"brand": "Banner"}; dict of str -> str or materialize() raises
     # No display-count trim setting for the YTD tab yet — it always shows every year present.
 }
 ```
 
 **Root tab (only rendered when more than one root exists — see §3.4c).** With a single root (`"overall"` only, the common case with no root-producing `dimension_sources`), the report renders exactly as it always has — no extra tab layer, period tabs are the outermost level. With more than one root, an outer tab bar appears (one tab per root, e.g. Overall / NVROUT / COMP), each containing its own complete period-tab set below; **Metric Details** moves to be a peer of the root tabs instead of the period tabs in this case (it's root-independent — just metric definitions — so it's never duplicated per root).
 
-Each root's period tabs (six top-level tabs when it's the only/outermost level; five plus the shared Metric Details when nested under a root tab):
+Each root's period tabs (seven top-level tabs when it's the only/outermost level and half_periods is on, six without; one fewer plus the shared Metric Details when nested under a root tab):
 - **Annual** — KPI table by year + YoY comparison (+ comparable `yoy` when enabled — see §3.6)
 - **YTD** — KPI table by year over each year's elapsed (fully-closed-months) window + YTD comparison, stacked one mini-table per consecutive-year pair (+ comparable `ytd` when enabled)
 - **Quarter** — KPI table by fiscal quarter, **value trend only** (most recent N quarters, default 5, and only fully-elapsed quarters — see §3.1) — no regular comparison table (+ comparable `quarter`, one narrow table per quarter number, when enabled)
+- **Half** (only with `fiscal_calendar.half_periods`) — KPI table by half, **value trend only** (most recent N halves, default 4, complete halves only) (+ comparable `half`, one block per half number, when enabled)
 - **Monthly** — KPI table by month, **value trend only** (most recent N months, default 5, and only fully-elapsed months — see §3.1) — no comparison table. Column header text is the real calendar month (e.g. "2026-Aug"), which can differ from the fiscal month *number* underlying the grouping — see §3.1's fiscal-calendar note.
 - **Weekly** — KPI table for the **most recent N fiscal weeks** (default 5; sorted by `week_start_date`), **value trend only** — no comparison table
 - **Metric Details** — plain-English definition, store scope, and formula for every active metric (single root only; a peer of the root tabs, not the period tabs, when there's more than one root)
 
 Within each period tab, navigation is three levels:
-1. **Period** (horizontal) — Annual / YTD / Quarter / Monthly / Weekly
+1. **Period** (horizontal) — Annual / YTD / Quarter / Half / Monthly / Weekly
 2. **Cut dimension** (horizontal pills) — Overall + every `ctx.cut_dimensions` column present in `kpi_long` for that root (inferred automatically; not hard-coded to brand) — root-defining columns never appear here, only `slices` columns
 3. **Cut value** (vertical sidebar) — one clickable tab per value (e.g. each brand); Overall shows a single panel
 
-The executive header shows client, reporting window, scope mode, cut dimensions, and generated timestamp.
+The executive header shows client, reporting window, scope mode (Hybrid / Operation scope / Defined only), cut dimensions, and generated timestamp.
+
+**Style (global, every client):** all table cells are centered; every tab label has its all-lowercase words capitalized by `_tab_label` (`annual` -> `Annual`, a value tab `jab` -> `Jab`; words with capitals such as `YTD`/`SMW` are kept), so a root without a `root_labels` entry (e.g. `nvrout`) shows as `Nvrout`. `html_report.root_labels` renames root tabs (tbretail: `comp` -> `LFL`, `nvrout` -> `NVROUT`). `html_report.dimension_labels` renames a slice dimension wherever its name is shown (the dimension tabs and the header's slice-dimensions card; tbretail: `brand` -> `Banner`), still capitalized by `_tab_label`; it is display only, so `kpi_long` and the saved outputs keep the raw dimension key (`brand`).
+
+**Metric Details are partly settings-driven:** with `instock_daily.enabled` the In-Stock Rate row describes the daily method (on-hand or goods-in-transit, count start, blocked days only when `blocked_scope` is on, plus unusable days) and shows the `input_filters` as store scope; with `blocked_scope` on, the sales / inventory / WOS / turnover rows note that blocked days are excluded. `html_report.metric_definitions` still overrides any row.
 
 `kpi_long` itself is never trimmed (see §12.14) — only `ctx.kpi_long_display`, used solely for HTML rendering, is trimmed per the `*_display_*` settings; the saved Delta `kpi_long` always holds the full computed window.
 
@@ -551,6 +630,7 @@ Map raw lost-sales and instock table columns to canonical names, or read in-stoc
 - `product_col` / `product_agg_level_col`: same "exactly one, `product_col` wins if present" rule as `lost_sales_source`, above.
 - `store_col: None`: restricted to scope at product × week, never fanned out across stores; independent of `lost_sales_source`'s own store grain. Verified example: `reporting_inv_fc_dfu/report_dfu` (product × week only; uses the actual `TY_total_days_instock`/`TY_total_day`, not the simulated `sim_*` columns).
 - `fallback_sources` (optional): additional column-sets read from the SAME table, appended in order to fill weeks the primary column-set doesn't have (e.g. `report_dfu`'s `TY_` window only reaches back its own trailing build horizon; `LY_`/`LLY_` carry the identical formula 52/104 weeks earlier and backfill older history). `read_instock_source` left-anti-joins each fallback against everything already covered before unioning — a fallback fills gaps, never overrides a week the primary (or an earlier fallback) already has. Each entry needs its own `week_col`/`in_stock_col`/`total_days_col`; `product_col`/`store_col`/`product_agg_level_col` inherit from the parent block unless overridden.
+- Mutually exclusive with `instock_daily.enabled` (which replaces it, §3.2c).
 - Mutually exclusive with `lost_sales_ensemble.enabled=True` — the ensemble branch selects in-stock/total-days from the chosen model and uses its `total_days` to decide row existence, neither of which is computed when `instock_source` is on; `materialize()` fails if both are True.
 
 ---
@@ -637,7 +717,7 @@ For a genuinely new source table (not just a new column off an existing frame) t
 4. **`pipeline.py`**: add a `build_my_frame(ctx, scope_core, ...)` function that restricts the raw read to the SAME in-scope population as everything else for that scope/root (left-semi against `scope_core` or a projection of it — never an independently-scoped universe), joins `ctx.fiscal_cal`/`ctx.fiscal_week` for time-grain columns and `ctx.product_dims`/`ctx.products_attr` for slice dimensions. Call it from `build_pipeline_frames` and add the result to the returned dict under a new key.
 
    **If the source has no store dimension (like `inventory_warehouse`), don't collapse the semi-join key to `product_id` alone.** `scope_core` always carries `Year`/`Week` (`ctx.scope_keys` includes them for every grain), and under `product_store_week` grain, scope membership genuinely varies by week — a product can be in scope for some weeks and not others. Attach `Year`/`Week` to your new frame's rows (via the fiscal calendar join) **before** the scope semi-join, and restrict on `(product_id, Year, Week)`, not `product_id` alone — otherwise the new frame's data leaks into weeks the product was already out of scope. This exact bug existed in `build_dc_daily` (fixed 2026-09-16) — see §12.19.
-5. **`kpi_long.py`**: add the new key to `_period_frames`'s three branches (quarter/monthly/ytd) and to `_VALUE_FILTERED_FRAMES` so root/cut/slice filtering reaches it too.
+5. **`kpi_long.py`**: add the new key to `_period_frames`'s branches (quarter/half/monthly/ytd, and `_PERIOD_METRIC_FRAMES` for the complete-period and weekly-drop filters) and to `_VALUE_FILTERED_FRAMES` so root/cut/slice filtering reaches it too.
 6. **`metrics.py`**: `compute_kpis`/`build_kpi_table` pass frames as explicit positional args (not a generic passthrough) — add a new explicit parameter to `compute_kpis` and thread `frames["my_frame"]` through `build_kpi_table`'s call to it.
 
 ---
@@ -820,6 +900,18 @@ render_kpi_html → standalone HTML file
 | A metric looks right for `"overall"` but wrong/missing within a specific root | Confirm the root's `dim_col` actually has non-null values matching its `root_values` for the products you expect — a product missing that dimension_source's join key entirely gets `NULL` and never appears in any named root, only `"overall"` |
 | A metric (e.g. instock) is right in a named root but wrong in `"overall"` specifically | `"overall"` applies no population restriction of its own — if a segment (e.g. NON-COMP) should never count toward that metric even in `overall`, add a `metrics.population_filters` entry for it (see §3.4d) rather than trying to fix it via scope or roots |
 | `metrics.population_filters` entry silently doesn't seem to apply / applies to a sibling metric too | Check `METRIC_FILTER_GROUPS` in `kpi_pipeline/filters.py` (also §3.4d) — several metric_cols share one aggregation pass and can only be filtered together; setting it on any one column in the group is enough, but two columns in the same group with different specs fail loudly at run time |
+| `time grain (...) is missing N date(s) between ...` | The calendar (fiscal_cal upload, or on the civil path the dates present in daily-data after `input_filters.daily_data`) lacks days inside the window — fix the source data or narrow `run_min_date` (§3.1a) |
+| `report_end='complete_month': the fiscal_cal upload ends X; it must extend past REPORT_END_DATE` | Extend the `fiscal_cal` upload beyond the as-of Saturday so the month containing it can be classified |
+| `report_end='complete_month': no month ends between START and END` / `the cut month X..Y starts before the report start` | `run_min_date` does not reach the start of the cut month (also hit by the weekly-refresh pattern) — widen it or use `as_of` |
+| `instock_daily: daily-data latest date X is before the report end Y` | daily-data has not reached `REPORT_END_DATE` yet (days after it would count as out of stock) — wait for the load or set `reporting_window.as_of_date` earlier |
+| `html_report.dimension_labels must be a dict ...` | `dimension_labels` must map slice dimension name -> label, both strings |
+| `scope_source.mode ... ` / `blocked_scope.ui_parameters_path requires scope_source.mode='operation_scope'` / `instock_daily.count_start=... needs the operation scope start date` | Blocks and `scope_start`-based count starts need the operation scope (§3.2a-c); or use `count_start='first_daily_row'` |
+| `No operation scope rows for solution_id=... run_date=...` | Wrong `solution_id`, or no snapshot for that Sunday — set `scope_source.run_date` explicitly |
+| `KeyError` on `SCOPE_SOURCE` / `BLOCKED_SCOPE` / `INSTOCK_DAILY` / `HTML_REPORT_FILENAME_TEMPLATE` at materialize time | The customer config predates these keys — copy them from the current `config.py` / `tbretail_config.py` (every key is required, no silent defaults) |
+| `html_report.filename ... may only use the placeholders {customer} and {report_end}` | Remove other `{...}` placeholders from the filename template |
+| In-stock differs from the client reference script for tbretail | Check that the scope additions count in in-stock (the reference script leaves them out), `count_start`, ECOM `input_filters`, and that block product_ids are rolled to the family main (§3.2b) |
+| Blocked product still shows sales at some stores | Scope additions are never blocked, and `lost_sales_source` (weekly, no store) cannot be filtered per day (§3.2a-b) |
+| Weekly tab lacks the last (partial) week under `complete_month` without a fiscal calendar | Expected — the clipped trailing week is dropped (§3.1a) |
 | Score backfills all weeks | Defined scope path wrong or defined scope table empty for the window |
 | `kpi_long is empty — run pipeline first` | Called `build_html_report` before `runner.run()`, or saved outputs missing in `html_only` mode |
 | HTML file not generated | `html_report.enabled` is False, or check the Cell 6 output for errors |
@@ -849,11 +941,13 @@ render_kpi_html → standalone HTML file
 | `fiscal_cal` | date → Year/Week lookup |
 | `fiscal_week` | Year/Week → week_start/end/Fiscal_Quarter/Fiscal_Month |
 | `available_fiscal_months` | fiscal-MONTH numbers fully closed as of `REPORT_END_DATE` for the latest year — the YTD elapsed-window set, applied to every year. Delegates to `complete_fiscal_periods` below at `Fiscal_Month` grain. Two stacked fixes this session: (1) previously read clipped `ctx.fiscal_week` bounds, so the "closed" check was trivially always true (now delegates to the unclipped helper); (2) the grain itself moved from quarter to month — `available_fiscal_quarters` was renamed/replaced, since a quarter in progress can still have already-closed months. See §3.1. |
-| `complete_fiscal_periods` | `{"Fiscal_Quarter": df, "Fiscal_Month": df}` — the `(Year, period)` pairs fully elapsed on BOTH window edges (unclipped fiscal calendar), from `fiscal.complete_fiscal_periods`. Semi-joined onto every metric frame by `kpi_long._drop_incomplete_periods` for the Quarter/Monthly trend tabs (§3.1). `None` in `html_only` mode (fiscal.py never runs). |
+| `complete_fiscal_periods` | `{"Fiscal_Quarter": df, "Fiscal_Month": df}` (plus `"Fiscal_Half"` only when `half_periods`) — the `(Year, period)` pairs fully elapsed on BOTH window edges (unclipped fiscal calendar), from `fiscal.complete_fiscal_periods`. Semi-joined onto every metric frame by `kpi_long._drop_incomplete_periods` for the Quarter/Monthly trend tabs (§3.1). `None` in `html_only` mode (`fiscal.build_fiscal_and_products` does not run). |
 | `products_attr` | broadcast: product_id, cogs, price, ALL dimension columns (cuts + root-defining) |
 | `active_slice_dimensions` | every validated dimension column (slices + dimension_sources) — includes root-defining columns; used to build `products_attr`/`product_dims` and by `scope_debug.py`. NOT what the KPI step iterates for cuts — see `cut_dimensions`. |
 | `cut_dimensions` | `active_slice_dimensions` minus root-defining columns — what `kpi_long`/comparisons/HTML actually iterate as cuts within every root (§3.4c) |
 | `root_definitions` | resolved roots (excluding the implicit `"overall"`): `[{"root": name, "dim_col": ..., "value": ...}, ...]`, from `fiscal._resolve_root_definitions`. In `html_only` mode, `dim_col`/`value` are `None` (re-inferred from a loaded `kpi_long`'s own `root` column — only the name is needed to render) |
+| `operation_scope_pairs` | operation-scope mode only: cached `(product_id, store_id, scope_start)` after the main-item / active filters |
+| `blocked_days` | blocked_scope on only: cached `(product_id, store_id, date)` days removed from daily-data metrics and in-stock; `None` when off |
 | `defined_scope_keys` | product×[store×]Year×Week keys from defined scope |
 | `hybrid_scope_keys` | final scope (defined + adjustments + score backfill) |
 | `score_only_scope_keys` | score-filter scope (set when `use_hybrid_scope=True` or `run_scope_diff=True`) |
@@ -864,8 +958,8 @@ render_kpi_html → standalone HTML file
 | `comparison_yoy/ytd` | full comparison long-format DataFrames, per root × cut (ytd can carry multiple year-pair rows per metric). No qoq/mom/wow — not comparison kinds. |
 | `yoy_display/ytd_display` | display-format DataFrames (overall); for ytd this is just the **latest** consecutive-year pair — see `comparison_ytd` for the full multi-pair detail |
 | `scope_diff` | defined vs score annual diff (when `run_scope_diff=True`) |
-| `comparable_kpi_long` | like-for-like per-link rows for EVERY enabled `comparable_pairs.kinds` entry, tagged by `comparison_type` (`"ytd"`/`"yoy"`/`"quarter"`) + `link_prior_year`/`link_current_year` (+ `quarter_number` for quarter rows) (when `comparable_pairs.enabled=True`) |
-| `comparable_comparison_ytd` / `comparable_comparison_yoy` / `comparable_comparison_quarter` | one comparison DataFrame per enabled kind (same shape as `comparison_ytd`/`comparison_yoy`; `quarter` additionally keyed on `quarter_number`). Populated only for kinds in `comparable_pairs.kinds`; the others stay `None`. |
+| `comparable_kpi_long` | like-for-like per-link rows for EVERY enabled `comparable_pairs.kinds` entry, tagged by `comparison_type` (`"ytd"`/`"yoy"`/`"quarter"`/`"half"`) + `link_prior_year`/`link_current_year` (+ `quarter_number` / `half_number` for those rows) (when `comparable_pairs.enabled=True`) |
+| `comparable_comparison_ytd` / `_yoy` / `_quarter` / `_half` | one comparison DataFrame per enabled kind (same shape as `comparison_ytd`/`comparison_yoy`; `quarter` additionally keyed on `quarter_number`). Populated only for kinds in `comparable_pairs.kinds`; the others stay `None`. |
 | `comparable_ytd_display` / `comparable_yoy_display` / `comparable_quarter_display` | display DataFrame per enabled kind (ytd/yoy: latest link; quarter: latest link per quarter number) |
 | `save_plan` | SavePlan from last save_outputs call |
 
@@ -895,6 +989,8 @@ For a quick distinct product/store count of the final scope (overall + per slice
 | `KPI_CUSTOMER` | `customer` |
 | `KPI_AS_OF_DATE` | `reporting_window.as_of_date` |
 | `KPI_RUN_MIN_DATE` | `reporting_window.run_min_date` |
+| `KPI_REPORT_END` | `reporting_window.report_end` (`as_of` / `complete_month`) |
+| `KPI_HALF_PERIODS` | `fiscal_calendar.half_periods` (true/false) |
 | `KPI_USE_HYBRID_SCOPE` | `scope.use_hybrid_scope` |
 | `KPI_RUN_SCOPE_DIFF` | `scope.run_scope_diff` |
 | `KPI_COMPARABLE_PAIRS` | `comparable_pairs.enabled` |
@@ -936,6 +1032,7 @@ For a quick distinct product/store count of the final scope (overall + per slice
 | `KPI_HTML_WEEKLY_WEEKS` | `html_report.weekly_display_weeks` (`null`/empty = all) |
 | `KPI_HTML_MONTHLY_MONTHS` | `html_report.monthly_display_months` (`null`/empty = all) |
 | `KPI_HTML_QUARTERLY_QUARTERS` | `html_report.quarterly_display_quarters` (`null`/empty = all) |
+| `KPI_HTML_HALF_HALVES` | `html_report.half_display_halves` (`null`/empty = all) |
 | `KPI_HTML_YEARLY_YEARS` | `html_report.yearly_display_years` (`null`/empty = all) |
 | `KPI_RUN_MODE` | `run.mode` (`full` or `html_only`) |
 
@@ -943,7 +1040,7 @@ For a quick distinct product/store count of the final scope (overall + per slice
 
 ## 12. Key design constraints (never violate)
 
-1. **Report end = last completed Saturday** — prevents partial-week instock asymmetry.
+1. **Report end = last completed Saturday** — prevents partial-week instock asymmetry. The only exception is `report_end="complete_month"`, which cuts it back to a month end (a Saturday with a fiscal calendar; mid-week without, where the partial trailing week is dropped from the Weekly tab).
 2. **Defined scope uses fiscal-week overlap** — a week whose Sunday precedes `run_min_date` is still included if any day overlaps the window.
 3. **Score thresholds over the full window** — not just the backfill window.
 4. **No pair pre-filter in product-week mode** — when `store_col=None`, `build_scoped_daily` must not pre-filter by lost-sales pairs.
@@ -960,10 +1057,15 @@ For a quick distinct product/store count of the final scope (overall + per slice
 15. **Dimension sources fail loudly** — unlike `slices.derived_dimensions` (skipped on error), an enabled `dimension_sources` entry always raises on bad path/column/expression.
 16. **`dimension_sources` columns are ALWAYS roots, never cuts** — mutually exclusive with `slices` by design. A dimension_source column is unconditionally excluded from `ctx.cut_dimensions` even if nothing lists it as a root explicitly (auto-discovery still applies); do not expect it to show up as a flat breakdown alongside brand/SMW.
 17. **A fiscal calendar's month/quarter NUMBER is not assumed to equal the real calendar month/quarter** — `fiscal_calendar.column_map` reads a client's own quarter/month columns when present, but the Monthly tab's *display label* is never derived by feeding a fiscal month number into a month-name table (a client's fiscal year can be offset from the civil calendar, e.g. tbretail's Feb–Jan year, so fiscal month 07 can span real August). The label is instead derived from the majority real calendar month by day count across each fiscal month's actual dates when `month_name_col` isn't configured — see §3.1.
-18. **No dedicated store-exclusion config key** — every metric uses all scoped stores. If a store should never contribute (e.g. e-com fulfillment), filter it via `input_filters.daily_data` (affects everything read from `daily_data`, not just specific metrics), or rely on `lost_sales_source`/`instock_source` tables that already exclude it upstream.
+18. **No global store-exclusion config key** — every metric uses all scoped stores. If a store should never contribute (e.g. e-com fulfillment), filter it via `input_filters.daily_data` (affects everything read from `daily_data`, not just specific metrics), or rely on `lost_sales_source`/`instock_source` tables that already exclude it upstream. The one per-metric exception is in-stock when `instock_daily` is on: `instock_daily.input_filters` leaves stores out of in-stock only (tbretail: ECOM 829/639/917).
 19. **DC/warehouse scope restriction must include the week dimension, not just product_id** — `build_dc_daily` restricts on `(product_id, Year, Week)` against `scope_core`, attaching `Year`/`Week` to DC rows (via the fiscal calendar join) **before** the scope semi-join. Under `product_store_week` grain, scope membership varies by week; restricting on `product_id` alone (dropping `Year`/`Week` first) previously let a product's DC inventory leak into weeks it had fallen out of scope — inflating `WOS_DC`/`WOS_TOTAL`/`dc_mean_stock`/`total_mean_stock` for those weeks. Fixed 2026-09-16. No effect under `"product"`/`"product_store"` grain (scope is uniform across every week there already). Any new store-less input frame (§5 "Add a new input frame") must follow the same pattern.
 20. **DC/warehouse frames restrict against `scope_core` in the SAME id space they were built in — item-family-rolled to parent `product_id`, not raw.** `scope_core`/`defined_scope` is already parent-rolled at its own source (its producer maps `product_id -> coalesce(parent_id, product_id)` via `item_family`'s `is_main=false` rows before writing the scope table). `build_dc_daily` and `build_dc_inst` both read `inventory_warehouse` through the same shared `pipeline._get_inventory_warehouse_parent_rolled` helper (which applies `_roll_to_item_family_parent`) before restricting to `scope_core` — fixed 2026-09-17. Previously `build_dc_daily` restricted RAW `product_id` against the parent-rolled `scope_core`, silently dropping any DC inventory sitting on a superseded/child `product_id`. This is unconditional (NOT gated by `dc_instock.enabled`): `path_segments.item_family` must point at a real table any time `path_segments.inventory_warehouse` does, and `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL` will shift for any family with inventory split across old/current item codes. Any new DC-adjacent input frame (§5) must roll to parent `product_id` the same way before restricting to `scope_core`.
 21. **`dc_in_stock_rate` bounds each pair's grid by that pair's own first `inventory_warehouse` row — never by a scope table's `start_date`, and never by a flat window shared across pairs.** This deliberately matches how `daily_data_expanded` bounds the store-level in-stock denominator, keeping both in-stock series on one definition. Consequences, both expected: a pair ranged at a DC but never once stocked inside the window is **absent** from the metric rather than reading 0%; a pair that stops being stocked mid-window keeps accruing stockout days through `REPORT_END_DATE`. Changed 2026-09-18 — the previous scope-derived grid (`operation/scope` + a go-live-floor rewrite) was removed entirely, along with `path_segments.dc_scope`, `input_filters.dc_scope` and `dc_scope_source`. See README's "dc_instock" section.
 22. **`comparable_pairs.grain` is a SEPARATE grain from `defined_scope.grain`, never conflated with it.** `defined_scope.grain` decides scope membership (which rows are in the report at all); `comparable_pairs.grain` decides what "the same pair across years" means for the like-for-like population only, and only when comparable pairs is enabled. `"product_store"` (default) intersects `(product_id, store_id)`; `"product"` intersects `product_id` alone, keeping every store of a qualifying product. Resolved once via `comparable.py`'s `_GRAIN_PAIR_KEYS` and threaded through `_build_comparable_kind`/`_restrict_frames`. Only the store-side frames are affected (`scoped_daily`/`inst_data`/`lost_base`/`scope_pairs`/`scope_pair_weeks`) — `dc_daily`/`dc_inst` always keep their own `(product_id, warehouse_id)` universe regardless, since DC/warehouse has no store dimension to drop in the first place. See §3.6.
-23. **Quarter/Monthly `kpi_long` rows only exist for FULLY ELAPSED periods — checked on both window edges, via the unclipped fiscal calendar, not `ctx.fiscal_week`.** `fiscal.complete_fiscal_periods(ctx, period_col)` re-reads the fiscal calendar without the `[EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE]` clip `ctx.fiscal_week` carries, then `kpi_long._drop_incomplete_periods` semi-joins it onto every metric frame in `_period_frames`'s `"quarter"`/`"monthly"` branches — so an in-progress trailing quarter/month (or one truncated by a `run_min_date` not on a period boundary) never enters `kpi_long`, and therefore never gets saved. `REPORT_END_DATE` itself is unchanged; this is additive. Do NOT read period bounds from `ctx.fiscal_week` for any future completeness check — that was the exact bug in `fiscal._compute_available_fiscal_months` (YTD's own elapsed-period check) fixed this session: `ctx.fiscal_week` is already window-clipped, so any bounds check against it is trivially true for every period present at all. `comparable.py`'s `_complete_quarter_years` got this right from the start and was the template for the fix. See §3.1.
+23. **Quarter/Monthly `kpi_long` rows only exist for FULLY ELAPSED periods — checked on both window edges, via the unclipped fiscal calendar, not `ctx.fiscal_week`.** `fiscal.complete_fiscal_periods(ctx, period_col)` re-reads the fiscal calendar without the `[EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE]` clip `ctx.fiscal_week` carries, then `kpi_long._drop_incomplete_periods` semi-joins it onto every metric frame in `_period_frames`'s `"quarter"`/`"monthly"` branches — so an in-progress trailing quarter/month (or one truncated by a `run_min_date` not on a period boundary) never enters `kpi_long`, and therefore never gets saved. `REPORT_END_DATE` itself is unchanged; this is additive. Do NOT read period bounds from `ctx.fiscal_week` for any future completeness check — that was the exact bug in `fiscal._compute_available_fiscal_months` (YTD's own elapsed-period check) fixed this session: `ctx.fiscal_week` is already window-clipped, so any bounds check against it is trivially true for every period present at all. `comparable.py`'s `_complete_period_years` got this right from the start and was the template for the fix. See §3.1.
 24. **YTD's own elapsed-window check runs at MONTH grain (`available_fiscal_months`), not quarter grain — do not "simplify" it back to quarter.** `fiscal._compute_available_fiscal_months` finds which fiscal MONTH numbers are fully elapsed for the latest year (delegating to `complete_fiscal_periods(ctx, "Fiscal_Month")`, same unclipped mechanism as #23), and `kpi_long._with_ytd_filter` filters on `Fiscal_Month` membership. This replaced an earlier quarter-grain version (`available_fiscal_quarters` / `Fiscal_Quarter`) fixed this session: quarter-grain understated YTD whenever the "current" quarter was in progress but had one or more of its own months already closed — virtually always true, since `REPORT_END_DATE` (a week boundary) essentially never lands on a quarter boundary. Month-grain picks up those already-complete months immediately while keeping the identical apples-to-apples mechanism (the same period-number set is summed for every year). Unrelated to the comparable-pairs `quarter` kind (§3.6), which is intentionally quarter-grain and untouched by this.
+25. **Operation scope is built once and every metric uses it** — `scope_source.mode="operation_scope"` (§3.2a); scope additions are the only pairs outside the operation scope, they get no blocks, and they count in every metric including in-stock (from their first daily row).
+26. **Blocked days leave EVERY daily-data-derived metric and in-stock, once** — via `build_scoped_daily` and `build_instock_daily` (blocked and unusable days are subtracted without double counting); weekly no-store sources (`lost_sales_source`) are documented as not filterable (§3.2b).
+27. **`instock_daily` counts only days from each pair's count start; a missing day is out of stock** — and its union of on-hand and goods-in-transit days is never summed.
+28. **The calendar must be gap-free over the window and `complete_month` must fail loudly** — `require_complete_time_grain` and the `fiscal_cal` upload-end check in `apply_report_end_mode`; do not add silent fallbacks.
+29. **New settings are indexed directly in `materialize()`** — no `.get(key, default)` that duplicates `CONFIG`. `config.py` and `tbretail_config.py` each vendor their own `materialize()`; a new setting or validation goes into both identically. They still differ in pre-existing places: `config.py` has the `KPI_ITEM_FAMILY_ROLLUP_*` env overrides, different wording of the `comparable_pairs.grain` validation and some comments, and the `INSTOCK_SOURCE_*` settings sit at a different position in the returned dict.
