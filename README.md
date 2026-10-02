@@ -881,6 +881,8 @@ Read via `read_inventory_warehouse_source` (mirrors `read_daily_data_source`) an
 
 ### `dc_instock`
 
+**DC product scope.** Every DC metric (`dc_mean_stock`, `WOS_DC`, the DC part of `WOS_TOTAL` / `total_mean_stock`, `dc_in_stock_rate`) reads `inventory_warehouse` for the **store** scope's products only — the product-weeks of `scope_source` — at every warehouse. There is no separate DC product scope: the DC scope (`blocked_scope.dc_solution_id`) is read only to give each DC pair its start date for the DC blocked days.
+
 **Gated** (`dc_instock.enabled`, default `False`) — but `item_family` (below) is **not** gated; see the `inventory_warehouse` note above. Backs `dc_in_stock_rate`. Unlike `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL`, which report only on days `inventory_warehouse` actually has a row for, this metric **expands** those rows into a continuous daily grid per `(product_id, warehouse_id)` pair and counts the gaps as stockouts.
 
 ```python
