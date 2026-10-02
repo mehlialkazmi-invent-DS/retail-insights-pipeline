@@ -255,7 +255,7 @@ CONFIG: Dict[str, Any] = {
     # DC IN-STOCK -- OFF: no dc_in_stock_rate in the report (README: dc_instock)
     # ---------------------------------------------------------------------------
     # DC metrics (dc_mean_stock, WOS_DC, WOS_TOTAL's DC part, dc_in_stock_rate) read
-    # path_segments.inventory_warehouse for the store scope's products (per week): the store scope leads.
+    # path_segments.inventory_warehouse for the store scope's products: the store scope leads.
     # With scope_source.dc_solution_id set, only the DC scope's product x warehouse pairs among them count;
     # with None, every warehouse. The DC scope also gives the DC blocked days their start dates.
     "dc_instock": {

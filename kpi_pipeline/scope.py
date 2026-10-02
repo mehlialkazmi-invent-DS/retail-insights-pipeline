@@ -170,7 +170,7 @@ def build_dc_scope(ctx: KPIContext) -> None:
     """Build ctx.dc_scope_pairs: the DC (network) scope's (product_id, warehouse_id) pairs from
     operation/scope of scope_source.dc_solution_id, with the store scope's run_date, roll-up to the family
     main, earliest start and active filter (None when dc_solution_id is None). The store scope leads: every
-    DC metric reads only these pairs whose product is in the store scope that week (pipeline.build_dc_daily /
+    DC metric reads only these pairs whose product is in the store scope (pipeline.build_dc_daily /
     build_dc_inst), and the DC blocked days take their start dates from them."""
     if ctx.dc_scope_pairs is not None:
         ctx.dc_scope_pairs.unpersist()

@@ -881,7 +881,7 @@ Read via `read_inventory_warehouse_source` (mirrors `read_daily_data_source`) an
 
 ### `dc_instock`
 
-**DC product scope.** The store scope leads. Every DC metric (`dc_mean_stock`, `WOS_DC`, the DC part of `WOS_TOTAL` / `total_mean_stock`, `dc_in_stock_rate`) reads `inventory_warehouse` for the **store** scope's products (per week). With `scope_source.dc_solution_id` set (tbretail 22), only the DC (network) scope's product × warehouse pairs among them count: `scope.build_dc_scope` reads that solution's `operation/scope` pairs (rolled to the main, earliest start, active) into `ctx.dc_scope_pairs`, which also give the DC blocked days their start dates. With `None`, every warehouse counts.
+**DC product scope.** The store scope leads. Every DC metric (`dc_mean_stock`, `WOS_DC`, the DC part of `WOS_TOTAL` / `total_mean_stock`, `dc_in_stock_rate`) reads `inventory_warehouse` for the **store** scope's products (one `operation/scope` snapshot, applied to every week). With `scope_source.dc_solution_id` set (tbretail 22), only the DC (network) scope's product × warehouse pairs among them count: `scope.build_dc_scope` reads that solution's `operation/scope` pairs (rolled to the main, earliest start, active) into `ctx.dc_scope_pairs`, which also give the DC blocked days their start dates. With `None`, every warehouse counts.
 
 **Gated** (`dc_instock.enabled`, default `False`) — but `item_family` (below) is **not** gated; see the `inventory_warehouse` note above. Backs `dc_in_stock_rate`. Unlike `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL`, which report only on days `inventory_warehouse` actually has a row for, this metric **expands** those rows into a continuous daily grid per `(product_id, warehouse_id)` pair and counts the gaps as stockouts.
 

@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `scope.build_dc_scope` reads that solution's `operation/scope` pairs (product x warehouse, rolled to the
 main, earliest start, active) into `ctx.dc_scope_pairs`; they give the DC blocked days their start dates
 (blocks apply when `blocked_scope.ui_parameters_path` is also set). The store scope leads: the DC metrics
-read only the DC scope's product x warehouse pairs whose product is in the store scope that week (with None,
+read only the DC scope's product x warehouse pairs whose product is in the store scope (with None,
 every warehouse, as before).
 
 **Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/{scope,pipeline,runner,context,html_report}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
