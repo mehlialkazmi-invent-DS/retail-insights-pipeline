@@ -95,7 +95,7 @@
 #                metric and from in-stock. lost_sales_source (report_dfu, weekly, no store) is not
 #                filtered by it.
 #   Instock:     built from noob/daily-data by instock_daily (OH or goods-in-transit, count start =
-#                earlier of scope start and first daily row, ECOM stores excluded from in-stock only,
+#                earlier of scope start and first daily row, ECOM stores excluded from in-stock,
 #                scope additions included, counted from their first daily row)
 #                instead of report_dfu (instock_source is OFF; its config is kept for a switch back).
 #                metrics.population_filters excludes NON-COMP (IS_COMP=='no') from in_stock_rate
@@ -104,13 +104,23 @@
 #                comp_ids_primary, NON-COMP excluded by design). NON-COMP still counts toward
 #                every other Overall metric (sales, inventory, lost_sales_pct, etc.), same as
 #                kpi-skill-toolkit; lost sales excludes ECOM only (via report_dfu and sales_filter).
+#   Inventory:   inventory_git (shift -1, all six metrics on) adds goods in transit to on-hand on total
+#                inventory, mean stock (+ retail / cost), WOS (units / revenue / cost), turnover, DC mean
+#                stock, WOS (DC) and WOS (Total): store GIT is rolled to the main item, joined to the daily
+#                data and then blocked scope removes days; each group is computed on its own and joined as
+#                before. Sales, in-stock and lost sales are unchanged.
 #   Service metrics (WOS, turnover, mean_stock, instock, lost sales %): every metric uses all
-#                scoped stores, except that ECOM stores 829 / 639 / 917 are left out of in-stock
-#                only (instock_daily.input_filters). Add a store_id exclusion to
-#                input_filters.daily_data to drop a store from every metric.
+#                scoped stores, except that NON-COMP (IS_COMP=='no') is left out of in-stock only
+#                (metrics.population_filters) and ECOM stores 829 / 639 / 917 are left out of in-stock
+#                and lost sales only (instock_daily.input_filters, lost_sales_source.sales_filter and
+#                the model behind report_dfu); every other metric keeps NON-COMP and ECOM. Add a store_id
+#                exclusion to input_filters.daily_data to drop a store from every metric.
 #   Dimensions:  is_nvrout (NVROUT vs COMP), brand, SMW (KNG vs SMW)
-#   Window:      reporting_window.report_end="complete_month": every metric and view ends on the last
-#                complete fiscal month; half_periods on (Half tab, H1 = Q1-Q2, H2 = Q3-Q4).
+#   Window:      reporting_window.report_end="latest_day": the report ends on as_of_date itself. YTD runs
+#                to that day (the same fiscal day of every year); Annual, Quarter, Half, Monthly and Weekly
+#                show complete periods only (the current fiscal year appears in YTD only). Lost sales
+#                only reaches the last Saturday, so lost sales % uses whole weeks up to it in every view
+#                and in YTD. half_periods on (Half tab, H1 = Q1-Q2, H2 = Q3-Q4).
 #   Comparisons: YoY / YTD (plus quarter / half period values on their own tabs)
 #   Comparable:  like-for-like pairs present in every qualifying year, kinds ytd / yoy / quarter /
 #                half, over an all-years pair universe
@@ -134,6 +144,15 @@ COMPARISON_KINDS_ALL = ("yoy", "ytd")
 # sync with retail-insights-pipeline/config.py -- see its COMPARABLE_KINDS_ALL comment.
 COMPARABLE_KINDS_ALL = ("ytd", "yoy", "quarter", "half")
 
+# inventory_git.metrics gate names, in canonical order: the inventory metrics that can add goods in
+# transit (GIT) to on-hand inventory. Store side: total_inventory, mean_stock (+ retail / cost), wos
+# (WOS, wos_revenue, wos_cost and the store part of WOS_TOTAL), inventory_turnover_rate (the mean stock
+# inside it). DC side: dc_mean_stock (and the DC part of total_mean_stock), wos_dc (WOS_DC and the DC
+# part of WOS_TOTAL). total_mean_stock's store part follows mean_stock.
+INVENTORY_GIT_METRICS_ALL = (
+    "total_inventory", "mean_stock", "wos", "inventory_turnover_rate", "dc_mean_stock", "wos_dc",
+)
+
 CONFIG: Dict[str, Any] = {
     # =============================================================================
     # IDENTITY & RUN WINDOW
@@ -145,15 +164,17 @@ CONFIG: Dict[str, Any] = {
         "mode": "full",
     },
     "reporting_window": {
-        # Update as_of_date before each run. REPORT_END_DATE resolves to the last
-        # completed Saturday on or before this date.
+        # Update as_of_date before each run, to a day noob/daily-data has reached (the daily in-stock
+        # check raises otherwise). With report_end "latest_day" REPORT_END_DATE is this date itself.
         "as_of_date": "2026-08-02",
         "run_min_date": "2025-02-08",  # None = YTD from Jan 1; e.g. "2025-01-01" for multi-year
-        # complete_month: the report ends at the last day of the most recent fully elapsed fiscal
-        # month on or before the last completed Saturday; every metric and view stops there. The
-        # fiscal_cal upload must extend past that Saturday and run_min_date must reach the start of
-        # the cut month. See config.py's reporting_window.report_end.
-        "report_end": "complete_month",
+        # latest_day: the report ends on as_of_date. YTD runs to that day, the same fiscal day of every
+        # year; Annual, Quarter, Half, Monthly and Weekly show complete periods only. Lost sales % uses
+        # whole weeks up to the last Saturday on or before as_of_date. The fiscal_cal upload must extend
+        # past as_of_date, and run_min_date must reach the start of the first fiscal year to show
+        # (run_min_date 2025-02-08 resolves to Sunday 2025-02-02, the start of fiscal 2025). See
+        # config.py's reporting_window.report_end.
+        "report_end": "latest_day",
     },
     # =============================================================================
     # CALENDAR
@@ -333,7 +354,8 @@ CONFIG: Dict[str, Any] = {
         "item_family": ["operation", "item_family"],
         # Platform scope table backing scope_source.mode="operation_scope".
         "scope": ["operation", "scope"],
-        # Store goods-in-transit snapshots backing instock_daily.git_date_shift_days.
+        # Goods-in-transit snapshots backing instock_daily.git_date_shift_days, dc_instock.git_date_shift_days
+        # and inventory_git.git_date_shift_days (destination_type 0 = store, 1 = warehouse).
         "goods_in_transit": ["operation", "goods_in_transit"],
         "products": ["master-data", "products"],
         "lost_sales": ["reporting", "future_visibility", "reporting_inv_fc_dfu", "report_dfu"],
@@ -455,6 +477,8 @@ CONFIG: Dict[str, Any] = {
         "lost_sales": False,
         "inventory_warehouse": True,
         "defined_scope": False,
+        # Goods in transit (instock_daily / dc_instock / inventory_git) rolled to the family main.
+        "goods_in_transit": True,
     },
     # ---------------------------------------------------------------------------
     # DC INSTOCK — DC in-stock rate from an expanded inventory_warehouse grid
@@ -466,18 +490,10 @@ CONFIG: Dict[str, Any] = {
     #                              also counts days with goods in transit to the DC
     #                              (goods_in_transit destination_type 1, quantity > 0, rolled to the
     #                              family main); a snapshot dated D+1 describes the end of day D -> -1.
-    #   blocked_scope_solution_id: None = no DC blocks. An integer (the DC solution, 22 for tbretail)
-    #                              removes {blocked_scope.ui_parameters_path}/dc_blocked_scope days of
-    #                              that solution by blocked_scope.rule, against each DC pair's
-    #                              scope_start from operation/scope of that solution (same run_date /
-    #                              roll-up / active filter as scope_source). DC pairs outside it get no
-    #                              blocks. Requires blocked_scope.ui_parameters_path.
-    # Both are set for tbretail and take effect once "enabled" is turned on.
     "dc_instock": {
         "enabled": False,
         "stock_threshold": 0,  # a day counts as "stocked" when inventory > stock_threshold
         "git_date_shift_days": -1,
-        "blocked_scope_solution_id": 22,
     },
     # ---------------------------------------------------------------------------
     # SCOPE SOURCE — which table defines the scope universe
@@ -525,11 +541,18 @@ CONFIG: Dict[str, Any] = {
     # Weekly sources with no per-store/day grain (lost_sales_source, e.g. report_dfu) cannot be
     # filtered per day and are left as they are. Always set ui_parameters_path explicitly: the
     # newest snapshot folder can hold no blocks for this solution.
+    #   dc_solution_id:           None = no DC blocks. An integer (the DC solution, 22 for tbretail) removes
+    #                             {ui_parameters_path}/dc_blocked_scope days of that solution, by "rule",
+    #                             against each DC pair's scope_start from operation/scope of that solution
+    #                             (same run_date / roll-up / active filter as scope_source), from every DC
+    #                             metric: dc_mean_stock, WOS_DC, the DC part of WOS_TOTAL / total_mean_stock
+    #                             and dc_in_stock_rate. DC pairs outside that scope get no blocks.
     "blocked_scope": {
         # Airflow variable ui_parameters_path (the newest folder, 2026-09-30-204511_..., has only
         # solution 51 blocks).
         "ui_parameters_path": "ui-data/parameter_config/2026-09-30-065549_23d44fd8-8e05-475b-835d-8812ffb50b21",
         "rule": "after_scope_start",
+        "dc_solution_id": 22,
     },
     # ---------------------------------------------------------------------------
     # INSTOCK DAILY — in-stock rate built from daily-data (replaces the weekly in-stock read)
@@ -561,8 +584,33 @@ CONFIG: Dict[str, Any] = {
         # report_dfu's earliest week; pairs stocked before the window count from its start.
         "history_start": "2024-01-21",
         "usable_only": True,
-        # ECOM stores leave in-stock only (still counted in sales / inventory metrics).
+        # ECOM stores leave in-stock here (and lost sales via lost_sales_source.sales_filter / the report_dfu
+        # model); they are still counted in sales / inventory metrics.
         "input_filters": ["store_id NOT IN (829, 639, 917)"],
+    },
+    # ---------------------------------------------------------------------------
+    # INVENTORY GIT — gated goods in transit on the inventory metrics
+    # ---------------------------------------------------------------------------
+    # ON for tbretail, all six metrics (OFF in the generic config: metrics = []). A metric named in
+    # "metrics" uses on-hand + goods in transit (GIT) units (retail = units x price_without_tax, cost =
+    # units x cogs); a metric left out keeps on-hand only and its exact previous value. Drop a name to
+    # turn that metric's GIT off.
+    #   git_date_shift_days: -1 (a snapshot dated D+1 describes the end of day D, as instock_daily).
+    #                        None = off; required (an integer) when "metrics" is not empty.
+    #   metrics:             "total_inventory", "mean_stock" (+ mean_stock_retail / _cost), "wos" (WOS,
+    #                        wos_revenue, wos_cost and the store part of WOS_TOTAL),
+    #                        "inventory_turnover_rate" (the mean stock inside it), "dc_mean_stock" (and
+    #                        the DC part of total_mean_stock), "wos_dc" (WOS_DC and the DC part of
+    #                        WOS_TOTAL). total_mean_stock's store part follows "mean_stock".
+    # Store GIT = goods_in_transit destination_type 0, quantity > 0, summed per product x store x day
+    # rolled to the family main, limited to scoped pairs; it is joined to the daily rows (a GIT-only
+    # day gets zero sales / on-hand) BEFORE blocked scope removes days, so blocked days drop both. GIT-only
+    # days on which input_filters.daily_data ("usable = 1") removed the pair's daily row are dropped.
+    # DC GIT = destination_type 1, per product x warehouse x day (DC blocked days are not applied to the
+    # DC inventory metrics). Sales, in-stock and lost sales never change.
+    "inventory_git": {
+        "git_date_shift_days": -1,
+        "metrics": ["total_inventory", "mean_stock", "wos", "inventory_turnover_rate", "dc_mean_stock", "wos_dc"],
     },
     # ---------------------------------------------------------------------------
     # LOST-SALES ENSEMBLE — blend two lost-sales models by product sales speed
@@ -1069,9 +1117,10 @@ def _last_completed_saturday(as_of: datetime.date) -> datetime.date:
 def _resolve_report_window(
     as_of: datetime.date,
     run_min: Optional[str],
+    report_end_mode: str,
 ) -> Dict[str, Any]:
     report_start = _sunday_of_week(datetime.date(as_of.year, 1, 1))
-    report_end = _last_completed_saturday(as_of)
+    report_end = as_of if report_end_mode == "latest_day" else _last_completed_saturday(as_of)
     run_week_start = _sunday_of_week(as_of)
     run_week_end = _saturday_of_week(as_of)
 
@@ -1174,19 +1223,23 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "lost_sales": bool(item_family_rollup_cfg.get("lost_sales", False)),
         "inventory_warehouse": bool(item_family_rollup_cfg.get("inventory_warehouse", True)),
         "defined_scope": bool(item_family_rollup_cfg.get("defined_scope", False)),
+        "goods_in_transit": bool(item_family_rollup_cfg.get("goods_in_transit", True)),
     }
 
     dc_instock_cfg = cfg.get("dc_instock", {}) or {}
     dc_instock_enabled = bool(dc_instock_cfg.get("enabled", False))
     dc_instock_stock_threshold = dc_instock_cfg.get("stock_threshold", 0)
 
+    report_end_mode = rw["report_end"]
+    if report_end_mode not in ("as_of", "complete_month", "latest_day"):
+        raise ValueError(
+            f"reporting_window.report_end must be 'as_of', 'complete_month' or 'latest_day'; got {report_end_mode!r}"
+        )
     window = _resolve_report_window(
         datetime.date.fromisoformat(rw["as_of_date"]),
         run_min,
+        report_end_mode,
     )
-    report_end_mode = rw["report_end"]
-    if report_end_mode not in ("as_of", "complete_month"):
-        raise ValueError(f"reporting_window.report_end must be 'as_of' or 'complete_month'; got {report_end_mode!r}")
 
     defined_scope = {**cfg["defined_scope"], "path": paths["PATH_DEFINED_SCOPE"]}
 
@@ -1268,7 +1321,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             if ui_parameters_path is not None
             else None
         ),
-        # DC blocks of the same snapshot, read only when dc_instock.blocked_scope_solution_id is set.
+        # DC blocks of the same snapshot, read only when dc_solution_id is set.
         "dc_path": (
             fund_paste(bucket, *ui_parameters_path.strip("/").split("/"), "dc_blocked_scope")
             if ui_parameters_path is not None
@@ -1283,12 +1336,12 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     dc_instock_git_date_shift_days = dc_instock_cfg["git_date_shift_days"]
     if dc_instock_git_date_shift_days is not None and type(dc_instock_git_date_shift_days) is not int:
         raise ValueError("dc_instock.git_date_shift_days must be an integer or None")
-    dc_instock_blocked_scope_solution_id = dc_instock_cfg["blocked_scope_solution_id"]
-    if dc_instock_blocked_scope_solution_id is not None:
-        if type(dc_instock_blocked_scope_solution_id) is not int:
-            raise ValueError("dc_instock.blocked_scope_solution_id must be an integer or None")
+    blocked_scope["dc_solution_id"] = blocked_scope_cfg["dc_solution_id"]
+    if blocked_scope["dc_solution_id"] is not None:
+        if type(blocked_scope["dc_solution_id"]) is not int:
+            raise ValueError("blocked_scope.dc_solution_id must be an integer or None")
         if blocked_scope["path"] is None:
-            raise ValueError("dc_instock.blocked_scope_solution_id requires blocked_scope.ui_parameters_path")
+            raise ValueError("blocked_scope.dc_solution_id requires blocked_scope.ui_parameters_path")
 
     instock_daily_cfg = cfg["instock_daily"]
     history_start_raw = instock_daily_cfg["history_start"]
@@ -1330,6 +1383,28 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             )
         if instock_daily["count_start"] == "first_daily_row" and not instock_daily["require_daily_data"]:
             raise ValueError("instock_daily.count_start='first_daily_row' requires require_daily_data=True")
+    if report_end_mode == "latest_day" and not instock_daily["enabled"]:
+        raise ValueError(
+            "reporting_window.report_end='latest_day' requires instock_daily.enabled=True: the YTD cut at the "
+            "latest day splits the daily in-stock frame's fiscal week, which weekly in-stock sources cannot do"
+        )
+
+    inventory_git_cfg = cfg["inventory_git"]
+    inventory_git_shift_days = inventory_git_cfg["git_date_shift_days"]
+    if inventory_git_shift_days is not None and type(inventory_git_shift_days) is not int:
+        raise ValueError("inventory_git.git_date_shift_days must be an integer or None")
+    inventory_git_requested = set(inventory_git_cfg["metrics"])
+    unknown_inventory_git_metrics = sorted(inventory_git_requested - set(INVENTORY_GIT_METRICS_ALL))
+    if unknown_inventory_git_metrics:
+        raise ValueError(
+            f"inventory_git.metrics has unknown names {unknown_inventory_git_metrics}; "
+            f"allowed: {list(INVENTORY_GIT_METRICS_ALL)}"
+        )
+    inventory_git_metrics = [m for m in INVENTORY_GIT_METRICS_ALL if m in inventory_git_requested]
+    if inventory_git_metrics and inventory_git_shift_days is None:
+        raise ValueError("inventory_git.metrics is set but inventory_git.git_date_shift_days is None; set an integer")
+    if inventory_git_metrics and not cfg["fiscal_calendar"]["use_fiscal_calendar"]:
+        raise ValueError("inventory_git.metrics requires fiscal_calendar.use_fiscal_calendar=True")
 
     dimension_sources = []
     for src in cfg.get("dimension_sources", []) or []:
@@ -1508,10 +1583,10 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "SCOPE_SOURCE": scope_source,
         "BLOCKED_SCOPE": blocked_scope,
         "INSTOCK_DAILY": instock_daily,
+        "INVENTORY_GIT": {"git_date_shift_days": inventory_git_shift_days, "metrics": inventory_git_metrics},
         "DC_INSTOCK_ENABLED": dc_instock_enabled,
         "DC_INSTOCK_STOCK_THRESHOLD": dc_instock_stock_threshold,
         "DC_INSTOCK_GIT_DATE_SHIFT_DAYS": dc_instock_git_date_shift_days,
-        "DC_INSTOCK_BLOCKED_SCOPE_SOLUTION_ID": dc_instock_blocked_scope_solution_id,
         "INSTOCK_SOURCE_ENABLED": instock_source_enabled,
         "INSTOCK_SOURCE_COLUMN_MAP": instock_source_column_map,
         **paths,

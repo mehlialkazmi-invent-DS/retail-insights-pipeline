@@ -7,8 +7,9 @@ description: >-
   roots/cuts report structure (dimension_sources as named population tabs
   like NVROUT/COMP, slices as breakdowns within every root), fiscal calendar
   column mapping, operation scope, blocked scope, daily in-stock (instock_daily),
-  report_end=complete_month, half periods, HTML report, output saves, comparable
-  pairs, performance patterns, and how to add/change anything.
+  gated goods in transit on the inventory metrics (inventory_git),
+  report_end=complete_month / latest_day, half periods, HTML report, output saves,
+  comparable pairs, performance patterns, and how to add/change anything.
   Use when a user asks to: set up, modify, run, debug, explain, or extend this
   KPI pipeline; configure it with AI; onboard to it quickly; or understand what
   a specific metric means.
@@ -73,7 +74,12 @@ kpi_pipeline/
                    Half/Monthly trend tabs, dict keyed by Fiscal_Quarter/Fiscal_Half (only when
                    half_periods)/Fiscal_Month — see §3.1);
                    apply_report_end_mode (report_end=complete_month cut, run first in
-                   build_dimensions / run_html_only — §3.1a);
+                   build_dimensions / run_html_only — §3.1a; "as_of" and "latest_day" return
+                   unchanged);
+                   build_latest_day_windows (report_end=latest_day: K = fiscal day of
+                   REPORT_END_DATE, ctx.ytd_years, ctx.ytd_lost_sales_last_week, ctx.day_calendar
+                   — §3.1b); complete_fiscal_periods also at "Year" / "Week" grain under
+                   latest_day (LATEST_DAY_COMPLETE_PERIOD_COLUMNS);
                    require_complete_time_grain (fail-loud: every date in the window must be in the
                    calendar)
   inputs.py        cached Delta reads (daily_data_raw, lost_sales_weekly_base) + input_filters;
@@ -87,14 +93,23 @@ kpi_pipeline/
                    per scope (dc_inst is dc_in_stock_rate's expanded inventory grid, gated by
                    dc_instock.enabled -- see README's "dc_instock" config reference);
                    build_instock_daily builds inst_data from noob/daily-data when
-                   instock_daily.enabled (§3.2c); build_scoped_daily drops blocked days
-  metrics.py       compute_kpis: sales, WOS, mean_stock, instock, weighted_instock_rate, WOS_DC/WOS_TOTAL, dc_mean_stock/total_mean_stock, dc_in_stock_rate
+                   instock_daily.enabled (§3.2c); build_scoped_daily drops blocked days and,
+                   with inventory_git on a store metric, full-outer-joins store goods in transit
+                   to the daily rows first (has_daily_row / git_quantity — §3.2d);
+                   build_dc_daily does the same for DC goods in transit (has_inventory_row);
+                   _goods_in_transit_quantity is the shared GIT reader (the in-stock
+                   _goods_in_transit_days derive from it); under report_end=latest_day the
+                   week containing day K is split into two parts (_fiscal_week_parts,
+                   last_day_index) and lost_base keeps weeks up to the last Saturday
+  metrics.py       compute_kpis: sales, WOS, mean_stock, instock, weighted_instock_rate, WOS_DC/WOS_TOTAL, dc_mean_stock/total_mean_stock, dc_in_stock_rate; each group on its own, real rows (has_daily_row / has_inventory_row) on-hand unless its inventory_git gate is on
   kpi_long.py      build_kpi_long: loops root × cut × annual/ytd/quarter/half/monthly/weekly →
                    pandas. Roots = "overall" + ctx.root_definitions; cuts = "overall" +
                    ctx.cut_dimensions, applied identically within every root. Reuses
                    _filter_frames_for_dimension for BOTH root population restriction and a
                    cut's own value_filters. kpi_long gains a "root" column (see §3.4c).
-                   trim_periods_to_recent: trims each period type to N most recent
+                   trim_periods_to_recent: trims each period type to N most recent.
+                   _period_frames under report_end=latest_day: Annual / Weekly keep complete
+                   periods only, YTD = days 1..K of ctx.ytd_years (_ytd_latest_day_frames)
   comparisons.py   YoY / YTD + build_scope_diff, root × cut aware throughout (comparison_yoy/ytd
                    carry a "root" column). YTD compares the SAME elapsed-window across years
                    (not sequential), chained across every consecutive year pair present — see
@@ -109,7 +124,9 @@ kpi_pipeline/
                    product) is comparable_pairs.grain, independent of defined_scope.grain — §3.6
   io.py            incremental Delta saves, save plan, load_saved_outputs (html_only),
                    recompute comparisons from merged kpi_long history. TABLE_ROW_KEYS now
-                   includes "root" everywhere dimension/dimension_value appears.
+                   includes "root" everywhere dimension/dimension_value appears. Under
+                   report_end=latest_day an existing "ytd" row of kpi_long / comparable_kpi_long
+                   is always replaced on merge (merge_table_incremental).
   html_report.py   standalone HTML renderer — root → period → dimension → value tabs when
                    more than one root exists (Metric Details becomes a peer of the root tabs);
                    a single root (no root-producing dimension_sources) renders exactly as
@@ -133,7 +150,7 @@ When a user wants to configure the toolkit, ask them (or read from their message
 "reporting_window": {
     "as_of_date": "YYYY-MM-DD",   # run anchor → last completed Saturday on or before this date
     "run_min_date": "YYYY-MM-DD", # optional narrow start (Sunday-aligned); null/"" = full YTD from Jan 1
-    "report_end": "as_of",        # "as_of" (default) | "complete_month" — see §3.1a (env KPI_REPORT_END)
+    "report_end": "as_of",        # "as_of" (default) | "complete_month" | "latest_day" — see §3.1a / §3.1b (env KPI_REPORT_END)
 }
 ```
 
@@ -167,6 +184,17 @@ When a user wants to configure the toolkit, ask them (or read from their message
 - Incremental saves: with `incremental` + `allow_overwrite_existing=False`, switching from `as_of` to `complete_month` keeps the `as_of` versions of the current annual row and later weekly rows in history — use `full_refresh` for the switch (tbretail does).
 - HTML filename: `html_report.filename` is a template (`{customer}`, `{report_end}` only; anything else raises in `materialize()`), kept raw in `HTML_REPORT_FILENAME_TEMPLATE` and formatted by `KPIRunner.build_html_report` with the cut date; `HTML_REPORT_OUTPUT_DIR` is the optional datastore folder (from `output_path_segments`).
 
+### 3.1b `report_end = "latest_day"` (YTD to the latest day, complete periods elsewhere)
+
+tbretail's mode (generic default stays `"as_of"`). `REPORT_END_DATE` is `as_of_date` itself — set in `materialize()` (`_resolve_report_window`), so scopes, blocked days, the daily in-stock read, the daily / DC reads and the HTML filename all see it; `fiscal.apply_report_end_mode` returns unchanged. Set `as_of_date` to a day daily-data has reached (the `instock_daily` latest-date check stays); the `fiscal_cal` upload must extend past it. **Requires `instock_daily.enabled=True`** (`materialize()` raises otherwise: the YTD cut splits a fiscal week of the daily in-stock frame, which weekly in-stock sources cannot do).
+- **YTD** = days 1..K of every fiscal year in `ctx.ytd_years`, the same fiscal day for every year, K = day of the fiscal year of `REPORT_END_DATE` (1-based; fiscal: first date of each year from the UNCLIPPED `fiscal_cal` upload; civil: day of the calendar year). A year qualifies only when its first date is inside the window (`run_min_date` must reach the start of the first fiscal year to show; the run prints `YTD years` and the ones left out).
+- **Annual** = complete fiscal years only (the current year is in YTD only), so YoY compares complete years. **Quarter / Half / Monthly** = complete periods as before. **Weekly** = whole weeks only (the trailing partial week is dropped and takes no `weekly_display_weeks` slot). Mechanism: `complete_fiscal_periods` at `"Year"` / `"Week"` grain, applied by `kpi_long._drop_incomplete_periods` in `_period_frames` (fiscal: unclipped bounds; civil: Jan 1–Dec 31 and week start + 6).
+- **Lost sales** only reaches the last Saturday on or before `REPORT_END_DATE`: `build_pipeline_frames` keeps `lost_base` weeks with `week_end_date <= that Saturday` in every view; YTD uses weeks 1..`ctx.ytd_lost_sales_last_week` (fiscal week of that Saturday, 0 when it is in the previous fiscal year) for every year. Numerator and denominator both come from `lost_base`.
+- **YTD cut mechanics** (`fiscal.build_latest_day_windows`): `ctx.ytd_through_day` (K), `ctx.ytd_years`, `ctx.day_calendar` (date, Year, Week, `day_index`, `last_day_index`). `scoped_daily` / `dc_daily` carry `day_index` → YTD `day_index <= K`. The pair-week frames `inst_data` / `dc_inst` carry `last_day_index`: the fiscal week containing day K is split into the days `<= K` and the days after (`pipeline._fiscal_week_parts`, `build_dc_inst` grouping on `last_day_index`), each part's stocked / available / blocked / unusable days counted exactly, so YTD takes `last_day_index <= K` and every other view sums both parts. WOS's part week: `scoped_daily` also carries `week_days` (7 outside this mode) and the YTD frames replace it with the days up to K, so `compute_kpis` weights that week's average inventory by `week_days / 7` (§6.1); `build_scope_diff`'s Annual table goes through `_period_frames(..., "annual")` too, so it holds complete fiscal years like the Annual tab.
+- Comparisons (`comparisons.py`, `comparable.py`) read these frames / kpi_long rows, so YoY = complete fiscal years, YTD = same-fiscal-day windows (comparable `ytd` years = `ctx.ytd_years`), quarter / half = complete periods.
+- Incremental saves: `ytd` rows of `kpi_long` / `comparable_kpi_long` are always replaced on merge (their window moves with `as_of_date`); other period types merge as usual. After switching a deployment to `latest_day` run one `full_refresh` (old partial-year Annual rows would otherwise stay in history).
+- HTML: header gets a **Period basis** card; the Lost Sales % definition states the last-Saturday basis, and the WOS family definitions state that YTD's last week counts only its elapsed days.
+
 **`fiscal_calendar.half_periods`** (default `False`; tbretail `True`; env `KPI_HALF_PERIODS`): adds `Fiscal_Half` (H1 = fiscal quarters 1-2, H2 = 3-4) on the fiscal week frame and every metric frame, a `half` `kpi_long` period type labelled `2025-H1` (complete halves only, same unclipped rule as quarters), a **Half** tab (`html_report.half_display_halves`, default 4; env `KPI_HTML_HALF_HALVES`) and the `half` comparable kind (§3.6). The Fiscal_Half completeness set is only computed when it is on; `comparable_pairs.kinds` containing `"half"` without it is rejected.
 
 **Calendar completeness (fail-loud).** `fiscal.require_complete_time_grain` raises `time grain (...) is missing N date(s) between START and END: [first 20]` when any date in the window is absent from the calendar. On the civil path the calendar is only the dates present in `noob/daily-data` (after `input_filters.daily_data`), so a gap means missing source data.
@@ -182,7 +210,7 @@ When a user wants to configure the toolkit, ask them (or read from their message
 
 Use `use_hybrid_scope=True` (hybrid) unless the client has pristine defined scope coverage.
 
-**`run_scope_diff`** (default `False`): when `False`, score scope is **not** computed unless hybrid backfill needs it (`use_hybrid_scope=True`). The notebook scope-diff cell and `scope_diff` Delta output are skipped. Set `True` to run the defined-vs-score annual KPI comparison (sanity check).
+**`run_scope_diff`** (default `False`): when `False`, score scope is **not** computed unless hybrid backfill needs it (`use_hybrid_scope=True`). The notebook scope-diff cell and `scope_diff` Delta output are skipped. Set `True` to run the defined-vs-score annual KPI comparison (sanity check; its years are the Annual tab's, so with `report_end="latest_day"` complete fiscal years only).
 
 Score backfill parameters (hybrid or scope diff):
 ```python
@@ -216,8 +244,10 @@ Inventory for the score filter is the **last available daily snapshot in the fis
 "blocked_scope": {
     "ui_parameters_path": None,        # path under the datastore root; None = OFF, set = ON
     "rule": "after_scope_start",       # or "all"
+    "dc_solution_id": None,            # int (not bool, e.g. 22; tbretail 22): DC blocks on every DC metric
 }
 ```
+`blocked_scope.dc_solution_id` (None = off, int not bool, e.g. 22) removes the days of `{ui_parameters_path}/dc_blocked_scope/{product,product_destination,destination}` blocks of that solution (`destination_id` = warehouse), by `blocked_scope.rule`, from **every DC metric**, the same way store blocks work on the store metrics: `dc_mean_stock`, `WOS_DC`, the DC part of `WOS_TOTAL` / `total_mean_stock` (`build_dc_daily`: DC inventory, then DC goods in transit joined, then DC blocked days removed) and `dc_in_stock_rate` (stocked and available days). Each DC pair's `scope_start` comes from `operation/scope` of that solution (same `run_date`, family roll-up, earliest start and `active_only` as `scope_source`, location = warehouse); DC pairs outside that scope receive no blocks, and block product_ids are not rolled. Built once per run as `ctx.dc_blocked_days` (`scope.build_dc_blocked_days`). Requires `ui_parameters_path`; a missing `dc_blocked_scope/<kind>` folder fails the run.
 Reads `{ui_parameters_path}/blocked_scope/{product,product_destination,destination}` (parquet; `destination_id` = store) for `scope_source.solution_id`; requires `scope_source.mode="operation_scope"`. Rule `after_scope_start`: a block applies to a pair only if `block.start_date >= scope_start` (same day applies; an earlier block is ignored — the pair was set up again after it); `all` applies every matched block. An applied block removes the pair's days from `start_date` to `end_date` (null = open-ended), clipped to the report window, from **every daily-data-derived metric** (`build_scoped_daily`: sales, inventory, WOS, turnover, mean stock) **and** from daily in-stock (`ctx.blocked_days`, `scope.build_blocked_days`). Block `product_id`s are NOT rolled to the family main: only blocks on the main's own `product_id` apply, as in the client reference script (`scope._applied_block_days`, shared with the DC blocks — see §6.1b). **Not filterable:** weekly sources with no store/day grain (`lost_sales_source`, e.g. `report_dfu`). A missing `blocked_scope/<kind>` folder fails the run. Pairs added by `scope_adjustments` are never blocked. Always set `ui_parameters_path` explicitly (the newest snapshot may hold no blocks for the solution).
 
 ### 3.2c `instock_daily` (in-stock from daily-data)
@@ -234,7 +264,22 @@ Reads `{ui_parameters_path}/blocked_scope/{product,product_destination,destinati
 }
 ```
 Every key is required (indexed directly in `materialize()`, no silent defaults). Method (`pipeline.build_instock_daily`), per scope pair, every scoped pair counting (scope additions included: no `scope_start`, so they count from their first daily row, never blocked): (1) `input_filters` narrow the pair universe; (2) daily-data read WITHOUT `input_filters.daily_data` (that list usually holds `usable = 1`), filtered on the raw date column from `history_start` to `REPORT_END_DATE` (so Delta file pruning applies), not family-rolled here (noob/daily-data is already rolled upstream), restricted to the pairs with blocked days removed, then cached; the run raises unless daily-data's latest date for those pairs reaches `REPORT_END_DATE`; (3) count start per `count_start`, clipped to the window start, `require_daily_data` drops pairs without a daily row; (4) store-days = count start → `REPORT_END_DATE`, a day without a row is out of stock, minus blocked and (with `usable_only`) unusable days; (5) in-stock day = `inventory > 0` on a usable day, OR (when `git_date_shift_days` is set) a day with store goods-in-transit (`operation/goods_in_transit`, `destination_type=0`, `quantity>0`, rolled to the family main; snapshot dated D+1 = end of day D) — a union, never a sum. Output has the old weekly `inst_data` shape (`stocked_pairs` / `available_days`), so metrics, `population_filters` and comparable work unchanged. Requires a store-level scope grain; incompatible with `instock_source.enabled` and `lost_sales_ensemble.enabled`. The HTML Metric Details text for In-Stock Rate is generated from these settings.
-- tbretail: on, `git_date_shift_days=-1`, `count_start="earliest"`, `history_start="2024-01-21"`, ECOM stores 829/639/917 excluded from in-stock only, scope additions (JAB, NGF products, `nvrout_scope_backfill`) counted like every other pair; `instock_source`, `dc_instock` off; `wos_revenue`, `weighted_instock_rate`, `dc_in_stock_rate` removed from `metric_cols`.
+- tbretail: on, `git_date_shift_days=-1`, `count_start="earliest"`, `history_start="2024-01-21"`, ECOM stores 829/639/917 excluded from in-stock (and, via `lost_sales_source.sales_filter` and the report_dfu model, lost sales — nowhere else), NON-COMP excluded from in-stock only (`population_filters.in_stock_rate`), scope additions (JAB, NGF products, `nvrout_scope_backfill`) counted like every other pair; `instock_source`, `dc_instock` off; `wos_revenue`, `weighted_instock_rate`, `dc_in_stock_rate` removed from `metric_cols`.
+
+### 3.2d `inventory_git` (goods in transit on the inventory metrics)
+
+```python
+"inventory_git": {
+    "git_date_shift_days": None,   # REQUIRED key: None = off; int (not bool) = on (tbretail -1: snapshot D+1 = end of day D)
+    "metrics": [],                 # REQUIRED key: any of total_inventory, mean_stock, wos, inventory_turnover_rate, dc_mean_stock, wos_dc
+}
+```
+Gated and per metric: a metric named in `metrics` uses on-hand + goods in transit (retail = units × `price_without_tax`, cost = units × `cogs`, rounded like `inventory_retail` / `inventory_cost`); every other metric keeps on-hand only and its exact previous value. Gates: `total_inventory` → `total_inventory`; `mean_stock` → `mean_stock` / `_retail` / `_cost` and the store part of `total_mean_stock`; `wos` → `WOS` / `wos_revenue` / `wos_cost` and the store part of `WOS_TOTAL`; `inventory_turnover_rate` → the mean stock inside it; `dc_mean_stock` → `dc_mean_stock` and the DC part of `total_mean_stock`; `wos_dc` → `WOS_DC` and the DC part of `WOS_TOTAL`. `materialize()` raises on an unknown name, a non-empty `metrics` with `git_date_shift_days=None`, a non-int / bool shift, and a non-empty `metrics` without `use_fiscal_calendar=True`. Settings key `INVENTORY_GIT`; the name sets live in `context.STORE_GIT_METRICS` / `DC_GIT_METRICS`.
+- **Store side** (`pipeline.build_scoped_daily` → `_join_store_goods_in_transit`, only when a store gate is on; otherwise no GIT read and `has_daily_row=True`, `git_quantity=0`). Order: daily data (window-filtered) → store GIT quantity (`_goods_in_transit_quantity`: `destination_type=0`, `quantity>0`, shifted, summed per product×store×day, rolled to the family main, window, scoped pairs) → full outer join on `(product_id, store_id, date)` (daily rows first summed per pair-day so the quantity attaches once; a GIT-only day gets sales / on-hand 0 and `has_daily_row=False`) → drop GIT-only days whose daily row `input_filters.daily_data` removed (`inputs.get_daily_data_excluded_days`: built once per run from the raw table, cached on `ctx.daily_data_excluded_days`, left-joined onto each scope variant's GIT days) → blocked-scope removal (drops both kinds) → scope product-week semi-join → calendar / product attributes. The scoped-pair semi-join runs on the daily rows first (it commutes with the blocked-day removal and keeps the GIT join to scoped pairs). No GIT frame is cached: it is used once per scope variant.
+- **DC side** (`pipeline.build_dc_daily`, only when `dc_mean_stock` or `wos_dc` is on): DC GIT (`destination_type=1`) full-outer-joined to the rolled `inventory_warehouse` rows; GIT-only day → inventory 0, `has_inventory_row=False`; then Year/Week + `scope_core` product-week restriction as before. DC blocked days are not applied; `build_dc_inst` (DC in-stock) is untouched.
+- **Metrics** (`metrics.compute_kpis`): sales, AUR/AUC, distinct counts and `weighted_instock_rate`'s sales weights read `has_daily_row` rows only; each inventory group (WOS, mean stock, total mean stock, turnover, DC) builds its own frame — all rows with `inventory + git_quantity` when its gate is on, real rows on-hand otherwise — and is joined on the period keys as before. `population_filters` still apply per group.
+- **Never changed:** sales, the daily in-stock (its own `instock_daily.git_date_shift_days` day union), lost sales (`daily_for_lost` filters `has_daily_row`), DC in-stock. `comparable.py` builds the pair universe from real rows only. The HTML Metric Details of a gated metric says its store / DC part counts goods in transit.
+- tbretail: shift `-1`, all six metrics on.
 
 ### 3.3 Defined scope column mapping
 
@@ -254,6 +299,8 @@ Every key is required (indexed directly in `materialize()`, no silent defaults).
 **`backfill_leading_gap` (`product_store_week` grain only, default `True`).** If the scope source's own earliest available week (across every pair) starts later than the report window's own start, that gap is a data-availability limit of the source itself, not a per-pair signal — only the pairs tied to that earliest week are backfilled, assumed in scope from the window's start, same "min date in window" principle `dc_in_stock_rate`'s per-pair grid uses (§6.1b) — never a hardcoded floor date. A pair whose own first-seen week is later still (later than the source's earliest week, not merely later than the window start) is left untouched — a real new store/product, not a leading-gap artifact. Only the LEADING gap is filled; later starts, mid-window gaps, and end dates are honoured exactly as recorded. `product`/`product_store` grains are unaffected (they already apply every pair to the whole window). Set `False` only for a deployment with **existing** `product_store_week` history saved before this option existed — turning it on there mixes two scope definitions in one incrementally-merged table.
 
 **`item_family_rollup.defined_scope`** (default `False`, see §12 constraint list): rolls a raw scope source's `product_id` to parent id before use, same mechanism as `daily_data`/`inventory_warehouse`'s own rollup. OFF by default since a scope source may already be pre-rolled upstream (tbretail's is) — opt-in for a client whose isn't.
+
+**`item_family_rollup.goods_in_transit`** (default `True`; env `KPI_ITEM_FAMILY_ROLLUP_GOODS_IN_TRANSIT` in `config.py`): rolls every `operation/goods_in_transit` read to the family main before it is used — store in-stock (`instock_daily.git_date_shift_days`), DC in-stock (`dc_instock.git_date_shift_days`) and the inventory metrics (`inventory_git`), all through `pipeline._goods_in_transit_quantity`. Set `False` only for a GIT source that is already rolled upstream.
 
 ### 3.3a Scope debug (pre-flight product/store counts)
 
@@ -441,6 +488,7 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — those are
 - Each weekly run loads the **latest existing `run_date` partition on or before** the current run, appends only new merge keys, and writes the full merged result to this run's `run_date` partition.
 - Each `run_date` partition is therefore a self-contained snapshot of the full merged history as of that run.
 - Comparison tables (`comparison_yoy`/`comparison_ytd`) are **recomputed from the merged `kpi_long` history** after the kpi_long save, then overwritten wholesale — so a single-week refresh can still produce YoY vs last year. Disable with `recompute_comparisons_from_history: False`.
+- With `report_end="latest_day"`, existing `ytd` rows of `kpi_long` / `comparable_kpi_long` are **always replaced** on an incremental merge (their window moves with every `as_of_date`; the save plan counts them as overwrite), whatever `allow_overwrite_existing` says (`io.merge_table_incremental`, `_always_overwrite_period_types`); other period types merge as usual. Switching an existing deployment to `latest_day` needs one `full_refresh` (§3.1b).
 - `comparable_kpi_long` is merged incrementally like `kpi_long`; each enabled kind's `comparable_comparison_{ytd,yoy,quarter,half}` is then recomputed from the merged `comparable_kpi_long` (grouped by `link_prior_year`/`link_current_year`, and additionally `quarter_number` / `half_number` for `quarter` / `half` — see `rebuild_comparable_kind_from_saved_rows`). A single-week refresh can still produce a comparable comparison for any enabled kind relative to prior saved history.
 
 **Full refresh details:**
@@ -477,8 +525,8 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — those are
 }
 ```
 
-- **`yoy`** — last two full calendar/fiscal years.
-- **`ytd`** — each year's **elapsed window** (only the fiscal months fully closed as of `as_of_date` for the latest year — `fiscal.available_fiscal_months` — applied to every year) vs the prior year's same window, chained across consecutive years. Use instead of `yoy` once the current year is only partially reported, so a partial current year isn't compared against a full prior year.
+- **`yoy`** — last two full calendar/fiscal years (with `report_end="latest_day"`: the last two **complete** fiscal years — the Annual tab only holds complete years, §3.1b).
+- **`ytd`** — each year's **elapsed window** (only the fiscal months fully closed as of `as_of_date` for the latest year — `fiscal.available_fiscal_months` — applied to every year; with `report_end="latest_day"` instead the same fiscal day of every year, days 1..K, §3.1b) vs the prior year's same window, chained across consecutive years. Use instead of `yoy` once the current year is only partially reported, so a partial current year isn't compared against a full prior year.
 - Gates the `comparison_{kind}` Delta tables + HTML comparison columns only. `kpi_long` is always built in full, including a `"ytd"` `period_type`. Comparable pairs' own `comparable_comparison_{ytd,yoy,quarter}` tables are gated **independently**, purely by `comparable_pairs.enabled` + `comparable_pairs.kinds` — not coupled to this `comparisons.enabled` selection at all (see §3.6).
 - HTML rendering: `ytd`, if more than one consecutive-year pair exists, renders as several stacked mini comparison tables in one panel (one per year-pair) instead of a single table. `yoy` always renders as a single table.
 - A latest-week run can still produce e.g. YoY: with `save_mode="incremental"` + `recompute_comparisons_from_history=True`, selected comparisons are rebuilt from the full merged `kpi_long` (this run unioned onto prior saved runs). Needs a prior saved partition.
@@ -489,8 +537,8 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — those are
 
 **Gated, opt-in** (default off). Metrics are recomputed over **only the pairs present in EVERY qualifying year**, then compared. Isolates like-for-like movement from mix shifts caused by new/closed pairs. Four independent kinds, selected via `comparable_pairs.kinds`:
 
-- **`ytd`** — pairs present in every window year, on each year's elapsed (fully-closed-months) window. Chains every consecutive year pair.
-- **`yoy`** — pairs present in every window year, on the FULL window year (not the YTD-elapsed subset). Chains every consecutive year pair too (not just the latest two, unlike the regular non-comparable YoY). Window-boundary years can themselves be partial — same accepted behaviour as the regular Annual/YoY tab, not something this corrects for.
+- **`ytd`** — pairs present in every window year, on each year's elapsed (fully-closed-months) window (with `report_end="latest_day"`: days 1..K of the fiscal year, over `ctx.ytd_years` — the years whose days 1..K are all in the window). Chains every consecutive year pair.
+- **`yoy`** — pairs present in every window year, on the FULL window year (not the YTD-elapsed subset). Chains every consecutive year pair too (not just the latest two, unlike the regular non-comparable YoY). Window-boundary years can themselves be partial — same accepted behaviour as the regular Annual/YoY tab, not something this corrects for (not under `report_end="latest_day"`: the Annual frames only hold complete fiscal years there).
 - **`quarter`** — computed INDEPENDENTLY per quarter number. For quarter Q, only years where Q falls **entirely inside the report window** count (`_complete_period_years` in `comparable.py`) — `REPORT_END_DATE` is a week boundary, never quarter-aligned, so the in-progress "current" quarter would otherwise be silently compared as if complete against a full prior-year quarter. Mirrors the same "fully elapsed" guard `ytd`'s own elapsed-period check already uses (`fiscal.py`'s `available_fiscal_months` — same helper, but at MONTH grain, not quarter grain), generalized here to check both window boundaries for an arbitrary quarter and year. A pair common across years for Q1 says nothing about Q2 — fully independent populations.
 - **`half`** — the same as `quarter` per half number (H1/H2); needs `fiscal_calendar.half_periods=True` (rejected otherwise). A pair counts when scoped daily rows exist for it in every qualifying year after all scope steps. Both quarter and half read `ctx.complete_fiscal_periods`.
 
@@ -596,7 +644,7 @@ The executive header shows client, reporting window, scope mode (Hybrid / Operat
 
 **Style (global, every client):** all table cells are centered; every tab label has its all-lowercase words capitalized by `_tab_label` (`annual` -> `Annual`, a value tab `jab` -> `Jab`; words with capitals such as `YTD`/`SMW` are kept), so a root without a `root_labels` entry (e.g. `nvrout`) shows as `Nvrout`. `html_report.root_labels` renames root tabs (tbretail: `comp` -> `LFL`, `nvrout` -> `NVROUT`). `html_report.dimension_labels` renames a slice dimension wherever its name is shown (the dimension tabs and the header's slice-dimensions card; tbretail: `brand` -> `Banner`), still capitalized by `_tab_label`; it is display only, so `kpi_long` and the saved outputs keep the raw dimension key (`brand`).
 
-**Metric Details are partly settings-driven:** with `instock_daily.enabled` the In-Stock Rate row describes the daily method (on-hand or goods-in-transit, count start, blocked days only when `blocked_scope` is on, plus unusable days) and shows the `input_filters` as store scope; with `blocked_scope` on, the sales / inventory / WOS / turnover rows note that blocked days are excluded. `html_report.metric_definitions` still overrides any row.
+**Metric Details are partly settings-driven:** with `instock_daily.enabled` the In-Stock Rate row describes the daily method (on-hand or goods-in-transit, count start, blocked days only when `blocked_scope` is on, plus unusable days) and shows the `input_filters` as store scope; with `blocked_scope` on, the sales / inventory / WOS / turnover rows note that blocked days are excluded; a metric gated in `inventory_git` states that its store / DC part counts goods in transit on top of on-hand (`html_report._GIT_METRIC_GATES`); under `report_end="latest_day"` the Lost Sales % row states the last-Saturday basis, the WOS rows (`WOS`, `wos_revenue`, `wos_cost`, `WOS_DC`, `WOS_TOTAL`) state that YTD's last week counts only its elapsed days, and the header gets a **Period basis** card. `html_report.metric_definitions` still overrides any row.
 
 `kpi_long` itself is never trimmed (see §12.14) — only `ctx.kpi_long_display`, used solely for HTML rendering, is trimmed per the `*_display_*` settings; the saved Delta `kpi_long` always holds the full computed window.
 
@@ -730,27 +778,27 @@ For a genuinely new source table (not just a new column off an existing frame) t
 | `total_sales_quantity` | Sales Units | All stores | Sum of daily sales quantity |
 | `AUR` | AUR | All stores | Revenue ÷ Units |
 | `AUC` | AUC | All stores | Cost ÷ Units |
-| `total_inventory` | Total Inventory | All stores | Sum of daily inventory units across the period |
+| `total_inventory` | Total Inventory | All stores | Sum of daily inventory units across the period (+ goods in transit when `total_inventory` is in `inventory_git.metrics`, §3.2d) |
 | `distinct_product_count` | Distinct Products | All stores | COUNT DISTINCT product_id |
 | `distinct_store_count` | Distinct Stores | All stores | COUNT DISTINCT store_id |
 | `distinct_pair_count` | Distinct Pairs | All stores | COUNT DISTINCT (product_id, store_id) |
-| `mean_stock` | Daily Stock Avg (units) | All stores | AVG of daily summed inventory |
+| `mean_stock` | Daily Stock Avg (units) | All stores | AVG of daily summed inventory (+ goods in transit when gated by `mean_stock`, also on `_retail` / `_cost`) |
 | `mean_stock_retail` | Daily Stock Avg Retail | All stores | AVG of daily summed inventory at retail |
 | `mean_stock_cost` | Daily Stock Avg Cost | All stores | AVG of daily summed inventory at cost |
-| `WOS` | WOS (units) | All stores | product × fiscal week; all scoped stores aggregated; sales-weighted weekly→period rollup |
+| `WOS` | WOS (units) | All stores | product × fiscal week; all scoped stores aggregated; sales-weighted weekly→period rollup (inventory + goods in transit when gated by `wos`, also on `wos_revenue` / `wos_cost`) |
 | `wos_revenue` | WOS Revenue | All stores | product × fiscal week; revenue-based rollup |
 | `wos_cost` | WOS Cost | All stores | product × fiscal week; cost-based rollup |
-| `inventory_turnover_rate` | Inventory Turnover Rate | All stores | Sales Units ÷ Mean Stock for the period; HTML shows tab-appropriate label |
+| `inventory_turnover_rate` | Inventory Turnover Rate | All stores | Sales Units ÷ Mean Stock for the period; HTML shows tab-appropriate label (mean stock includes goods in transit when gated by `inventory_turnover_rate`) |
 | `in_stock_rate` | In-Stock Rate | All stores | Σ(in_stock_days) ÷ Σ(available_days); pp-change in comparisons |
 | `weighted_instock_rate` | Weighted In-Stock Rate | All stores | Sales-weighted average of weekly in-stock rates; pp-change in comparisons |
 | `lost_sales_pct` | Lost Sales % | All stores | 100×Σ(lost_sales)÷Σ(floor(sales+lost_sales)); pp-change. Numerator from `lost_sales_source`, `sales` from `daily_data` — narrow the sales half with `lost_sales_source.sales_filter` when the source covers a narrower population (e.g. ecom-excluding) |
-| `dc_mean_stock` | Daily DC Stock Avg (units) | DC/warehouse only | AVG of daily summed DC inventory, in-scope product population |
-| `total_mean_stock` | Daily Total Stock Avg (units) | All stores + DC | AVG of daily summed (store + DC) inventory |
-| `WOS_DC` | WOS (DC) | DC/warehouse only | product × fiscal week; DC-inventory-based rollup, same grain/weighting as WOS |
-| `WOS_TOTAL` | WOS (Total) | All stores + DC | product × fiscal week; (store + DC)-inventory-based rollup, same grain/weighting as WOS |
+| `dc_mean_stock` | Daily DC Stock Avg (units) | DC/warehouse only | AVG of daily summed DC inventory, in-scope product population (+ DC goods in transit when gated by `dc_mean_stock`) |
+| `total_mean_stock` | Daily Total Stock Avg (units) | All stores + DC | AVG of daily summed (store + DC) inventory; store part follows the `mean_stock` gate, DC part the `dc_mean_stock` gate |
+| `WOS_DC` | WOS (DC) | DC/warehouse only | product × fiscal week; DC-inventory-based rollup, same grain/weighting as WOS (+ DC goods in transit when gated by `wos_dc`) |
+| `WOS_TOTAL` | WOS (Total) | All stores + DC | product × fiscal week; (store + DC)-inventory-based rollup, same grain/weighting as WOS; store part follows the `wos` gate, DC part the `wos_dc` gate |
 | `dc_in_stock_rate` | DC In-Stock Rate | DC/warehouse only | Gated (`dc_instock.enabled`); Σ(dc_stocked_days) ÷ Σ(dc_available_days) over an EXPANDED `inventory_warehouse` grid (product×warehouse×date, item-family-rolled to parent), each pair running from its own first stocked day to `REPORT_END_DATE` with gaps 0-filled as stockouts — so a pair that stops being stocked keeps accruing stockout days, unlike `dc_mean_stock`/`WOS_DC`; a pair never stocked in the window is absent; `null` column when disabled |
 
-**One population per source (never break):** every daily-data metric — sales, `total_inventory`, `mean_stock`, `WOS`, turnover, weighted-instock's sales weights — is computed from a **single** `daily_scoped` frame in `compute_kpis`, under every `defined_scope.grain`, so two metrics in one output row can never describe different populations. `compute_kpis` previously built a second, narrower frame for the stock metrics (a leftover of a removed service-store exclusion); don't reintroduce one. Lost sales and in-stock come from their own source and are restricted separately at that source's grain; DC (`dc_daily`/`dc_inst`, backing `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL`/`dc_in_stock_rate`) comes from `inventory_warehouse`, item-family-rolled onto parent `product_id` (via the shared `pipeline._get_inventory_warehouse_parent_rolled` helper) BEFORE restriction — same id space as `scope_core`, which is already parent-rolled at its own source. Per-metric `population_filters` are the only sanctioned exception.
+**One population per source (never break):** every daily-data metric — sales, `total_inventory`, `mean_stock`, `WOS`, turnover, weighted-instock's sales weights — is computed from a **single** `daily_scoped` frame in `compute_kpis`, under every `defined_scope.grain`, so two metrics in one output row can never describe different populations. `compute_kpis` previously built a second, narrower frame for the stock metrics (a leftover of a removed service-store exclusion); don't reintroduce one. Lost sales and in-stock come from their own source and are restricted separately at that source's grain; DC (`dc_daily`/`dc_inst`, backing `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL`/`dc_in_stock_rate`) comes from `inventory_warehouse`, item-family-rolled onto parent `product_id` (via the shared `pipeline._get_inventory_warehouse_parent_rolled` helper) BEFORE restriction — same id space as `scope_core`, which is already parent-rolled at its own source. Per-metric `population_filters` are the only sanctioned exception. With `inventory_git` on, `scoped_daily` / `dc_daily` also hold goods-in-transit-only days (`has_daily_row` / `has_inventory_row` False): sales, distinct counts, weighted-instock's sales weights and every metric NOT in `inventory_git.metrics` read the real rows only (so they are what they were without the feature), while a gated metric reads all rows with on-hand + `git_quantity` (§3.2d). Never let a goods-in-transit-only row into sales, in-stock, lost sales or the comparable pair universe.
 
 **Critical formula constraints (never break):**
 - WOS grain is **product × fiscal week**, not product×store×week. Three steps: (1) sum daily inventory/sales across all scoped stores → product×date, (2) weekly WOS = `avg_daily_inventory / weekly_sales` at product×fiscal week, (3) sales-weighted rollup to the reporting period. Never divide period totals directly.
@@ -764,8 +812,8 @@ For a genuinely new source table (not just a new column off an existing frame) t
 Scope is product×store×week, but WOS in `metrics.py` is **not** computed at that grain. Implementation (`metrics.py`, `compute_kpis`):
 
 1. **product × date** — `groupBy(product_id, Year, Week, date)` sums inventory and sales across all scoped stores for each product-day.
-2. **product × fiscal week** — within each week, take `avg(daily_total_inventory)` and `sum(daily_sales)`; weekly WOS = `avg_daily_inventory / weekly_sales` (units, revenue, or cost variant).
-3. **period rollup** — sales-weighted average of weekly WOS values: `Σ(weekly_wos × weekly_sales) ÷ Σ(weekly_sales)`.
+2. **product × fiscal week** — within each week, take `avg(daily_total_inventory)` and `sum(daily_sales)`; weekly WOS = `avg_daily_inventory × week_days/7 / weekly_sales` (units, revenue, or cost variant). `week_days` is the calendar days of that fiscal week in the view (`scoped_daily.week_days`, `pipeline._with_week_days`): 7 for a whole week, so the factor is 1 and nothing changes — except under `report_end="latest_day"`, where YTD ends on day K and its last week has 1-6 days (`kpi_long._ytd_latest_day_frames` swaps in `fiscal.week_day_counts`' `ytd_week_days`); that part week then counts as the fraction of a week of inventory its days cover against the sales of the same days. Without the factor it would add a full week of inventory to the numerator for a part week of sales (about +3% on a 26-week YTD whose last week has one day, more early in the year). The same factor applies to `wos_revenue`, `wos_cost`, `WOS_DC`, `WOS_TOTAL`.
+3. **period rollup** — sales-weighted average of weekly WOS values: `Σ(weekly_wos × weekly_sales) ÷ Σ(weekly_sales)` (= `Σ(avg_daily_inventory × week_days/7) ÷ Σ(weekly_sales)`).
 
 Do not confuse scope grain (product×store×week) with WOS computation grain (product×fiscal week after store aggregation).
 
@@ -789,7 +837,7 @@ Gated by `dc_instock.enabled` (default `False`) — see README's "dc_instock" co
 2. `F.explode(F.sequence(first_stocked_date, REPORT_END_DATE))` for that pair's own row space, then join the fiscal calendar for `Year`/`Week`. The inventory frame is window-filtered upstream, so `first_stocked_date` can never precede `EFFECTIVE_REPORT_START_DATE` — no further clamping needed.
 3. Restrict to `scope_core`'s in-scope `(product_id, Year, Week)` — the identical left-semi `build_dc_daily` already applies. Before the inventory join, so that join only touches in-scope rows.
 4. Left-join the same rolled-up `inventory_warehouse` back onto the grid, `F.coalesce(inventory, 0)` — a grid day with no inventory row is a genuine stockout, not a row to drop.
-5. With `dc_instock.blocked_scope_solution_id` (int, e.g. 22), drop `ctx.dc_blocked_days` from the grid: `{ui_parameters_path}/dc_blocked_scope` blocks of that solution (`destination_id` = warehouse), by `blocked_scope.rule`, against each DC pair's `scope_start` from `operation/scope` of that solution (same run_date / roll-up / earliest start / active filter as `scope_source`); DC pairs outside it get no blocks; built once by `scope.build_dc_blocked_days`, only when `dc_instock.enabled`; `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL` are not blocked. With `dc_instock.git_date_shift_days` (int), left-join DC goods-in-transit days (`destination_type=1`, `quantity>0`, rolled to the family main, snapshot D+1 = end of day D).
+5. With `blocked_scope.dc_solution_id` (int, e.g. 22), drop `ctx.dc_blocked_days` from the grid (see §3.2b: the same DC blocked days also leave `dc_mean_stock` / `WOS_DC` / the DC part of `WOS_TOTAL` and `total_mean_stock`). With `dc_instock.git_date_shift_days` (int), left-join DC goods-in-transit days (`destination_type=1`, `quantity>0`, rolled to the family main, snapshot D+1 = end of day D).
 6. Aggregate to `(product_id, warehouse_id, Year, Week)`: `dc_stocked_days = COUNT(inventory > stock_threshold OR goods in transit)`, `dc_available_days = COUNT(*)`.
 
 **Window bound — why `inventory_warehouse`'s own `MIN(date)`.** `inventory_warehouse` carries a row whenever a pair holds stock, making its first row the same "first day this pair has any history" signal `daily_data_expanded` uses to bound the **store-level** in-stock denominator (`customer-analysis-tbretail`'s `05_future_visibility_data_prep.py`) — so both in-stock series rest on one definition. Trade-off: a pair ranged at a DC but never once stocked in the window has no row to anchor to and is **absent** rather than reading 0%. A pair that stops being stocked mid-window is still covered — its grid runs to `REPORT_END_DATE` and every later day is a stockout.
@@ -814,7 +862,15 @@ Gated by `dc_instock.enabled` (default `False`) — see README's "dc_instock" co
 ```
 daily_data_raw (cached Delta) — prints its source date range on read
   └─ equi-join fiscal_cal on date → score scope (build_weekly_scope) when hybrid or run_scope_diff
-  └─ build_scoped_daily → scoped_daily (fiscal + products joined)
+  └─ build_scoped_daily → scoped_daily (fiscal + products joined). With inventory_git on a store
+     metric: window-filtered daily rows (summed per pair-day) ⟕⟖ store goods in transit (rolled to the
+     family main) on (product_id, store_id, date) → drop GIT-only days input_filters.daily_data
+     removed → blocked days removed → scope semi-joins (has_daily_row / git_quantity columns, §3.2d)
+
+goods_in_transit (operation/goods_in_transit snapshots; destination_type 0 = store, 1 = warehouse)
+  └─ pipeline._goods_in_transit_quantity (quantity > 0, shifted, summed per day, family main, window)
+     ├─ inventory_git: store quantity → build_scoped_daily; DC quantity → build_dc_daily
+     └─ in-stock: _goods_in_transit_days (the days of it) → build_instock_daily / build_dc_inst
 
 lost_sales_source (cached as lost_sales_weekly_base) — prints its source date range on read
   └─ lost_sales_ensemble.enabled=False (default): single fast-mover model (PATH_LOST_SALES)
@@ -831,7 +887,8 @@ inventory_warehouse_raw (cached Delta) — prints its source date range on read
      product_id -> coalesce(parent_id, product_id), then re-aggregated to
      (product_id, warehouse_id, date): F.sum("inventory") after the mapping
      (_get_inventory_warehouse_parent_rolled, shared with build_dc_inst below)
-  └─ build_dc_daily → dc_daily (left-semi restricted to scope_core's in-scope
+  └─ build_dc_daily → dc_daily (with inventory_git on a DC metric: DC goods in transit full-outer-joined
+     first, has_inventory_row / git_quantity; left-semi restricted to scope_core's in-scope
      (product_id, Year, Week), no store dimension; fiscal + product_dims joined). Now in the
      SAME parent-id space as scope_core -- previously restricted RAW product_id against an
      already-parent-rolled scope_core, silently dropping DC inventory on superseded/child ids
@@ -852,7 +909,8 @@ cached rolled inventory frame as build_dc_daily)
 
 build_pipeline_frames(scope) → {scoped_daily, inst_data, lost_base, dc_daily, dc_inst, ...}
   └─ build_kpi_table(period, group_keys) → pandas
-       └─ compute_kpis: sales | WOS (product×week, stores aggregated) | mean_stock | instock
+       └─ compute_kpis (real rows on-hand, or all rows + git_quantity per inventory_git gate):
+                        sales | WOS (product×week, stores aggregated) | mean_stock | instock
                         | WOS_DC/WOS_TOTAL (dc_daily left-joined onto the same WOS grain)
                         | dc_mean_stock/total_mean_stock (mean_stock-shaped, dc_daily-based)
                         | dc_in_stock_rate (dc_inst, mirrors the instock block — direct
@@ -876,6 +934,11 @@ build_comparable_pairs → comparable_kpi_long + comparable_comparison_{ytd,yoy,
 build_scope_diff → scope_diff pandas table (defined vs score; only when run_scope_diff=True)
 save_outputs → kpi_long (incremental) → recompute comparisons from merged history → save all
 render_kpi_html → standalone HTML file
+
+report_end="latest_day" adds (once per run, fiscal.build_latest_day_windows): K / ctx.ytd_years /
+ctx.ytd_lost_sales_last_week / ctx.day_calendar; build_instock_daily + build_dc_inst split the fiscal
+week containing day K (last_day_index); kpi_long._period_frames keeps complete Annual / Weekly periods
+and YTD = days 1..K; lost_base keeps weeks up to the last Saturday (§3.1b).
 ```
 
 ---
@@ -904,6 +967,14 @@ render_kpi_html → standalone HTML file
 | `time grain (...) is missing N date(s) between ...` | The calendar (fiscal_cal upload, or on the civil path the dates present in daily-data after `input_filters.daily_data`) lacks days inside the window — fix the source data or narrow `run_min_date` (§3.1a) |
 | `report_end='complete_month': the fiscal_cal upload ends X; it must extend past REPORT_END_DATE` | Extend the `fiscal_cal` upload beyond the as-of Saturday so the month containing it can be classified |
 | `report_end='complete_month': no month ends between START and END` / `the cut month X..Y starts before the report start` | `run_min_date` does not reach the start of the cut month (also hit by the weekly-refresh pattern) — widen it or use `as_of` |
+| `reporting_window.report_end='latest_day' requires instock_daily.enabled=True` | The YTD cut splits a fiscal week of the daily in-stock frame, which weekly in-stock sources cannot do — enable `instock_daily` or use `as_of` / `complete_month` (§3.1b) |
+| Current fiscal year missing from Annual / YoY under `latest_day`, or a year missing from YTD | By design: Annual = complete fiscal years only (the current year is in YTD). A year is left out of YTD when its first date is before `EFFECTIVE_REPORT_START_DATE` — move `run_min_date` back to that fiscal year's start; the run prints `YTD years` and the years left out |
+| Old partial-year Annual / Monthly / Weekly rows still in saved `kpi_long` after switching to `latest_day` | Incremental merge keeps old keys (only `ytd` rows are always replaced) — run one `full_refresh` (§3.1b) |
+| `lost_sales_pct` covers fewer days than the other metrics under `latest_day` | By design: lost sales only reaches the last Saturday on or before `REPORT_END_DATE`; every view uses whole weeks up to it, YTD uses weeks 1..`ctx.ytd_lost_sales_last_week` for every year |
+| YTD `WOS` (and `wos_revenue`, `wos_cost`, `WOS_DC`, `WOS_TOTAL`) under `latest_day` differs from the previous mode's YTD | By design: YTD ends mid-week, and that week's average inventory is weighted by elapsed days / 7 (`week_days`), so a part week is not a full week of inventory against a part week of sales (§6.1). Whole weeks, and every other view, are unchanged. |
+| `inventory_git...` `ValueError` at materialize time | Unknown name in `metrics`; `metrics` set while `git_date_shift_days` is `None`; non-int / bool `git_date_shift_days`; or `use_fiscal_calendar=False` with a non-empty `metrics` (§3.2d) |
+| A gated inventory metric rose after enabling `inventory_git` | Expected: it now adds goods in transit to on-hand, and a day with only goods in transit adds a zero-on-hand day to its averages. Drop the name from `metrics` to return it to on-hand; ungated metrics never change |
+| No goods in transit on the last day (`git_date_shift_days=-1`) | The snapshot dated `REPORT_END_DATE + 1` is not in `goods_in_transit` yet |
 | `instock_daily: daily-data latest date X is before the report end Y` | daily-data has not reached `REPORT_END_DATE` yet (days after it would count as out of stock) — wait for the load or set `reporting_window.as_of_date` earlier |
 | `html_report.dimension_labels must be a dict ...` | `dimension_labels` must map slice dimension name -> label, both strings |
 | `scope_source.mode ... ` / `blocked_scope.ui_parameters_path requires scope_source.mode='operation_scope'` / `instock_daily.count_start=... needs the operation scope start date` | Blocks and `scope_start`-based count starts need the operation scope (§3.2a-c); or use `count_start='first_daily_row'` |
@@ -924,7 +995,7 @@ render_kpi_html → standalone HTML file
 | Quarter/Monthly trend tab's most recent row disappeared after upgrading, no config change | Expected, one-time — that period hadn't actually fully elapsed; now correctly excluded instead of showing a partial quarter/month beside full ones. See §3.1 "Complete periods only." Re-run with `allow_overwrite_existing=True` (or `full_refresh`) if a stale partial-period row from before the fix is still saved. |
 | `ctx.available_fiscal_months` (YTD's elapsed-period selection) changed after upgrading, no config change | Expected, one-time — two stacked fixes: the "is this period fully elapsed" check was previously trivially true for any period present in the window (a real bug, now fixed), and the grain itself moved from quarter to month (a quarter in progress can still have already-closed months). See §3.1 "Complete periods only." |
 | Monthly tab missing from HTML | Monthly period type may not be present in `kpi_long` — check `Fiscal_Month` is derived (requires fiscal calendar upload or daily data with civil month fallback) |
-| YTD tab missing or empty from HTML | No `"ytd"` `period_type` rows in `kpi_long` — check `ctx.available_fiscal_months` isn't empty (would mean even the latest year's first fiscal month hasn't fully closed as of `as_of_date`) |
+| YTD tab missing or empty from HTML | No `"ytd"` `period_type` rows in `kpi_long` — under `latest_day` check `ctx.ytd_years` isn't empty; otherwise check `ctx.available_fiscal_months` isn't empty (would mean even the latest year's first fiscal month hasn't fully closed as of `as_of_date`) |
 | HTML report header shows wrong reporting-window start date | Header was reading `REPORT_START_DATE` (raw Jan-1-anchored) instead of `EFFECTIVE_REPORT_START_DATE` (incorporating `run_min_date`) — now fixed. If you set `run_min_date` to narrow the window, the header now correctly reflects the effective start. |
 | Monthly tab empty or stops earlier than Quarterly/Annual tabs | Fiscal weeks in the reporting window have null `Fiscal_Month` in the fiscal calendar upload while `Fiscal_Quarter` and `Fiscal_Year` are complete — now raises a validation error listing affected weeks. Previously these dropped silently. Fix the fiscal calendar upload or use a narrower window. |
 | Unexpected extra year in Annual/YTD view (only sometimes) | When `use_fiscal_calendar=True`, `Year` comes directly from the fiscal calendar's own `Year` column. If the customer's fiscal year rolls over in late January/early February (not Jan 1), a `run_min_date` early in a calendar year can legitimately span two fiscal years per their calendar — this is correct. |
@@ -943,12 +1014,13 @@ render_kpi_html → standalone HTML file
 | `fiscal_week` | Year/Week → week_start/end/Fiscal_Quarter/Fiscal_Month |
 | `available_fiscal_months` | fiscal-MONTH numbers fully closed as of `REPORT_END_DATE` for the latest year — the YTD elapsed-window set, applied to every year. Delegates to `complete_fiscal_periods` below at `Fiscal_Month` grain. Two stacked fixes this session: (1) previously read clipped `ctx.fiscal_week` bounds, so the "closed" check was trivially always true (now delegates to the unclipped helper); (2) the grain itself moved from quarter to month — `available_fiscal_quarters` was renamed/replaced, since a quarter in progress can still have already-closed months. See §3.1. |
 | `complete_fiscal_periods` | `{"Fiscal_Quarter": df, "Fiscal_Month": df}` (plus `"Fiscal_Half"` only when `half_periods`) — the `(Year, period)` pairs fully elapsed on BOTH window edges (unclipped fiscal calendar), from `fiscal.complete_fiscal_periods`. Semi-joined onto every metric frame by `kpi_long._drop_incomplete_periods` for the Quarter/Monthly trend tabs (§3.1). `None` in `html_only` mode (`fiscal.build_fiscal_and_products` does not run). |
+| `ytd_through_day` / `ytd_years` / `ytd_lost_sales_last_week` / `day_calendar` | `report_end="latest_day"` only (else `None`; `fiscal.build_latest_day_windows`): K = day of the fiscal year of `REPORT_END_DATE`; the years whose days 1..K are inside the window (YTD tab / comparable `ytd` kind only use these); fiscal week number of the last Saturday on or before `REPORT_END_DATE` (0 when it is in the previous fiscal year) for the lost-sales YTD weeks; the window's `(date, Year, Week, day_index, last_day_index)` calendar (the week containing day K is split into the days `<= K` and the days after; `fiscal.week_day_counts` derives each week's `week_days` / `ytd_week_days` from it) |
 | `products_attr` | broadcast: product_id, cogs, price, ALL dimension columns (cuts + root-defining) |
 | `active_slice_dimensions` | every validated dimension column (slices + dimension_sources) — includes root-defining columns; used to build `products_attr`/`product_dims` and by `scope_debug.py`. NOT what the KPI step iterates for cuts — see `cut_dimensions`. |
 | `cut_dimensions` | `active_slice_dimensions` minus root-defining columns — what `kpi_long`/comparisons/HTML actually iterate as cuts within every root (§3.4c) |
 | `root_definitions` | resolved roots (excluding the implicit `"overall"`): `[{"root": name, "dim_col": ..., "value": ...}, ...]`, from `fiscal._resolve_root_definitions`. In `html_only` mode, `dim_col`/`value` are `None` (re-inferred from a loaded `kpi_long`'s own `root` column — only the name is needed to render) |
 | `operation_scope_pairs` | operation-scope mode only: cached `(product_id, store_id, scope_start)` after the family roll-up (earliest start) / active filter |
-| `dc_blocked_days` | `dc_instock.enabled` + `blocked_scope_solution_id` only: cached `(product_id, warehouse_id, date)` days removed from `dc_in_stock_rate`; `None` otherwise |
+| `dc_blocked_days` | `blocked_scope.dc_solution_id` set only: cached `(product_id, warehouse_id, date)` days removed from every DC metric (DC inventory, DC WOS, DC in-stock); `None` otherwise |
 | `blocked_days` | blocked_scope on only: cached `(product_id, store_id, date)` days removed from daily-data metrics and in-stock; `None` when off |
 | `defined_scope_keys` | product×[store×]Year×Week keys from defined scope |
 | `hybrid_scope_keys` | final scope (defined + adjustments + score backfill) |
@@ -991,7 +1063,7 @@ For a quick distinct product/store count of the final scope (overall + per slice
 | `KPI_CUSTOMER` | `customer` |
 | `KPI_AS_OF_DATE` | `reporting_window.as_of_date` |
 | `KPI_RUN_MIN_DATE` | `reporting_window.run_min_date` |
-| `KPI_REPORT_END` | `reporting_window.report_end` (`as_of` / `complete_month`) |
+| `KPI_REPORT_END` | `reporting_window.report_end` (`as_of` / `complete_month` / `latest_day`) |
 | `KPI_HALF_PERIODS` | `fiscal_calendar.half_periods` (true/false) |
 | `KPI_USE_HYBRID_SCOPE` | `scope.use_hybrid_scope` |
 | `KPI_RUN_SCOPE_DIFF` | `scope.run_scope_diff` |
@@ -1042,7 +1114,7 @@ For a quick distinct product/store count of the final scope (overall + per slice
 
 ## 12. Key design constraints (never violate)
 
-1. **Report end = last completed Saturday** — prevents partial-week instock asymmetry. The only exception is `report_end="complete_month"`, which cuts it back to a month end (a Saturday with a fiscal calendar; mid-week without, where the partial trailing week is dropped from the Weekly tab).
+1. **Report end = last completed Saturday** — prevents partial-week instock asymmetry. The exceptions are `report_end="complete_month"`, which cuts it back to a month end (a Saturday with a fiscal calendar; mid-week without, where the partial trailing week is dropped from the Weekly tab), and `report_end="latest_day"`, where it is `as_of_date` itself: YTD runs to it, every other view shows complete periods only, and lost sales is held to the last Saturday (§3.1b).
 2. **Defined scope uses fiscal-week overlap** — a week whose Sunday precedes `run_min_date` is still included if any day overlaps the window.
 3. **Score thresholds over the full window** — not just the backfill window.
 4. **No pair pre-filter in product-week mode** — when `store_col=None`, `build_scoped_daily` must not pre-filter by lost-sales pairs.
@@ -1059,7 +1131,7 @@ For a quick distinct product/store count of the final scope (overall + per slice
 15. **Dimension sources fail loudly** — unlike `slices.derived_dimensions` (skipped on error), an enabled `dimension_sources` entry always raises on bad path/column/expression.
 16. **`dimension_sources` columns are ALWAYS roots, never cuts** — mutually exclusive with `slices` by design. A dimension_source column is unconditionally excluded from `ctx.cut_dimensions` even if nothing lists it as a root explicitly (auto-discovery still applies); do not expect it to show up as a flat breakdown alongside brand/SMW.
 17. **A fiscal calendar's month/quarter NUMBER is not assumed to equal the real calendar month/quarter** — `fiscal_calendar.column_map` reads a client's own quarter/month columns when present, but the Monthly tab's *display label* is never derived by feeding a fiscal month number into a month-name table (a client's fiscal year can be offset from the civil calendar, e.g. tbretail's Feb–Jan year, so fiscal month 07 can span real August). The label is instead derived from the majority real calendar month by day count across each fiscal month's actual dates when `month_name_col` isn't configured — see §3.1.
-18. **No global store-exclusion config key** — every metric uses all scoped stores. If a store should never contribute (e.g. e-com fulfillment), filter it via `input_filters.daily_data` (affects everything read from `daily_data`, not just specific metrics), or rely on `lost_sales_source`/`instock_source` tables that already exclude it upstream. The one per-metric exception is in-stock when `instock_daily` is on: `instock_daily.input_filters` leaves stores out of in-stock only (tbretail: ECOM 829/639/917).
+18. **No global store-exclusion config key** — every metric uses all scoped stores. If a store should never contribute (e.g. e-com fulfillment), filter it via `input_filters.daily_data` (affects everything read from `daily_data`, not just specific metrics), or rely on `lost_sales_source`/`instock_source` tables that already exclude it upstream. The per-metric exceptions are explicit: `instock_daily.input_filters` leaves stores out of in-stock (tbretail: ECOM 829/639/917), `lost_sales_source.sales_filter` out of `lost_sales_pct`, and `metrics.population_filters` narrows a metric's products (tbretail: NON-COMP out of `in_stock_rate` only) — so on every root tab, period type, comparison, comparable table and in the HTML, NON-COMP is removed from in-stock only and ECOM from in-stock and lost sales only (the LFL root is `IS_COMP == "yes"` by definition, so NON-COMP is absent from every metric there).
 19. **DC/warehouse scope restriction must include the week dimension, not just product_id** — `build_dc_daily` restricts on `(product_id, Year, Week)` against `scope_core`, attaching `Year`/`Week` to DC rows (via the fiscal calendar join) **before** the scope semi-join. Under `product_store_week` grain, scope membership varies by week; restricting on `product_id` alone (dropping `Year`/`Week` first) previously let a product's DC inventory leak into weeks it had fallen out of scope — inflating `WOS_DC`/`WOS_TOTAL`/`dc_mean_stock`/`total_mean_stock` for those weeks. Fixed 2026-09-16. No effect under `"product"`/`"product_store"` grain (scope is uniform across every week there already). Any new store-less input frame (§5 "Add a new input frame") must follow the same pattern.
 20. **DC/warehouse frames restrict against `scope_core` in the SAME id space they were built in — item-family-rolled to parent `product_id`, not raw.** `scope_core`/`defined_scope` is already parent-rolled at its own source (its producer maps `product_id -> coalesce(parent_id, product_id)` via `item_family`'s `is_main=false` rows before writing the scope table). `build_dc_daily` and `build_dc_inst` both read `inventory_warehouse` through the same shared `pipeline._get_inventory_warehouse_parent_rolled` helper (which applies `_roll_to_item_family_parent`) before restricting to `scope_core` — fixed 2026-09-17. Previously `build_dc_daily` restricted RAW `product_id` against the parent-rolled `scope_core`, silently dropping any DC inventory sitting on a superseded/child `product_id`. This is unconditional (NOT gated by `dc_instock.enabled`): `path_segments.item_family` must point at a real table any time `path_segments.inventory_warehouse` does, and `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL` will shift for any family with inventory split across old/current item codes. Any new DC-adjacent input frame (§5) must roll to parent `product_id` the same way before restricting to `scope_core`.
 21. **`dc_in_stock_rate` bounds each pair's grid by that pair's own first `inventory_warehouse` row — never by a scope table's `start_date`, and never by a flat window shared across pairs.** This deliberately matches how `daily_data_expanded` bounds the store-level in-stock denominator, keeping both in-stock series on one definition. Consequences, both expected: a pair ranged at a DC but never once stocked inside the window is **absent** from the metric rather than reading 0%; a pair that stops being stocked mid-window keeps accruing stockout days through `REPORT_END_DATE`. Changed 2026-09-18 — the previous scope-derived grid (`operation/scope` + a go-live-floor rewrite) was removed entirely, along with `path_segments.dc_scope`, `input_filters.dc_scope` and `dc_scope_source`. See README's "dc_instock" section.
@@ -1071,3 +1143,5 @@ For a quick distinct product/store count of the final scope (overall + per slice
 27. **`instock_daily` counts only days from each pair's count start; a missing day is out of stock** — and its union of on-hand and goods-in-transit days is never summed.
 28. **The calendar must be gap-free over the window and `complete_month` must fail loudly** — `require_complete_time_grain` and the `fiscal_cal` upload-end check in `apply_report_end_mode`; do not add silent fallbacks.
 29. **New settings are indexed directly in `materialize()`** — no `.get(key, default)` that duplicates `CONFIG`. `config.py` and `tbretail_config.py` each vendor their own `materialize()`; a new setting or validation goes into both identically. They still differ in pre-existing places: `config.py` has the `KPI_ITEM_FAMILY_ROLLUP_*` env overrides, different wording of the `comparable_pairs.grain` validation and some comments, and the `INSTOCK_SOURCE_*` settings sit at a different position in the returned dict.
+30. **`inventory_git` never leaks goods in transit into sales, in-stock, lost sales or the comparable pair universe, and an ungated metric is on-hand only.** Goods-in-transit-only days exist only in `scoped_daily` (`has_daily_row=False`) and `dc_daily` (`has_inventory_row=False`); `compute_kpis` reads real rows for sales, distinct counts, weighted-instock's weights and every metric not named in `inventory_git.metrics`; `build_pipeline_frames` filters `has_daily_row` for `daily_for_lost`; `comparable.py` takes the pair / year universe from real rows. The store GIT must be joined to the daily rows BEFORE blocked days are removed, summed to one row per pair-day (a child + parent daily row must not double its quantity), and GIT-only days that `input_filters.daily_data` removed must be dropped (§3.2d). Store and in-stock GIT share `pipeline._goods_in_transit_quantity` / `_goods_in_transit_days`.
+31. **`report_end="latest_day"` cuts YTD at the same fiscal day for every year and splits only the week containing day K.** `fiscal.build_latest_day_windows` is the only place K / `ytd_years` / the day calendar are computed (from the UNCLIPPED fiscal calendar — never `ctx.fiscal_week`, see #23); the pair-week frames (`inst_data`, `dc_inst`) are cut by `last_day_index`, the daily frames by `day_index`, lost sales by whole weeks up to the last Saturday; Annual and Weekly keep complete periods via `complete_fiscal_periods` at `"Year"` / `"Week"` grain. It requires `instock_daily.enabled=True` (weekly in-stock sources cannot be split). `ytd` rows of the saved tables are always replaced on an incremental merge (§3.1b).

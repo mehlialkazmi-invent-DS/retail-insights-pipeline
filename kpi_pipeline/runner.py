@@ -74,6 +74,7 @@ class KPIRunner:
 
     def _reset_run_caches(self) -> None:
         self.ctx.daily_data_raw = None
+        self.ctx.daily_data_excluded_days = None
         self.ctx.lost_sales_weekly_base = None
         self.ctx.instock_weekly_base = None
         self.ctx.inventory_warehouse_raw = None
@@ -89,7 +90,7 @@ class KPIRunner:
             s["REPORT_END_DATE"],
             "| report_end:",
             s["REPORT_END_MODE"],
-            "(complete_month cuts it back when build_dimensions runs)",
+            "(complete_month cuts it back when build_dimensions runs; latest_day = as_of_date itself)",
         )
         print("REPORT_START_DATE (Sun):", s["REPORT_START_DATE"], "| RUN_MIN_DATE (Sun):", s["RUN_MIN_DATE"])
         print(
@@ -114,6 +115,7 @@ class KPIRunner:
         print("DEFINED_SCOPE path:", s["DEFINED_SCOPE"]["path"])
         print("BLOCKED_SCOPE:", s["BLOCKED_SCOPE"])
         print("INSTOCK_DAILY:", s["INSTOCK_DAILY"])
+        print("INVENTORY_GIT:", s["INVENTORY_GIT"])
         print("SLICE_DIMENSIONS:", s["SLICE_DIMENSIONS"])
         print("COMPARISONS:", s.get("COMPARISON_KINDS", ["yoy", "ytd"]))
         if s["SAVE_OUTPUTS"]:

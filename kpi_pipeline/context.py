@@ -8,6 +8,11 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 from pyspark.sql import DataFrame, SparkSession
 
+# inventory_git.metrics gate names (see config.py), split by the side of the report they read:
+# store metrics read build_scoped_daily's store goods in transit, DC metrics build_dc_daily's.
+STORE_GIT_METRICS = ("total_inventory", "mean_stock", "wos", "inventory_turnover_rate")
+DC_GIT_METRICS = ("dc_mean_stock", "wos_dc")
+
 
 @dataclass
 class KPIContext:
@@ -37,6 +42,22 @@ class KPIContext:
     # None in html_only mode, which renders saved rows and never period-frames a Spark frame.
     complete_fiscal_periods: Optional[Dict[str, DataFrame]] = None
 
+    # report_end="latest_day" only (fiscal.build_latest_day_windows; None otherwise). YTD runs to the
+    # latest day, the same fiscal day for every year:
+    #   ytd_through_day            K = day of the fiscal year (1-based) of REPORT_END_DATE.
+    #   ytd_years                  years whose days 1..K lie inside the report window (the YTD tab and
+    #                              the comparable ytd kind only use these).
+    #   ytd_lost_sales_last_week   fiscal week number of the last Saturday on or before REPORT_END_DATE;
+    #                              lost-sales YTD is whole weeks 1..this for every year.
+    #   day_calendar               fiscal_cal's (date, Year, Week) plus day_index (day of the fiscal
+    #                              year) and last_day_index (day_index of the last day of the row's
+    #                              fiscal-week part: the week containing day K is split into the days
+    #                              <= K and the days after).
+    ytd_through_day: Optional[int] = None
+    ytd_years: Optional[List[int]] = None
+    ytd_lost_sales_last_week: Optional[int] = None
+    day_calendar: Optional[DataFrame] = None
+
     defined_scope_keys: Optional[DataFrame] = None
     scope_keys: List[str] = field(default_factory=list)
     # scope_source.mode="operation_scope" only: (product_id, store_id, scope_start) of the platform
@@ -46,8 +67,9 @@ class KPIContext:
     # blocked_scope.ui_parameters_path set only: cached (product_id, store_id, date) days removed
     # from every daily-data-derived metric. None when blocked scope is off.
     blocked_days: Optional[DataFrame] = None
-    # dc_instock.enabled and dc_instock.blocked_scope_solution_id set only: cached
-    # (product_id, warehouse_id, date) days removed from dc_in_stock_rate. None otherwise.
+    # blocked_scope.dc_solution_id set only: cached
+    # (product_id, warehouse_id, date) days removed from every DC metric (DC inventory, DC WOS, DC
+    # in-stock). None otherwise.
     dc_blocked_days: Optional[DataFrame] = None
 
     scope_adjustments_applied: bool = False
@@ -89,6 +111,9 @@ class KPIContext:
     save_plan: Optional[Any] = None
 
     daily_data_raw: Optional[DataFrame] = None
+    # Scope-independent (pair, date) days input_filters.daily_data removes, built once and shared by
+    # every build_scoped_daily call when a store inventory_git gate is on.
+    daily_data_excluded_days: Optional[DataFrame] = None
     lost_sales_weekly_base: Optional[DataFrame] = None
     instock_weekly_base: Optional[DataFrame] = None
     inventory_warehouse_raw: Optional[DataFrame] = None

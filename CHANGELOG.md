@@ -9,26 +9,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ✨ Added
 
+#### Gated goods in transit on the inventory metrics (`inventory_git`)
+
+`inventory_git` = `{"git_date_shift_days": None | int, "metrics": [...]}` (both keys required; default
+off) adds goods in transit (GIT) to on-hand on the metrics named in `metrics`; every metric not named keeps
+on-hand only and its exact previous value. Gates: `total_inventory`; `mean_stock` (`mean_stock`,
+`mean_stock_retail`, `mean_stock_cost` and the store part of `total_mean_stock`); `wos` (`WOS`,
+`wos_revenue`, `wos_cost` and the store part of `WOS_TOTAL`); `inventory_turnover_rate` (the mean stock
+inside it); `dc_mean_stock` (and the DC part of `total_mean_stock`); `wos_dc` (`WOS_DC` and the DC part of
+`WOS_TOTAL`). A gated metric uses on-hand + GIT units (retail = units x `price_without_tax`, cost = units
+x `cogs`, rounded like `inventory_retail` / `inventory_cost`). `materialize()` raises on an unknown name, a
+non-empty `metrics` with `git_date_shift_days` None, a non-int (or bool) shift, and a non-empty `metrics`
+without `use_fiscal_calendar=True`; settings key `INVENTORY_GIT`.
+
+Store side (`pipeline.build_scoped_daily`, only when a store gate is on, else no GIT read): daily data
+(restricted to the scoped pairs first, which commutes with the blocked-day removal) ->
+store GIT quantity per product x store x day (`destination_type 0`, `quantity > 0`, shifted, summed, rolled
+to the family main, window, scoped pairs) -> full outer join (a GIT-only day gets zero sales / on-hand and
+`has_daily_row=False`; the daily rows are summed per pair-day first so a quantity attaches once) -> GIT-only
+days whose daily row `input_filters.daily_data` removed (`usable = 1`) dropped
+(`inputs.get_daily_data_excluded_days`, built once per run and cached on `ctx.daily_data_excluded_days`; the GIT
+frame is used once and not cached) -> blocked scope removes both kinds of rows -> scope product-week semi-join.
+DC side (`pipeline.build_dc_daily`, only when `dc_mean_stock` or `wos_dc` is on): DC GIT
+(`destination_type 1`) full-outer-joined to the rolled `inventory_warehouse` rows (`has_inventory_row`). In
+`metrics.compute_kpis`, sales, distinct counts and weighted-instock's sales weights read real rows only; WOS,
+mean stock, total mean stock, turnover and the DC metrics each build their own frame (all rows with on-hand
++ GIT when gated, real rows on-hand otherwise) and are joined as before. Sales, in-stock, lost sales and the
+DC in-stock rate never change; the comparable-pairs pair universe uses real rows only. The in-stock GIT days
+now derive from the same `_goods_in_transit_quantity` helper (unchanged behaviour). The Metric Details text
+of a gated metric states that it counts goods in transit. `tbretail_config.py` sets `-1` and all six metrics.
+
+**Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/{context,inputs,pipeline,metrics,comparable,html_report,runner}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-02
+
+#### `reporting_window.report_end = "latest_day"` (YTD to the latest day, complete periods elsewhere)
+
+A third `report_end` mode (`as_of` and `complete_month` unchanged; env `KPI_REPORT_END` works). `REPORT_END_DATE`
+is `as_of_date` itself, set in `materialize()` so every reader sees it (`fiscal.apply_report_end_mode` returns
+unchanged). Annual, Quarter, Half, Monthly and Weekly show **complete periods only** (`fiscal.complete_fiscal_periods`
+now also at `"Year"` and `"Week"` grain, from the unclipped fiscal calendar; civil calendar analytically), so the
+current fiscal year appears in YTD only and the trailing partial week is dropped. **YTD = days 1..K of every
+fiscal year**, K = day of the fiscal year of `REPORT_END_DATE` (`fiscal.build_latest_day_windows`: `ctx.ytd_through_day`,
+`ctx.ytd_years` = years whose days 1..K are inside the window, `ctx.day_calendar` with `day_index` /
+`last_day_index`). `scoped_daily` / `dc_daily` are cut on `day_index`; `build_instock_daily` / `build_dc_inst` split the
+fiscal week containing day K into the days `<= K` and the days after (two rows per pair, own stocked / blocked /
+unusable / available counts, `last_day_index`), so YTD takes `last_day_index <= K` while every other view sums both
+parts. **Lost sales** only has data through the last Saturday on or before `REPORT_END_DATE`: `lost_base` keeps weeks
+ending on or before it in every view, and YTD uses weeks 1..(that Saturday's fiscal week) for every year, so the
+missing days never dilute `lost_sales_pct` or misalign YoY YTD. Comparisons and comparable kinds follow (YoY =
+complete fiscal years, YTD = same-fiscal-day windows, quarter / half = complete periods). Incremental merge always
+replaces an existing `ytd` row of `kpi_long` / `comparable_kpi_long` (`io.merge_table_incremental`). **WOS and the part
+week:** YTD ends on day K, so the fiscal week containing K enters `WOS`, `wos_revenue`, `wos_cost`, `WOS_DC` and `WOS_TOTAL`
+with only its days up to K; `scoped_daily` carries `week_days` (7 outside this mode; the YTD frames swap in the days up
+to K, `fiscal.week_day_counts`) and `metrics.compute_kpis` weights each product-week's average daily inventory by
+`week_days / 7`, so a part week is not counted as a full week of inventory against a part week of sales (whole weeks,
+and every other view and mode, are unchanged). `scope_diff`'s Annual table uses the Annual tab's complete fiscal years.
+HTML: a **Period basis** card in the header, the Lost Sales % definition and the WOS definitions state the basis.
+Requires `instock_daily.enabled=True` (raises otherwise). `tbretail_config.py` switches to `latest_day`.
+
+**Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/{context,fiscal,pipeline,metrics,kpi_long,comparable,comparisons,io,html_report,runner}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-02
+
 #### DC in-stock: goods in transit and DC blocked scope
 
 `dc_instock.git_date_shift_days` (None = off, int not bool) counts a DC grid day as stocked when goods
 are in transit to the DC (`goods_in_transit` `destination_type=1`, `quantity>0`, rolled to the family
 main; snapshot D+1 = end of day D, so `-1`), unioned with `inventory > stock_threshold`.
-`dc_instock.blocked_scope_solution_id` (None = off, int not bool) removes
-`{blocked_scope.ui_parameters_path}/dc_blocked_scope` days of that solution from both DC stocked and
-available days by `blocked_scope.rule`, against each DC pair's `scope_start` from `operation/scope` of
-that solution (same run_date, roll-up, earliest start and active filter as `scope_source`); DC pairs
-outside it get no blocks; requires `blocked_scope.ui_parameters_path`. Built once per run as
-`ctx.dc_blocked_days` (`scope.build_dc_blocked_days`), only when `dc_instock.enabled`.
-`dc_mean_stock` / `WOS_DC` / `WOS_TOTAL` are not blocked. The DC In-Stock Rate Metric Details text
-mentions both when on. Both keys are required. `tbretail_config.py` sets `-1` and `22`, with
-`dc_instock` still off.
+`blocked_scope.dc_solution_id` (None = off, int not bool; first added as
+`dc_instock.blocked_scope_solution_id`) removes `{blocked_scope.ui_parameters_path}/dc_blocked_scope`
+days of that solution by `blocked_scope.rule`, against each DC pair's `scope_start` from
+`operation/scope` of that solution (same run_date, roll-up, earliest start and active filter as
+`scope_source`), from every DC metric like store blocks on store metrics: `dc_mean_stock`, `WOS_DC`, the
+DC part of `WOS_TOTAL` / `total_mean_stock` (removed in `build_dc_daily` after the DC goods-in-transit
+join) and `dc_in_stock_rate`. DC pairs outside it get no blocks; requires
+`blocked_scope.ui_parameters_path`. Built once per run as `ctx.dc_blocked_days`
+(`scope.build_dc_blocked_days`). The Metric Details text mentions both when on. `tbretail_config.py` sets
+`-1` and `22` (`dc_instock` itself still off; DC blocks now apply to DC inventory and DC WOS).
+`item_family_rollup.goods_in_transit` (default True, env `KPI_ITEM_FAMILY_ROLLUP_GOODS_IN_TRANSIT` in
+`config.py`) controls whether every goods-in-transit read (in-stock, DC in-stock, inventory GIT) is
+rolled to the family main.
 
 **Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/{inputs,scope,pipeline,runner,context,html_report}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
 
 **Date:** 2026-10-02
 
 ### 🔄 Changed
+
+#### Population rules confirmed for tbretail; `lost_base` weeks and Weekly display slots under `latest_day`
+
+Verified, no code change needed: NON-COMP (`IS_COMP == "no"`) leaves in-stock only (`metrics.population_filters`),
+ECOM stores 829 / 639 / 917 leave in-stock and lost sales only (`instock_daily.input_filters`,
+`lost_sales_source.sales_filter`, the ECOM-excluding model behind `report_dfu`), on every root, period type,
+comparison, comparable table and in the HTML (all go through `metrics.compute_kpis`); the LFL root is
+`IS_COMP == "yes"` by definition. `tbretail_config.py`'s header comment and the README / help text now state
+this. With `latest_day`, `trim_periods_to_recent` ignores the trailing partial week when picking the N most recent
+Weekly columns, and `lost_base` keeps only weeks up to the last Saturday in every view.
+
+**Affected:** `tbretail_config.py`, `kpi_pipeline/{pipeline,kpi_long}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-02
 
 #### Operation scope rolled to the family main; blocks on the main's own product_id only
 

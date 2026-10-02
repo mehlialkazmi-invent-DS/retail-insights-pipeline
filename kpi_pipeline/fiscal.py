@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.functions import broadcast
+from pyspark.sql.window import Window
 
 from kpi_pipeline.context import KPIContext
 from kpi_pipeline.inputs import get_daily_data_raw, read_csv_source
@@ -160,13 +161,29 @@ def _compute_available_fiscal_months(ctx: KPIContext) -> List[int]:
 # Quarter/Half/Monthly value-trend tabs group by (see kpi_long._period_frames).
 COMPLETE_PERIOD_COLUMNS = ("Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month")
 
+# report_end="latest_day" also keeps only complete years and whole weeks: "Year" is a complete fiscal
+# year (the Annual tab), "Week" a complete (Year, Week) (the Weekly tab). Their key columns are
+# (Year,) and (Year, Week); every other period column's are (Year, period_col).
+LATEST_DAY_COMPLETE_PERIOD_COLUMNS = ("Year", "Week")
+
 # Civil-calendar path only: calendar months per period column, to derive period bounds analytically.
 _MONTHS_PER_PERIOD = {"Fiscal_Month": 1, "Fiscal_Quarter": 3, "Fiscal_Half": 6}
 
 
+def _period_key_columns(period_col: str) -> List[str]:
+    """Key columns of one period: (Year,) for the annual "Year" grain, else (Year, period_col)."""
+    return ["Year"] if period_col == "Year" else ["Year", period_col]
+
+
+def last_saturday_on_or_before(day: datetime.date) -> datetime.date:
+    """The last Saturday on or before ``day`` (``day`` itself when it is a Saturday)."""
+    return day - datetime.timedelta(days=(day.weekday() + 2) % 7)
+
+
 def _fiscal_period_bounds(ctx: KPIContext, period_col: str) -> DataFrame:
     """One row per (Year, ``period_col``) with ``period_start``/``period_end`` — that period's
-    REAL first/last date.
+    REAL first/last date. ``period_col`` may also be "Year" (one row per fiscal / calendar year) or
+    "Week" (one row per (Year, Week)), the grains report_end="latest_day" keeps complete only.
 
     Deliberately NOT read from ctx.fiscal_week. ctx.fiscal_week is clipped to
     [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] (see build_fiscal_cal_and_week_from_upload), so
@@ -193,7 +210,8 @@ def _fiscal_period_bounds(ctx: KPIContext, period_col: str) -> DataFrame:
         on that path Fiscal_Month IS the real calendar month of the week start and Fiscal_Quarter
         is ceil(month/3) (see _build_fiscal_week_frame's derivation fallbacks), so the period
         start/end are the first/last day of that calendar month / of the quarter's or half's first
-        and last month — computable analytically, no calendar lookup needed.
+        and last month — computable analytically, no calendar lookup needed. A "Year" is Jan 1 to
+        Dec 31 and a "Week" is its first date plus 6 days.
     """
     if ctx.settings["USE_FISCAL_CALENDAR"]:
         quarter_col, month_col, month_name_col = _fiscal_upload_column_map(ctx)
@@ -203,9 +221,29 @@ def _fiscal_period_bounds(ctx: KPIContext, period_col: str) -> DataFrame:
             month_col,
             month_name_col,
         )
-        return full_weeks.groupBy("Year", period_col).agg(
+        if period_col == "Week":
+            return full_weeks.select(
+                "Year",
+                "Week",
+                F.col("week_start_date").alias("period_start"),
+                F.col("week_end_date").alias("period_end"),
+            )
+        return full_weeks.groupBy(*_period_key_columns(period_col)).agg(
             F.min("week_start_date").alias("period_start"),
             F.max("week_end_date").alias("period_end"),
+        )
+
+    if period_col == "Year":
+        return (
+            ctx.fiscal_week.select("Year").distinct()
+            .withColumn("period_start", F.to_date(F.format_string("%04d-01-01", F.col("Year").cast("int"))))
+            .withColumn("period_end", F.to_date(F.format_string("%04d-12-31", F.col("Year").cast("int"))))
+        )
+    if period_col == "Week":
+        # Civil weeks run Sunday to Saturday: a week is whole when its 7 days from its first date fit.
+        return (
+            ctx.fiscal_week.select("Year", "Week", F.col("week_start_date").alias("period_start"))
+            .withColumn("period_end", F.date_add(F.col("period_start"), 6))
         )
 
     months_in_period = _MONTHS_PER_PERIOD[period_col]
@@ -247,13 +285,16 @@ def complete_fiscal_periods(ctx: KPIContext, period_col: str) -> DataFrame:
     Weekly tab needs no completeness set: REPORT_END_DATE is a Saturday, except with
     report_end="complete_month" on the civil calendar, where kpi_long._period_frames drops the
     trailing partial week instead.
+
+    report_end="latest_day" (REPORT_END_DATE is any day) also uses it for the Annual ("Year") and
+    Weekly ("Week") tabs, so the current fiscal year and the trailing partial week are dropped.
     """
     start = ctx.settings["EFFECTIVE_REPORT_START_DATE"]
     end = ctx.settings["REPORT_END_DATE"]
     return (
         _fiscal_period_bounds(ctx, period_col)
         .filter((F.col("period_start") >= F.lit(start)) & (F.col("period_end") <= F.lit(end)))
-        .select("Year", period_col)
+        .select(*_period_key_columns(period_col))
     )
 
 
@@ -287,9 +328,12 @@ def apply_report_end_mode(ctx: KPIContext) -> None:
     Raises when no month ends inside the window, and when the cut month starts before
     EFFECTIVE_REPORT_START_DATE (fiscal: the month's period_start; civil: the 1st of the cut month):
     that month would be reported with its first days missing.
+
+    "as_of" and "latest_day" leave REPORT_END_DATE as materialize resolved it (the last completed
+    Saturday, or as_of_date itself for "latest_day"), so they return without changing anything.
     """
     s = ctx.settings
-    if s["REPORT_END_MODE"] == "as_of":
+    if s["REPORT_END_MODE"] in ("as_of", "latest_day"):
         return
     end = s["REPORT_END_DATE"]
     if s["USE_FISCAL_CALENDAR"]:
@@ -324,6 +368,93 @@ def apply_report_end_mode(ctx: KPIContext) -> None:
         )
     print(f"report_end=complete_month: REPORT_END_DATE {end} -> {cut}")
     s["REPORT_END_DATE"] = cut
+
+
+def build_latest_day_windows(ctx: KPIContext) -> None:
+    """report_end="latest_day": resolve the same-fiscal-day YTD window and the lost-sales YTD weeks.
+
+    K is the day of the fiscal year (1-based: days since that year's first date, plus 1) of
+    REPORT_END_DATE. Fiscal calendar: each year's first date is read from the UNCLIPPED fiscal_cal
+    upload (the window's own calendar is clipped); civil calendar: Jan 1 (day of the calendar year).
+    YTD of every year in ctx.ytd_years is its days 1..K. A year qualifies only when its first date is
+    inside the report window (its days 1..K are all reported); the latest year's day K is
+    REPORT_END_DATE itself.
+
+    Sets ctx.day_calendar (the window's (date, Year, Week) + day_index + last_day_index; the week
+    containing day K splits into the days <= K and the days after, each with its own last_day_index, so
+    the pair-week in-stock frames can be cut at K), ctx.ytd_through_day, ctx.ytd_years and
+    ctx.ytd_lost_sales_last_week. Lost sales only reaches the last Saturday on or before
+    REPORT_END_DATE; its YTD is the whole weeks 1..(fiscal week of that Saturday) for every year, or no
+    week at all when that Saturday falls in the previous fiscal year (day K is in week 1).
+    """
+    s = ctx.settings
+    start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
+    if s["USE_FISCAL_CALENDAR"]:
+        year_first = (
+            _read_fiscal_cal_upload(ctx, s["PATH_FISCAL"]).groupBy("Year").agg(F.min("date").alias("year_first_date"))
+        )
+    else:
+        year_first = ctx.fiscal_week.select("Year").distinct().withColumn(
+            "year_first_date", F.to_date(F.format_string("%04d-01-01", F.col("Year").cast("int")))
+        )
+    dated = (
+        ctx.fiscal_cal.select("date", "Year", "Week")
+        .join(broadcast(year_first), on="Year", how="inner")
+        .withColumn("day_index", F.datediff(F.col("date"), F.col("year_first_date")) + F.lit(1))
+        .drop("year_first_date")
+    )
+    end_row = dated.filter(F.col("date") == F.lit(end)).first()
+    through_day, end_year = int(end_row["day_index"]), end_row["Year"]
+    ctx.ytd_through_day = through_day
+    ctx.day_calendar = (
+        dated.withColumn(
+            "last_day_index",
+            F.max("day_index").over(Window.partitionBy("Year", "Week", F.col("day_index") <= F.lit(through_day))),
+        )
+        .select("date", "Year", "Week", "day_index", "last_day_index")
+        .cache()
+    )
+
+    first_dates = {r["Year"]: r["year_first_date"] for r in year_first.collect()}
+    window_years = sorted(r["Year"] for r in ctx.fiscal_week.select("Year").distinct().collect())
+    ctx.ytd_years = [
+        int(y)
+        for y in window_years
+        if first_dates[y] >= start and first_dates[y] + datetime.timedelta(days=through_day - 1) <= end
+    ]
+
+    last_saturday = last_saturday_on_or_before(end)
+    saturday_row = ctx.fiscal_cal.filter(F.col("date") == F.lit(last_saturday)).first()
+    if saturday_row is None:
+        raise ValueError(
+            f"report_end='latest_day': the last Saturday on or before REPORT_END_DATE {end} ({last_saturday}) "
+            f"is before the report start {start}; lost sales has no complete week in the window. Widen "
+            "run_min_date or move as_of_date."
+        )
+    ctx.ytd_lost_sales_last_week = int(saturday_row["Week"]) if saturday_row["Year"] == end_year else 0
+    print(
+        f"report_end=latest_day: YTD through fiscal day {through_day} of REPORT_END_DATE {end} | YTD years: "
+        f"{ctx.ytd_years} (years not in the window from day 1: "
+        f"{[int(y) for y in window_years if int(y) not in ctx.ytd_years]}) | lost sales through {last_saturday} "
+        f"(YTD weeks 1..{ctx.ytd_lost_sales_last_week})"
+    )
+
+
+def week_day_counts(ctx: KPIContext) -> DataFrame:
+    """report_end="latest_day": (Year, Week, week_days, ytd_week_days) from ctx.day_calendar -- the days
+    of each fiscal week inside the report window, and how many of them fall on or before the YTD cut
+    day K (ctx.ytd_through_day).
+
+    Every week is 7 days except the week containing K in the latest year, which the report window ends
+    inside, and in the YTD views the week containing K in every year, which stops at day K. metrics.
+    compute_kpis weights WOS's weekly inventory by days / 7 so such a part week is not counted as a full
+    week of inventory against a part week of sales (pipeline._with_week_days attaches week_days;
+    kpi_long._ytd_latest_day_frames swaps in ytd_week_days).
+    """
+    return ctx.day_calendar.groupBy("Year", "Week").agg(
+        F.count(F.lit(1)).alias("week_days"),
+        F.sum((F.col("day_index") <= F.lit(ctx.ytd_through_day)).cast("int")).alias("ytd_week_days"),
+    )
 
 
 def require_complete_time_grain(
@@ -584,18 +715,24 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
             "otherwise those weeks silently drop out of the monthly rollup."
         )
 
-    ctx.available_fiscal_months = _compute_available_fiscal_months(ctx)
-    print("available (fully elapsed) fiscal months for YTD:", ctx.available_fiscal_months)
+    latest_day = s["REPORT_END_MODE"] == "latest_day"
+    if latest_day:
+        build_latest_day_windows(ctx)
+    else:
+        ctx.available_fiscal_months = _compute_available_fiscal_months(ctx)
+        print("available (fully elapsed) fiscal months for YTD:", ctx.available_fiscal_months)
 
     # Computed once per run and cached: kpi_long._period_frames semi-joins these onto every metric
     # frame for the Quarter and Monthly trend tabs, so an in-progress trailing period never renders.
+    # report_end="latest_day" adds the Annual ("Year") and Weekly ("Week") grains.
+    complete_columns = COMPLETE_PERIOD_COLUMNS + (LATEST_DAY_COMPLETE_PERIOD_COLUMNS if latest_day else ())
     ctx.complete_fiscal_periods = {
         period_col: complete_fiscal_periods(ctx, period_col).cache()
-        for period_col in COMPLETE_PERIOD_COLUMNS
+        for period_col in complete_columns
         if period_col != "Fiscal_Half" or s["HALF_PERIODS"]
     }
     latest_complete = {
-        period_col: pairs.agg(F.max(F.struct("Year", period_col)).alias("latest")).collect()[0]["latest"]
+        period_col: pairs.agg(F.max(F.struct(*_period_key_columns(period_col))).alias("latest")).collect()[0]["latest"]
         for period_col, pairs in ctx.complete_fiscal_periods.items()
     }
     print("latest fully elapsed fiscal period (Quarter/Half/Monthly trend tabs end here):", latest_complete)

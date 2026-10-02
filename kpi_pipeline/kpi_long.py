@@ -5,7 +5,6 @@ Each row: period_type | period | dimension | dimension_value | METRIC_COLS...
 
 from __future__ import annotations
 
-import datetime
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -14,6 +13,7 @@ from pyspark.sql import functions as F
 
 from kpi_pipeline.context import KPIContext
 from kpi_pipeline.filters import apply_value_filter as _apply_value_filter
+from kpi_pipeline.fiscal import _period_key_columns, last_saturday_on_or_before, week_day_counts
 from kpi_pipeline.metrics import build_kpi_table
 
 PERIODS: List[Tuple[str, str]] = [
@@ -66,11 +66,15 @@ def _drop_incomplete_periods(
     Weekly needs no equivalent while REPORT_END_DATE is a Saturday (the trailing week is whole);
     see _drop_partial_trailing_week for the civil-calendar complete_month cut. YTD has its own
     apples-to-apples month filter in _period_frames.
+
+    report_end="latest_day" (REPORT_END_DATE is any day) uses it for every view but YTD: ``period_col``
+    may also be "Year" (the Annual tab: the current fiscal year appears in YTD only) and "Week" (the
+    Weekly tab: the trailing partial week is dropped).
     """
     complete = F.broadcast(ctx.complete_fiscal_periods[period_col])
     out = dict(frames)
     for key in _PERIOD_METRIC_FRAMES:
-        out[key] = out[key].join(complete, on=["Year", period_col], how="left_semi")
+        out[key] = out[key].join(complete, on=_period_key_columns(period_col), how="left_semi")
     return out
 
 
@@ -82,8 +86,7 @@ def _drop_partial_trailing_week(ctx: KPIContext, frames: Dict[str, DataFrame]) -
     end, which is usually mid-week; the week straddling it is clipped to a partial week that would
     otherwise sit next to whole ones. A no-op when REPORT_END_DATE is already a Saturday.
     """
-    end = ctx.settings["REPORT_END_DATE"]
-    last_saturday = end - datetime.timedelta(days=(end.weekday() + 2) % 7)
+    last_saturday = last_saturday_on_or_before(ctx.settings["REPORT_END_DATE"])
     whole_weeks = F.broadcast(
         ctx.fiscal_week.filter(F.col("week_end_date") <= F.lit(last_saturday)).select("Year_Week")
     )
@@ -93,7 +96,46 @@ def _drop_partial_trailing_week(ctx: KPIContext, frames: Dict[str, DataFrame]) -
     return out
 
 
+def _ytd_latest_day_frames(ctx: KPIContext, frames: Dict[str, DataFrame]) -> Dict[str, DataFrame]:
+    """report_end="latest_day" YTD: days 1..K of the fiscal year (K = ctx.ytd_through_day, the day of
+    the fiscal year of REPORT_END_DATE) for every year in ctx.ytd_years -- the same fiscal day for every
+    year, summed by "Year" alone downstream.
+
+    Daily frames (scoped_daily, dc_daily) filter on day_index. The pair-week in-stock frames (inst_data,
+    dc_inst) filter on last_day_index: the week containing day K was split at K when they were built
+    (pipeline.build_instock_daily / build_dc_inst), so the part up to K counts and the part after does
+    not. Lost sales is weekly and only reaches the last Saturday, so its YTD is the whole weeks
+    1..ctx.ytd_lost_sales_last_week for every year.
+    """
+    in_ytd_year = F.col("Year").isin(ctx.ytd_years)
+    through_day = ctx.ytd_through_day
+    # The week containing day K is cut at K in every year: its YTD part has fewer than 7 days, which
+    # compute_kpis's WOS needs (week_days, see fiscal.week_day_counts).
+    ytd_week_days = F.broadcast(
+        week_day_counts(ctx).select("Year", "Week", F.col("ytd_week_days").alias("week_days"))
+    )
+    out = dict(frames)
+    out["scoped_daily"] = (
+        frames["scoped_daily"]
+        .filter(in_ytd_year & (F.col("day_index") <= through_day))
+        .drop("week_days")
+        .join(ytd_week_days, on=["Year", "Week"], how="inner")
+    )
+    out["dc_daily"] = frames["dc_daily"].filter(in_ytd_year & (F.col("day_index") <= through_day))
+    out["inst_data"] = frames["inst_data"].filter(in_ytd_year & (F.col("last_day_index") <= through_day))
+    out["dc_inst"] = frames["dc_inst"].filter(in_ytd_year & (F.col("last_day_index") <= through_day))
+    out["lost_base"] = frames["lost_base"].filter(in_ytd_year & (F.col("Week") <= ctx.ytd_lost_sales_last_week))
+    return out
+
+
 def _period_frames(ctx: KPIContext, frames: Dict[str, DataFrame], period_name: str) -> Dict[str, DataFrame]:
+    latest_day = ctx.settings["REPORT_END_MODE"] == "latest_day"
+    if latest_day and period_name == "annual":
+        return _drop_incomplete_periods(ctx, frames, "Year")
+    if latest_day and period_name == "weekly":
+        return _drop_incomplete_periods(ctx, frames, "Week")
+    if latest_day and period_name == "ytd":
+        return _ytd_latest_day_frames(ctx, frames)
     if period_name == "weekly" and ctx.settings["REPORT_END_MODE"] == "complete_month" and not ctx.settings["USE_FISCAL_CALENDAR"]:
         return _drop_partial_trailing_week(ctx, frames)
     if period_name == "quarter":
@@ -180,7 +222,13 @@ def trim_periods_to_recent(kpi_long: pd.DataFrame, ctx: KPIContext) -> pd.DataFr
             continue
 
         if use_fiscal_week:
-            fw_pd = ctx.fiscal_week.select("Year_Week", "week_start_date").toPandas()
+            fiscal_week = ctx.fiscal_week
+            if settings["REPORT_END_MODE"] == "latest_day":
+                # The trailing partial week is not a Weekly column, so it must not take one of the N slots.
+                fiscal_week = fiscal_week.filter(
+                    F.col("week_end_date") <= F.lit(last_saturday_on_or_before(settings["REPORT_END_DATE"]))
+                )
+            fw_pd = fiscal_week.select("Year_Week", "week_start_date").toPandas()
             recent = set(fw_pd.sort_values("week_start_date", ascending=False).head(n)["Year_Week"].tolist())
         else:
             all_periods = sorted(chunk["period"].unique(), reverse=True)
@@ -219,7 +267,9 @@ def _filter_frames_for_dimension(
 
 def build_kpi_long(ctx: KPIContext, frames: Dict[str, DataFrame]) -> pd.DataFrame:
     """Build kpi_long for every (root, cut) combination across annual/quarter/half/monthly/weekly/ytd periods
-    (half only when fiscal_calendar.half_periods is on).
+    (half only when fiscal_calendar.half_periods is on). With report_end="latest_day" the annual,
+    quarter, half, monthly and weekly rows are complete periods only and ytd runs to the latest day
+    (see _period_frames).
 
     Roots: "overall" (no restriction, always first) plus one per ctx.root_definitions entry (e.g.
     "nvrout", "comp") -- each restricts the population to rows where that dimension_source's

@@ -262,10 +262,43 @@ _BLOCKED_DAY_METRICS = (
 )
 
 
+# Inventory metric -> (store gate, DC gate): the inventory_git.metrics names that decide whether its
+# store part / DC part counts goods in transit (None = the metric has no such part).
+_GIT_METRIC_GATES: Dict[str, Tuple[Optional[str], Optional[str]]] = {
+    "total_inventory": ("total_inventory", None),
+    "mean_stock": ("mean_stock", None),
+    "mean_stock_retail": ("mean_stock", None),
+    "mean_stock_cost": ("mean_stock", None),
+    "WOS": ("wos", None),
+    "wos_revenue": ("wos", None),
+    "wos_cost": ("wos", None),
+    "inventory_turnover_rate": ("inventory_turnover_rate", None),
+    "dc_mean_stock": (None, "dc_mean_stock"),
+    "total_mean_stock": ("mean_stock", "dc_mean_stock"),
+    "WOS_DC": (None, "wos_dc"),
+    "WOS_TOTAL": ("wos", "wos_dc"),
+}
+
+
+def _git_note(store_gate: Optional[str], dc_gate: Optional[str], on: set) -> str:
+    """Definition sentence for a metric whose store / DC part counts goods in transit (empty when neither does)."""
+    included = [label for label, gate in (("store", store_gate), ("DC", dc_gate)) if gate is not None and gate in on]
+    if not included:
+        return ""
+    if len(included) == 2 or store_gate is None or dc_gate is None:
+        return f" Inventory counts {' and '.join(included)} goods in transit on top of on-hand."
+    return f" The {included[0]} part counts goods in transit on top of on-hand; the other part is on-hand only."
+
+
+def _last_saturday(day: datetime.date) -> datetime.date:
+    return day - datetime.timedelta(days=(day.weekday() + 2) % 7)
+
+
 def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
     """Definition overrides that depend on the run's settings: the daily in-stock method
-    (instock_daily), the blocked-days note on the daily-data metrics (blocked_scope) and the DC
-    goods-in-transit / DC blocked-days notes on DC In-Stock Rate (dc_instock)."""
+    (instock_daily), the blocked-days note on the daily-data metrics (blocked_scope), the goods-in-transit
+    notes on the inventory metrics (inventory_git), the lost-sales period and WOS part-week notes (report_end
+    "latest_day") and the DC goods-in-transit / DC blocked-days notes on DC In-Stock Rate (dc_instock)."""
     out: Dict[str, Dict[str, str]] = {}
     if settings["BLOCKED_SCOPE"]["path"] is not None:
         for metric in _BLOCKED_DAY_METRICS:
@@ -273,6 +306,38 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
             out[metric] = {
                 **base,
                 "definition": base["definition"] + " Days blocked in the UI blocked scope are excluded.",
+            }
+    if settings["BLOCKED_SCOPE"]["dc_solution_id"] is not None:
+        for metric in ("dc_mean_stock", "total_mean_stock", "WOS_DC", "WOS_TOTAL"):
+            base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
+            out[metric] = {
+                **base,
+                "definition": base["definition"] + " DC days blocked in the UI DC blocked scope are excluded.",
+            }
+    git_metrics = set(settings["INVENTORY_GIT"]["metrics"])
+    for metric, (store_gate, dc_gate) in _GIT_METRIC_GATES.items():
+        note = _git_note(store_gate, dc_gate, git_metrics)
+        if note:
+            base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
+            out[metric] = {**base, "definition": base["definition"] + note}
+    if settings["REPORT_END_MODE"] == "latest_day":
+        last_saturday = _last_saturday(settings["REPORT_END_DATE"])
+        base = DEFAULT_METRIC_DEFINITIONS["lost_sales_pct"]
+        out["lost_sales_pct"] = {
+            **base,
+            "definition": base["definition"]
+            + f" Lost sales only has data through the last complete Saturday ({last_saturday}): every tab uses "
+            "whole weeks up to it, and YTD uses weeks 1 to that Saturday's fiscal week of every year, so the "
+            "days after it never dilute the rate.",
+        }
+        # YTD stops on the latest day, mid-week: its last fiscal week counts only the days it covers.
+        for metric in ("WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL"):
+            base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
+            out[metric] = {
+                **base,
+                "definition": base["definition"]
+                + " In YTD, which ends on the latest day, the last fiscal week counts only its elapsed days: "
+                "its average inventory is weighted by elapsed days / 7.",
             }
     cfg = settings["INSTOCK_DAILY"]
     if cfg["enabled"]:
@@ -302,7 +367,7 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
         dc_notes = []
         if settings["DC_INSTOCK_GIT_DATE_SHIFT_DAYS"] is not None:
             dc_notes.append("A day with goods in transit to the DC also counts as stocked.")
-        if settings["DC_INSTOCK_BLOCKED_SCOPE_SOLUTION_ID"] is not None:
+        if settings["BLOCKED_SCOPE"]["dc_solution_id"] is not None:
             dc_notes.append("Days blocked in the UI DC blocked scope are excluded.")
         if dc_notes:
             base = DEFAULT_METRIC_DEFINITIONS["dc_in_stock_rate"]
@@ -1543,6 +1608,17 @@ def _report_info_html(
         scope_mode = "Operation scope"
     else:
         scope_mode = "Defined only"
+    period_basis_card = ""
+    if settings["REPORT_END_MODE"] == "latest_day":
+        period_basis = (
+            f"YTD to {report_end} (same fiscal day every year); other tabs: complete periods only; "
+            f"lost sales through {_last_saturday(settings['REPORT_END_DATE'])}"
+        )
+        period_basis_card = f"""
+      <div class="meta-card">
+        <span class="meta-label">Period basis</span>
+        <span class="meta-value">{_esc(period_basis)}</span>
+      </div>"""
     slice_dims = inferred_dimensions or active_slice_dimensions or settings.get("SLICE_DIMENSIONS") or []
     slice_labels = ", ".join(
         _tab_label(_dim_label(d, settings["HTML_REPORT_DIMENSION_LABELS"])) for d in slice_dims if d != "overall"
@@ -1563,7 +1639,7 @@ def _report_info_html(
       <div class="meta-card">
         <span class="meta-label">Reporting window</span>
         <span class="meta-value">{_esc(str(report_start))} – {_esc(str(report_end))}</span>
-      </div>
+      </div>{period_basis_card}
       <div class="meta-card">
         <span class="meta-label">Client</span>
         <span class="meta-value">{_esc(str(customer))}</span>

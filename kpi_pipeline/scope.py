@@ -161,8 +161,9 @@ def build_blocked_days(ctx: KPIContext) -> None:
 
 
 def build_dc_blocked_days(ctx: KPIContext) -> None:
-    """Build ctx.dc_blocked_days: the (product_id, warehouse_id, date) days removed from
-    dc_in_stock_rate (None unless dc_instock.enabled and dc_instock.blocked_scope_solution_id is set).
+    """Build ctx.dc_blocked_days: the (product_id, warehouse_id, date) days removed from every DC metric
+    (dc_mean_stock, WOS_DC, the DC part of WOS_TOTAL / total_mean_stock, dc_in_stock_rate), like the
+    store blocks on the store metrics (None unless blocked_scope.dc_solution_id is set).
 
     The DC solution's operation/scope run (same run_date, roll-up, active filter and earliest
     scope_start as the store scope, location = warehouse) gives each DC pair its scope_start; blocks of
@@ -173,8 +174,8 @@ def build_dc_blocked_days(ctx: KPIContext) -> None:
         ctx.dc_blocked_days.unpersist()
     ctx.dc_blocked_days = None
     s = ctx.settings
-    solution_id = s["DC_INSTOCK_BLOCKED_SCOPE_SOLUTION_ID"]
-    if not s["DC_INSTOCK_ENABLED"] or solution_id is None:
+    solution_id = s["BLOCKED_SCOPE"]["dc_solution_id"]
+    if solution_id is None:
         return
     dc_pairs = _scope_start_pairs(ctx, solution_id, "warehouse_id")
     ctx.dc_blocked_days = _applied_block_days(

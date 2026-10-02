@@ -3,6 +3,11 @@
 YoY compares the latest two full years present. YTD compares each year's elapsed
 (fully-closed-months) window against the prior year's same window, chained across every
 consecutive pair of years present (e.g. also 2025 YTD vs 2024 YTD if a third year exists).
+
+Both read kpi_long's annual / ytd rows, so they follow reporting_window.report_end. With "latest_day"
+the annual rows are complete fiscal years only (YoY compares the latest two complete years; the current
+fiscal year is in YTD only) and the ytd rows are the same fiscal day for every year (days 1..K of the
+fiscal year, K = day of the fiscal year of REPORT_END_DATE; see kpi_long._period_frames).
 """
 
 from __future__ import annotations
@@ -217,7 +222,8 @@ def ytd_comparison_long(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Each year's elapsed (fully-closed-months) window vs the prior year's same window,
     chained across every consecutive pair of years present (2026 YTD vs 2025 YTD, 2025 YTD vs
-    2024 YTD, ...). A single-year window produces no comparison."""
+    2024 YTD, ...). A single-year window produces no comparison. With report_end="latest_day" the
+    window is the same fiscal day for every year (days 1..K), not closed months."""
     pairs_with_display: List[Tuple[Any, pd.DataFrame, pd.DataFrame]] = []
     for prior, current in _consecutive_year_pairs(ytd):
         prior_label, current_label = f"{int(prior['Year'])} YTD", f"{int(current['Year'])} YTD"
@@ -343,12 +349,18 @@ def slice_comparison_view(comparison_df: pd.DataFrame, dimension: str, root: str
 
 
 def build_scope_diff(ctx: KPIContext) -> None:
-    """Annual key-metric diff: defined-only scope vs score-only scope (hybrid sanity check)."""
+    """Annual key-metric diff: defined-only scope vs score-only scope (hybrid sanity check). Its years are
+    the Annual tab's: with report_end="latest_day" complete fiscal years only (kpi_long._period_frames)."""
+    from kpi_pipeline.kpi_long import _period_frames
     from kpi_pipeline.metrics import build_kpi_table
 
     scope_diff_metrics = ctx.settings["SCOPE_DIFF_METRICS"]
-    defined_annual = build_kpi_table(ctx, ctx.defined_frames, "Year", [])[["Year"] + scope_diff_metrics]
-    score_annual = build_kpi_table(ctx, ctx.score_frames, "Year", [])[["Year"] + scope_diff_metrics]
+    defined_annual = build_kpi_table(ctx, _period_frames(ctx, ctx.defined_frames, "annual"), "Year", [])[
+        ["Year"] + scope_diff_metrics
+    ]
+    score_annual = build_kpi_table(ctx, _period_frames(ctx, ctx.score_frames, "annual"), "Year", [])[
+        ["Year"] + scope_diff_metrics
+    ]
     merged = defined_annual.merge(score_annual, on="Year", suffixes=("_defined", "_score"))
     records = []
     for _, r in merged.iterrows():

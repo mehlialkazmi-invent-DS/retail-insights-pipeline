@@ -5,11 +5,17 @@ metrics over only the pairs present in EVERY qualifying year for that kind -- no
 years of a given link -- then compares each consecutive-year link within that shared population:
 
   ytd     — pairs present in every window year, compared on each year's elapsed (fully-closed-
-            months) window, chained across every consecutive pair of years.
+            months) window, chained across every consecutive pair of years. With
+            reporting_window.report_end="latest_day" the window is instead the same fiscal day for
+            every year (days 1..K of the fiscal year, K = day of the fiscal year of REPORT_END_DATE)
+            and only years whose days 1..K are all inside the report window qualify (ctx.ytd_years,
+            applied by kpi_long._period_frames).
   yoy     — pairs present in every window year, compared on the full window year (including a
             partial first/last year, same accepted behaviour as the regular non-comparable
             Annual/YoY tab), chained across every consecutive pair of years (not just the latest
-            two, unlike the regular non-comparable YoY comparison in comparisons.py).
+            two, unlike the regular non-comparable YoY comparison in comparisons.py). With
+            report_end="latest_day" only complete fiscal years are on the Annual frames, so only
+            complete fiscal years qualify.
   quarter — computed independently PER QUARTER NUMBER: for quarter Q, only years where Q falls
             entirely inside the report window count (see _complete_period_years -- a partial
             quarter at either window boundary is excluded outright, since REPORT_END_DATE is a
@@ -325,7 +331,12 @@ def _build_comparable_kind(
 
     The store-side universe's keys come from comparable_pairs.grain, resolved ONCE here and
     threaded through _intersect_years/_restrict_frames. comparable_pair_count therefore counts
-    common pairs under grain="product_store" and common PRODUCTS under grain="product"."""
+    common pairs under grain="product_store" and common PRODUCTS under grain="product".
+
+    The years come from kpi_long._period_frames' frames for this kind's period type, so they follow
+    the report_end mode: with "latest_day" the ytd kind's years are ctx.ytd_years (same-fiscal-day
+    windows), the yoy kind's are complete fiscal years, and the quarter / half kinds' are the years
+    whose quarter / half is complete (_complete_period_years)."""
     period_type, _, _ = _KIND_CTX_ATTRS[comparison_type]
     pair_keys = _GRAIN_PAIR_KEYS[ctx.settings["COMPARABLE_PAIRS_GRAIN"]]
     numbered = _NUMBERED_KINDS.get(comparison_type)
@@ -335,8 +346,10 @@ def _build_comparable_kind(
     def _in_number(frame: DataFrame) -> DataFrame:
         return frame.filter(F.col(numbered.number_col) == number) if numbered else frame
 
-    scoped_daily_pop = _in_number(pf["scoped_daily"])
-    dc_daily_pop = _in_number(pf["dc_daily"])
+    # The pair / year universe comes from real daily-data rows only: a goods-in-transit-only day
+    # (inventory_git) never makes a pair "present" in a year.
+    scoped_daily_pop = _in_number(pf["scoped_daily"]).filter(F.col("has_daily_row"))
+    dc_daily_pop = _in_number(pf["dc_daily"]).filter(F.col("has_inventory_row"))
     dc_inst_pop = _in_number(pf["dc_inst"])
 
     years = sorted(r["Year"] for r in scoped_daily_pop.select("Year").distinct().collect())

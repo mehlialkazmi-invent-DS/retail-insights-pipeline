@@ -342,6 +342,42 @@ def get_daily_data_raw(ctx) -> DataFrame:
     return ctx.daily_data_raw
 
 
+def get_daily_data_excluded_days(ctx) -> DataFrame:
+    """Cached distinct (product_id, store_id, date) days in the report window on which
+    input_filters.daily_data removes a daily-data row (a row failing, or null on, any filter
+    expression), rolled to the family main like get_daily_data_raw. Empty when daily_data has no filters.
+
+    build_scoped_daily uses it to drop goods-in-transit-only days whose daily row was filtered out
+    (e.g. unusable days, usable = 1) instead of letting them re-enter as zero-sales inventory days.
+    Scope-independent, so it is built once per run and shared by every scope variant. The expressions
+    run on the raw product_id before the roll-up, as in read_daily_data_source.
+    """
+    if ctx.daily_data_excluded_days is None:
+        s = ctx.settings
+        date_col = s["DAILY_TIME_COLUMNS"]["date"]
+        start = s["EFFECTIVE_REPORT_START_DATE"]
+        day_after_end = s["REPORT_END_DATE"] + datetime.timedelta(days=1)
+        kept = F.lit(True)
+        for expr in _input_filters(s, "daily_data"):
+            if expr.strip():
+                kept = kept & F.expr(expr)
+        removed = (
+            ctx.spark.read.format("delta")
+            .load(s["PATH_DAILY_DATA"])
+            .filter(
+                (F.col(date_col) >= F.lit(start.isoformat())) & (F.col(date_col) < F.lit(day_after_end.isoformat()))
+            )
+            .filter(~F.coalesce(kept, F.lit(False)))
+            .select("product_id", "store_id", F.to_date(F.col(date_col)).alias("date"))
+        )
+        if s["ITEM_FAMILY_ROLLUP"]["daily_data"]:
+            from kpi_pipeline.pipeline import _roll_to_item_family_parent
+
+            removed = _roll_to_item_family_parent(removed, ctx)
+        ctx.daily_data_excluded_days = removed.distinct().cache()
+    return ctx.daily_data_excluded_days
+
+
 def read_inventory_warehouse_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
     """DC/warehouse daily inventory table -- plain product_id/warehouse_id/date/inventory
     columns, no column-mapping needed (unlike lost_sales_source/instock_source)."""

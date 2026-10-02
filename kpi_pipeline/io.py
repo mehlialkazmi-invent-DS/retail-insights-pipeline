@@ -6,6 +6,11 @@ Output layout per table::
 
 ``OUTPUT_RUN_DATE`` defaults to ``reporting_window.as_of_date`` (override via ``output.run_date``).
 
+With reporting_window.report_end="latest_day", YTD rows (period_type "ytd" in kpi_long and in
+comparable_kpi_long) describe a window that moves with every as_of_date (YTD to the latest day), so an
+incremental merge always replaces an existing YTD row with the new run's, whatever
+``allow_overwrite_existing`` says; every other period type is a complete period and merges as usual.
+
 Incremental merge reads the **latest existing run_date partition on or before** the run being
 written — not the partition being written — so weekly runs (whose ``run_date`` advances with
 ``as_of_date``) accumulate history instead of writing isolated single-window snapshots. Each
@@ -232,11 +237,25 @@ def _drop_keys(pdf: pd.DataFrame, key_cols: Sequence[str], keys: Iterable[Tuple]
     return pdf[~mask].copy()
 
 
+# Tables whose period_type column holds the YTD rows that report_end="latest_day" always replaces.
+_YTD_ROW_TABLES: Tuple[str, ...] = ("kpi_long", "comparable_kpi_long")
+
+
+def _always_overwrite_period_types(ctx: KPIContext, name: str) -> Tuple[str, ...]:
+    """period_type values of table ``name`` an incremental merge replaces even without
+    allow_overwrite_existing: "ytd" under report_end="latest_day" (its window moves with as_of_date),
+    none otherwise."""
+    if ctx.settings["REPORT_END_MODE"] == "latest_day" and name in _YTD_ROW_TABLES:
+        return ("ytd",)
+    return ()
+
+
 def merge_table_incremental(
     existing: pd.DataFrame,
     new: pd.DataFrame,
     key_cols: Sequence[str],
     allow_overwrite_existing: bool,
+    always_overwrite_period_types: Sequence[str] = (),
 ) -> Tuple[pd.DataFrame, TableSavePlan]:
     plan = TableSavePlan(
         name="",
@@ -269,11 +288,16 @@ def merge_table_incremental(
 
     if overlap_keys:
         if allow_overwrite_existing:
-            merged = _drop_keys(merged, key_cols, overlap_keys)
-            merged = pd.concat([merged, overlap_df], ignore_index=True)
-            plan.overwrite_rows = len(overlap_df)
+            overwrite_df = overlap_df
+        elif always_overwrite_period_types:
+            overwrite_df = overlap_df[overlap_df["period_type"].isin(always_overwrite_period_types)]
         else:
-            plan.skipped_rows = len(overlap_df)
+            overwrite_df = overlap_df.iloc[0:0]
+        if not overwrite_df.empty:
+            merged = _drop_keys(merged, key_cols, _row_tuples(overwrite_df, key_cols))
+            merged = pd.concat([merged, overwrite_df], ignore_index=True)
+        plan.overwrite_rows = len(overwrite_df)
+        plan.skipped_rows = len(overlap_df) - len(overwrite_df)
 
     return merged, plan
 
@@ -382,7 +406,9 @@ def build_save_plan(ctx: KPIContext, fund_paste) -> SavePlan:
             if source_run_date
             else pd.DataFrame()
         )
-        _, table_plan = merge_table_incremental(existing, pdf, key_cols, allow_overwrite)
+        _, table_plan = merge_table_incremental(
+            existing, pdf, key_cols, allow_overwrite, _always_overwrite_period_types(ctx, name)
+        )
         table_plan.name = name
         table_plan.path = path
         table_plan.merge_source_run_date = source_run_date
@@ -460,7 +486,9 @@ def save_pandas_table(
             if source_run_date
             else pd.DataFrame()
         )
-        merged, table_plan = merge_table_incremental(existing, pdf, key_cols, allow_overwrite_existing)
+        merged, table_plan = merge_table_incremental(
+            existing, pdf, key_cols, allow_overwrite_existing, _always_overwrite_period_types(ctx, name)
+        )
         table_plan.name = name
         table_plan.path = path
         table_plan.merge_source_run_date = source_run_date
