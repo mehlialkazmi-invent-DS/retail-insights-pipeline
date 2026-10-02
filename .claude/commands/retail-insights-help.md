@@ -228,7 +228,7 @@ Inventory for the score filter is the **last available daily snapshot in the fis
 ```python
 "scope_source": {
     "mode": "defined_scope",   # "defined_scope" (default) | "operation_scope"
-    "solution_id": 21,         # also the solution of the blocked_scope snapshot (int, not bool)
+    "solution_id": 21,         # int or non-empty list of ints (not bool); also the blocked_scope solution(s)
     "run_date": None,          # Sunday "YYYY-MM-DD"; None = latest Sunday on or before TODAY
     "roll_to_family_main": True,
     "instock_main_eligible_only": False,  # True: in-stock only where the main itself is eligible
@@ -252,7 +252,7 @@ Inventory for the score filter is the **last available daily snapshot in the fis
 "blocked_scope": {
     "ui_parameters_path": None,        # path under the datastore root; None = OFF, set = ON
     "rule": "after_scope_start",       # or "all"
-    "dc_solution_id": None,            # int (not bool, e.g. 22; tbretail 22): DC blocks of that solution
+    "dc_solution_id": None,            # int or list of ints (tbretail 22): DC blocks of those solutions
     "kinds": ["product", "product_destination", "destination"],  # store block folders read
     "dc_kinds": ["product", "product_destination"],  # DC block folders read
     "metrics": "all",                  # "all" or a list from METRICS_ALL: the metrics that DROP blocked days

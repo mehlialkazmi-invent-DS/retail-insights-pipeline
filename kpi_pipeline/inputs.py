@@ -404,7 +404,7 @@ def get_item_family_raw(ctx) -> DataFrame:
 
 
 def read_operation_scope_source(
-    spark: SparkSession, settings: Dict[str, Any], run_date, solution_id: int, location_col: str
+    spark: SparkSession, settings: Dict[str, Any], run_date, solution_ids: List[int], location_col: str
 ) -> DataFrame:
     """Platform scope table (operation/scope): one solution's rows for one run_date that are still
     open on it (end_date null or >= run_date), as (product_id, <location_col>, start_date).
@@ -414,16 +414,16 @@ def read_operation_scope_source(
     not silently produce an empty report.
     """
     path = settings["PATH_SCOPE"]
-    print(f"reading operation scope: {path} (solution_id={solution_id}, run_date={run_date})")
+    print(f"reading operation scope: {path} (solution_id in {solution_ids}, run_date={run_date})")
     rows = (
         spark.read.format("delta").load(path)
-        .filter((F.col("solution_id") == solution_id) & (F.col("run_date") == F.lit(run_date)))
+        .filter(F.col("solution_id").isin(solution_ids) & (F.col("run_date") == F.lit(run_date)))
         .filter(F.col("end_date").isNull() | (F.col("end_date") >= F.lit(run_date)))
         .select("product_id", F.col("location_id").alias(location_col), F.to_date("start_date").alias("start_date"))
     )
     if rows.limit(1).count() == 0:
         raise ValueError(
-            f"No operation scope rows for solution_id={solution_id} run_date={run_date} at {path}; "
+            f"No operation scope rows for solution_id in {solution_ids} run_date={run_date} at {path}; "
             "check the solution_id setting and scope_source.run_date."
         )
     return rows
@@ -453,7 +453,7 @@ def blocked_scope_keys(kind: str, location_col: str) -> List[str]:
 
 
 def read_blocked_scope_source(
-    spark: SparkSession, folder: str, solution_id: int, kind: str, location_col: str
+    spark: SparkSession, folder: str, solution_ids: List[int], kind: str, location_col: str
 ) -> DataFrame:
     """One kind of a UI blocked-scope snapshot folder ({ui_parameters_path}/blocked_scope or
     {ui_parameters_path}/dc_blocked_scope, then /{kind}) for one solution, as
@@ -461,10 +461,10 @@ def read_blocked_scope_source(
     when the folder is missing.
     """
     path = f"{folder}/{kind}"
-    print(f"reading blocked scope {kind} (solution_id={solution_id}): {path}")
+    print(f"reading blocked scope {kind} (solution_id in {solution_ids}): {path}")
     blocks = (
         spark.read.parquet(path)
-        .filter(F.col("solution_id") == solution_id)
+        .filter(F.col("solution_id").isin(solution_ids))
         .select(
             *[
                 F.col(source).cast("int").alias(key)

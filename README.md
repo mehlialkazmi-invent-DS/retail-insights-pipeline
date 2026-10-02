@@ -960,7 +960,7 @@ Chooses the table that defines the scope universe. Default `"defined_scope"` kee
 ```python
 "scope_source": {
     "mode": "operation_scope",   # "defined_scope" | "operation_scope"
-    "solution_id": 21,           # also the solution of the blocked_scope snapshot
+    "solution_id": 21,           # int or list of ints (e.g. [21, 24]); also the blocked_scope solution(s)
     "run_date": None,            # Sunday "YYYY-MM-DD"; None = latest Sunday on or before today
     "roll_to_family_main": True,
     "instock_main_eligible_only": False,  # True: in-stock only where the main itself is eligible
@@ -987,7 +987,7 @@ UI-blocked days, applied per metric. Default off: it is on exactly when `ui_para
 "blocked_scope": {
     "ui_parameters_path": "ui-data/parameter_config/<timestamp>_<id>",  # under the datastore root; None = off
     "rule": "after_scope_start",   # or "all"
-    "dc_solution_id": None,        # int (not bool, e.g. 22): DC blocks of that solution
+    "dc_solution_id": None,        # int or list of ints (e.g. 22): DC blocks of those solutions
     "kinds": ["product", "product_destination", "destination"],  # store block folders read
     "dc_kinds": ["product", "product_destination"],  # DC block folders read
     "metrics": "all",              # "all" (every metric of METRICS_ALL) or a list of metric names

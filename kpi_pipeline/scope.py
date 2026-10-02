@@ -60,7 +60,7 @@ def _scope_run_date(ctx: KPIContext) -> datetime.date:
     return today - datetime.timedelta(days=(today.weekday() + 1) % 7)
 
 
-def _scope_start_pairs(ctx: KPIContext, solution_id: int, location_col: str) -> DataFrame:
+def _scope_start_pairs(ctx: KPIContext, solution_ids: List[int], location_col: str) -> DataFrame:
     """(product_id, <location_col>, scope_start) from one solution's operation/scope run.
 
     roll_to_family_main: every row is rolled to its family main (a product without a main keeps its
@@ -71,7 +71,7 @@ def _scope_start_pairs(ctx: KPIContext, solution_id: int, location_col: str) -> 
     are dropped.
     """
     cfg = ctx.settings["SCOPE_SOURCE"]
-    rows = read_operation_scope_source(ctx.spark, ctx.settings, _scope_run_date(ctx), solution_id, location_col)
+    rows = read_operation_scope_source(ctx.spark, ctx.settings, _scope_run_date(ctx), solution_ids, location_col)
     rows = rows.withColumn("scope_product_id", F.col("product_id"))
     if cfg["roll_to_family_main"]:
         from kpi_pipeline.pipeline import _roll_to_item_family_parent
@@ -84,7 +84,7 @@ def _scope_start_pairs(ctx: KPIContext, solution_id: int, location_col: str) -> 
     if cfg["active_only"]:
         pairs = pairs.join(read_active_product_ids(ctx.spark, ctx.settings), on="product_id", how="inner")
     if pairs.filter(F.col("scope_start").isNull()).limit(1).count() > 0:
-        raise ValueError(f"operation scope rows without start_date (solution_id={solution_id})")
+        raise ValueError(f"operation scope rows without start_date (solution_id in {solution_ids})")
     return pairs
 
 
@@ -108,7 +108,7 @@ def _operation_scope_pairs(ctx: KPIContext) -> DataFrame:
 
 
 def _applied_block_days(
-    ctx: KPIContext, pairs: DataFrame, location_col: str, folder: str, solution_id: int, kinds: List[str]
+    ctx: KPIContext, pairs: DataFrame, location_col: str, folder: str, solution_ids: List[int], kinds: List[str]
 ) -> DataFrame:
     """(product_id, <location_col>, date) days covered by one UI blocked-scope snapshot folder.
 
@@ -127,7 +127,7 @@ def _applied_block_days(
         DataFrame.unionByName,
         [
             pairs.join(
-                read_blocked_scope_source(ctx.spark, folder, solution_id, kind, location_col),
+                read_blocked_scope_source(ctx.spark, folder, solution_ids, kind, location_col),
                 on=blocked_scope_keys(kind, location_col),
                 how="inner",
             ).select("product_id", location_col, "scope_start", "block_start", "block_end")
@@ -181,12 +181,12 @@ def build_dc_blocked_days(ctx: KPIContext) -> None:
         ctx.dc_blocked_days.unpersist()
     ctx.dc_blocked_days = None
     s = ctx.settings
-    solution_id = s["BLOCKED_SCOPE"]["dc_solution_id"]
-    if solution_id is None:
+    solution_ids = s["BLOCKED_SCOPE"]["dc_solution_id"]
+    if solution_ids is None:
         return
-    dc_pairs = _scope_start_pairs(ctx, solution_id, "warehouse_id")
+    dc_pairs = _scope_start_pairs(ctx, solution_ids, "warehouse_id")
     ctx.dc_blocked_days = _applied_block_days(
-        ctx, dc_pairs, "warehouse_id", s["BLOCKED_SCOPE"]["dc_path"], solution_id, s["BLOCKED_SCOPE"]["dc_kinds"]
+        ctx, dc_pairs, "warehouse_id", s["BLOCKED_SCOPE"]["dc_path"], solution_ids, s["BLOCKED_SCOPE"]["dc_kinds"]
     ).cache()
     print(
         f"DC blocked scope rule={s['BLOCKED_SCOPE']['rule']} | blocked DC pair-days in window: "

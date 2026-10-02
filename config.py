@@ -14,7 +14,7 @@
 import copy
 import datetime
 import os
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 # Period-over-period comparison kinds, in canonical order.
 COMPARISON_KINDS_ALL = ("yoy", "ytd")
@@ -213,7 +213,7 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     "scope_source": {
         "mode": "defined_scope",  # "defined_scope" | "operation_scope"
-        "solution_id": 21,  # operation scope solution; also the blocked_scope solution
+        "solution_id": 21,  # operation scope solution(s): an int or a list; also the blocked_scope solution(s)
         "run_date": None,  # "YYYY-MM-DD" Sunday; None = latest Sunday on or before today
         "roll_to_family_main": True,
         "active_only": True,
@@ -230,7 +230,7 @@ CONFIG: Dict[str, Any] = {
     "blocked_scope": {
         "ui_parameters_path": None,  # path under the datastore root; None = blocked scope off
         "rule": "after_scope_start",  # or "all"
-        "dc_solution_id": None,  # None = no DC blocks; an integer is the DC solution
+        "dc_solution_id": None,  # None = no DC blocks; an int or a list of DC solutions
         "kinds": ["product", "product_destination", "destination"],  # store block folders read
         "dc_kinds": ["product", "product_destination"],  # DC block folders read (no destination folder)
         "metrics": "all",  # metrics that drop blocked days: "all" or a list from METRICS_ALL
@@ -386,6 +386,14 @@ CONFIG: Dict[str, Any] = {
         "dimension_labels": {},  # slice dimension -> tab label, e.g. {"brand": "Banner"}
     },
 }
+
+
+def _solution_ids(raw: Any, key: str) -> List[int]:
+    """One solution id or a non-empty list of them, as a list of ints (bool rejected)."""
+    ids = list(raw) if isinstance(raw, (list, tuple)) else [raw]
+    if not ids or any(type(i) is not int for i in ids):
+        raise ValueError(f"{key} must be an integer or a non-empty list of integers; got {raw!r}")
+    return ids
 
 
 def _parse_bool(raw: str) -> bool:
@@ -849,7 +857,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     scope_source_run_date = scope_source_cfg["run_date"]
     scope_source = {
         "mode": scope_source_cfg["mode"],
-        "solution_id": scope_source_cfg["solution_id"],
+        "solution_id": _solution_ids(scope_source_cfg["solution_id"], "scope_source.solution_id"),
         "run_date": (
             datetime.date.fromisoformat(scope_source_run_date) if scope_source_run_date else None
         ),
@@ -862,8 +870,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         raise ValueError(
             f"scope_source.mode must be 'defined_scope' or 'operation_scope'; got {scope_source['mode']!r}"
         )
-    if type(scope_source["solution_id"]) is not int:
-        raise ValueError("scope_source.solution_id must be an integer")
     if scope_source["run_date"] is not None and scope_source["run_date"].weekday() != 6:
         raise ValueError(f"scope_source.run_date must be a Sunday; got {scope_source['run_date']}")
     operation_scope_mode = scope_source["mode"] == "operation_scope"
@@ -902,7 +908,11 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             f"allowed: {list(METRICS_ALL)} or 'all'"
         )
     blocked_scope["metrics"] = [m for m in METRICS_ALL if m in blocked_requested]
-    blocked_scope["dc_solution_id"] = blocked_scope_cfg["dc_solution_id"]
+    blocked_scope["dc_solution_id"] = (
+        _solution_ids(blocked_scope_cfg["dc_solution_id"], "blocked_scope.dc_solution_id")
+        if blocked_scope_cfg["dc_solution_id"] is not None
+        else None
+    )
     for key in ("kinds", "dc_kinds"):
         kinds = list(blocked_scope_cfg[key])
         unknown_kinds = sorted(set(kinds) - {"product", "product_destination", "destination"})
@@ -913,8 +923,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             )
         blocked_scope[key] = kinds
     if blocked_scope["dc_solution_id"] is not None:
-        if type(blocked_scope["dc_solution_id"]) is not int:
-            raise ValueError("blocked_scope.dc_solution_id must be an integer or None")
         if blocked_scope["path"] is None:
             raise ValueError("blocked_scope.dc_solution_id requires blocked_scope.ui_parameters_path")
 
