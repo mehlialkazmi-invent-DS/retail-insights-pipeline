@@ -66,16 +66,22 @@ def _scope_start_pairs(ctx: KPIContext, solution_id: int, location_col: str) -> 
 
     roll_to_family_main: every row is rolled to its family main (a product without a main keeps its
     own product_id), so a location where only a sub-item is in scope gets the main. A pair with
-    several rows (the main's and its sub-items') keeps the EARLIEST start_date as scope_start.
-    active_only: pairs of inactive products are dropped.
+    several rows (the main's and its sub-items') keeps the EARLIEST start_date as scope_start, and
+    main_eligible says whether the main itself (a row of its own product_id, not only a sub-item's) is
+    in scope there (scope_source.instock_main_eligible_only). active_only: pairs of inactive products
+    are dropped.
     """
     cfg = ctx.settings["SCOPE_SOURCE"]
     rows = read_operation_scope_source(ctx.spark, ctx.settings, _scope_run_date(ctx), solution_id, location_col)
+    rows = rows.withColumn("scope_product_id", F.col("product_id"))
     if cfg["roll_to_family_main"]:
         from kpi_pipeline.pipeline import _roll_to_item_family_parent
 
         rows = _roll_to_item_family_parent(rows, ctx)
-    pairs = rows.groupBy("product_id", location_col).agg(F.min("start_date").alias("scope_start"))
+    pairs = rows.groupBy("product_id", location_col).agg(
+        F.min("start_date").alias("scope_start"),
+        F.max(F.col("product_id") == F.col("scope_product_id")).alias("main_eligible"),
+    )
     if cfg["active_only"]:
         pairs = pairs.join(read_active_product_ids(ctx.spark, ctx.settings), on="product_id", how="inner")
     if pairs.filter(F.col("scope_start").isNull()).limit(1).count() > 0:

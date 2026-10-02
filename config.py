@@ -217,6 +217,9 @@ CONFIG: Dict[str, Any] = {
         "run_date": None,  # "YYYY-MM-DD" Sunday; None = latest Sunday on or before today
         "roll_to_family_main": True,
         "active_only": True,
+        # In-stock only at stores where the main item itself is eligible (sub-only stores stay in every
+        # other metric). Needs roll_to_family_main and instock.method "daily".
+        "instock_main_eligible_only": False,
     },
     # ---------------------------------------------------------------------------
     # BLOCKED SCOPE -- UI blocked days (README: blocked_scope). Needs scope_source "operation_scope".
@@ -847,6 +850,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         ),
         "roll_to_family_main": bool(scope_source_cfg["roll_to_family_main"]),
         "active_only": bool(scope_source_cfg["active_only"]),
+        "instock_main_eligible_only": bool(scope_source_cfg["instock_main_eligible_only"]),
     }
     if scope_source["mode"] not in ("defined_scope", "operation_scope"):
         raise ValueError(
@@ -930,6 +934,13 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             )
         if daily_instock["count_start"] == "first_daily_row" and not daily_instock["require_daily_data"]:
             raise ValueError("instock.daily.count_start='first_daily_row' requires require_daily_data=True")
+    if scope_source["instock_main_eligible_only"] and not (
+        operation_scope_mode and scope_source["roll_to_family_main"] and instock_method == "daily"
+    ):
+        raise ValueError(
+            "scope_source.instock_main_eligible_only requires scope_source.mode='operation_scope', "
+            "roll_to_family_main=True and instock.method='daily'"
+        )
     if report_end_mode == "latest_day" and instock_method != "daily":
         raise ValueError(
             "reporting_window.report_end='latest_day' requires instock.method='daily': the YTD cut at the "

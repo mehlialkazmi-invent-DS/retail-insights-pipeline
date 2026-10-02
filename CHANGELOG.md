@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `instock.method` + `instock.daily` / `instock.weekly_source`, and "blocked days removed" as flagged and
 > removed per `blocked_scope.metrics` (see "Config simplification" and "Per-metric blocked scope gate").
 
+#### In-stock only where the main item is eligible (`scope_source.instock_main_eligible_only`)
+
+Client rule for supersessions: a store where only the superseded (sub) item is eligible, not the main, was
+intentionally not assorted the new item, so it leaves in-stock (and weighted in-stock); it stays in sales,
+revenue, inventory, WOS, turnover and lost sales so all volume and inventory is captured. The pair's start
+stays the earliest start of the main and sub rows. `_scope_start_pairs` adds `main_eligible`;
+`build_instock_daily` drops the operation-scope pairs without it (scope additions are kept). Requires
+operation scope, `roll_to_family_main` and `instock.method="daily"`. tbretail `True`, generic `False`.
+
+**Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/{scope,pipeline,html_report}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-02
+
 #### Comparable pairs: `comparable_pairs.pair_days`
 
 `comparable_pairs.pair_days` (`"unblocked"` | `"all"`, required) chooses whether blocked days make a pair

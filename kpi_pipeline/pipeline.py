@@ -447,6 +447,12 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
     fw = broadcast(_fiscal_week_parts(ctx))
 
     pairs = apply_input_filters(scope_pairs, cfg["input_filters"], "instock.daily.input_filters")
+    if s["SCOPE_SOURCE"]["instock_main_eligible_only"]:
+        # Stores where only a superseded (sub) item is eligible, not the main: intentionally not assorted
+        # there, so left out of in-stock (client rule); they stay in every other metric. Scope additions
+        # are not operation-scope pairs and are kept.
+        sub_only = ctx.operation_scope_pairs.filter(~F.col("main_eligible")).select(*pair_keys)
+        pairs = pairs.join(sub_only, on=pair_keys, how="left_anti")
     daily = get_instock_daily_raw(ctx).join(pairs, on=pair_keys, how="left_semi")
     if blocked is not None:
         daily = daily.join(blocked, on=day_keys, how="left_anti")

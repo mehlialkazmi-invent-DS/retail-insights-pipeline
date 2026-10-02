@@ -347,6 +347,8 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
         store_scope = "All scoped stores"
         if cfg["input_filters"]:
             store_scope += " (input filter: " + " AND ".join(cfg["input_filters"]) + ")"
+        if settings["SCOPE_SOURCE"]["instock_main_eligible_only"]:
+            store_scope += "; only stores where the main (new) item itself is eligible"
         out["in_stock_rate"] = {
             "label": "In-Stock Rate",
             "definition": (

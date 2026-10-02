@@ -231,9 +231,12 @@ Inventory for the score filter is the **last available daily snapshot in the fis
     "solution_id": 21,         # also the solution of the blocked_scope snapshot (int, not bool)
     "run_date": None,          # Sunday "YYYY-MM-DD"; None = latest Sunday on or before TODAY
     "roll_to_family_main": True,
+    "instock_main_eligible_only": False,  # True: in-stock only where the main itself is eligible
     "active_only": True,
 }
 ```
+
+**`instock_main_eligible_only`** (tbretail `True`, generic `False`): in-stock (and weighted in-stock, which uses the same frame) counts only the stores where the main item itself is eligible — a store where only a superseded (sub) item is eligible was intentionally not assorted the new item, so it leaves in-stock (client rule). Those stores stay in every other metric (sales, revenue, inventory, WOS, turnover, lost sales), so all volume and inventory is captured. The pair's start is still the earliest start of the main and sub rows there. Built from `ctx.operation_scope_pairs.main_eligible` (`scope._scope_start_pairs`) and applied in `pipeline.build_instock_daily`; scope additions are not operation-scope pairs and are kept. Requires `mode = "operation_scope"`, `roll_to_family_main = True` and `instock.method = "daily"`.
 `operation_scope` builds the scope ONCE (`scope._operation_scope_pairs`) from `path_segments.scope` (`operation/scope`): the solution's rows for one `run_date` still open on it (`end_date` null or `>= run_date`), reduced to `(product_id, store_id)` (`scope._scope_start_pairs`, kept on `ctx.operation_scope_pairs`): with `roll_to_family_main`, every row is rolled to its family main (`coalesce(parent_id, product_id)`; a product without a main keeps its own id), so a store where only a sub-item is in scope gets the main, and each pair keeps its **earliest** `start_date` as `scope_start`; `active_only` keeps `is_active = true`. Every metric uses this one scope. Grain `product` or `product_store` only (`product_store_week` rejected; daily in-stock and blocked days need `product_store`); the `defined_scope` table is not read.
 - `scope_adjustments`, `input_filters.daily_data` and `metrics.population_filters` still apply; **`input_filters.defined_scope` does NOT** (it is only read in `defined_scope` mode).
 - `run_date=None` uses today's Sunday, not the as-of date — a backdated run is not reproducible; set `run_date` for backfills.
