@@ -676,7 +676,7 @@ def build_dc_daily(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
     full-outer-joined to the rows on (product_id, warehouse_id, date): a GIT-only day has inventory 0 and
     has_inventory_row False. The Year/Week attachment and the scope_core product-week restriction below
     then apply to both kinds of rows alike.
-    DC blocked days (ctx.dc_blocked_days, blocked_scope.dc_solution_id) then flag both kinds of rows
+    DC blocked days (ctx.dc_blocked_days, scope_source.dc_solution_id) then flag both kinds of rows
     (is_blocked), as blocked days do on the store side; the DC metrics named in blocked_scope.metrics read
     only the unblocked ones. report_end="latest_day" adds day_index, which the YTD cut filters on.
     """
@@ -788,7 +788,7 @@ def build_dc_inst(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
         ).withColumn("has_git", F.lit(True))
         grid = grid.join(git_days, on=day_keys, how="left")
         stocked = stocked | F.col("has_git").isNotNull()
-    # DC blocked days (blocked_scope.dc_solution_id) leave both stocked and available days only when
+    # DC blocked days (scope_source.dc_solution_id) leave both stocked and available days only when
     # dc_in_stock_rate is in blocked_scope.metrics.
     counted = ~F.col("is_blocked") if "dc_in_stock_rate" in s["BLOCKED_SCOPE"]["metrics"] else F.lit(True)
 

@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `instock.method` + `instock.daily` / `instock.weekly_source`, and "blocked days removed" as flagged and
 > removed per `blocked_scope.metrics` (see "Config simplification" and "Per-metric blocked scope gate").
 
+#### DC (network) scope named in config: `scope_source.dc_solution_id`
+
+`scope_source.dc_solution_id` (int, list or None; tbretail 22, generic None) replaces
+`blocked_scope.dc_solution_id`, so both scopes are read side by side in `scope_source` (21 stores, 22 DC).
+`scope.build_dc_scope` reads that solution's `operation/scope` pairs (product x warehouse, rolled to the
+main, earliest start, active) into `ctx.dc_scope_pairs`; they give the DC blocked days their start dates
+(blocks apply when `blocked_scope.ui_parameters_path` is also set). The DC metrics keep reading the store
+scope's products per week, as before.
+
+**Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/{scope,pipeline,runner,context,html_report}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-03
+
 #### Several solutions per scope: `scope_source.solution_id` / `blocked_scope.dc_solution_id` take a list
 
 Both accept one id or a non-empty list of ints (normalized to a list in settings). The operation scope

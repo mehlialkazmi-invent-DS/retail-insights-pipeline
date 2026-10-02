@@ -881,7 +881,7 @@ Read via `read_inventory_warehouse_source` (mirrors `read_daily_data_source`) an
 
 ### `dc_instock`
 
-**DC product scope.** Every DC metric (`dc_mean_stock`, `WOS_DC`, the DC part of `WOS_TOTAL` / `total_mean_stock`, `dc_in_stock_rate`) reads `inventory_warehouse` for the **store** scope's products only — the product-weeks of `scope_source` — at every warehouse. There is no separate DC product scope: the DC scope (`blocked_scope.dc_solution_id`) is read only to give each DC pair its start date for the DC blocked days.
+**DC product scope.** Every DC metric (`dc_mean_stock`, `WOS_DC`, the DC part of `WOS_TOTAL` / `total_mean_stock`, `dc_in_stock_rate`) reads `inventory_warehouse` for the **store** scope's products (per week) at every warehouse. `scope_source.dc_solution_id` (tbretail 22) names the DC (network) scope explicitly: `scope.build_dc_scope` reads that solution's `operation/scope` pairs (product × warehouse, rolled to the main, earliest start, active) into `ctx.dc_scope_pairs`, which give the DC blocked days their start dates. It does not narrow the DC metrics.
 
 **Gated** (`dc_instock.enabled`, default `False`) — but `item_family` (below) is **not** gated; see the `inventory_warehouse` note above. Backs `dc_in_stock_rate`. Unlike `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL`, which report only on days `inventory_warehouse` actually has a row for, this metric **expands** those rows into a continuous daily grid per `(product_id, warehouse_id)` pair and counts the gaps as stockouts.
 
@@ -921,7 +921,7 @@ Read via `read_inventory_warehouse_source` (mirrors `read_daily_data_source`) an
 2. `F.explode(F.sequence(first_stocked_date, REPORT_END_DATE))` to get that pair's own daily row space, then join the fiscal calendar for `Year`/`Week`. Because the inventory frame is window-filtered upstream, `first_stocked_date` can never precede `EFFECTIVE_REPORT_START_DATE` and needs no further clamping.
 3. Restrict to the SAME in-scope `(product_id, Year, Week)` population every other frame for that scope/root is restricted to — the identical left-semi restriction `build_dc_daily` applies against `scope_core`. Done before the inventory join, so that join only runs over in-scope rows.
 4. Left-join the same rolled-up `inventory_warehouse` back onto the grid, `F.coalesce(inventory, 0)` — a grid day with no matching inventory row is a genuine stockout day, not a missing one to drop.
-5. With `blocked_scope.dc_solution_id`, flag the DC blocked days (`ctx.dc_blocked_days`) on the grid (`is_blocked`); with `goods_in_transit.dc_instock`, left-join the DC goods-in-transit days.
+5. With `scope_source.dc_solution_id`, flag the DC blocked days (`ctx.dc_blocked_days`) on the grid (`is_blocked`); with `goods_in_transit.dc_instock`, left-join the DC goods-in-transit days.
 6. Aggregate to `(product_id, warehouse_id, Year, Week)`: `dc_stocked_days = COUNT(inventory > stock_threshold OR goods in transit)`, `dc_available_days = COUNT(*)`, both over the unblocked days only when `dc_in_stock_rate` is in `blocked_scope.metrics` (rows left with no available day are dropped), plus `dc_unblocked_days`, the unblocked days either way (the comparable-pairs universe reads it). Join `ctx.product_dims`/`ctx.fiscal_week` exactly as `dc_daily` does.
 
 `dc_in_stock_rate = F.greatest(0.0, Σ(dc_stocked_days) ÷ Σ(dc_available_days))` — computed directly at the period grain, mirroring `in_stock_rate`'s own block (no sales-weighted rollup, unlike `weighted_instock_rate`/`WOS`).
@@ -963,6 +963,7 @@ Chooses the table that defines the scope universe. Default `"defined_scope"` kee
 "scope_source": {
     "mode": "operation_scope",   # "defined_scope" | "operation_scope"
     "solution_id": 21,           # int or list of ints (e.g. [21, 24]); also the blocked_scope solution(s)
+    "dc_solution_id": None,      # DC (network) scope, int or list (tbretail 22): DC blocked-day start dates
     "run_date": None,            # Sunday "YYYY-MM-DD"; None = latest Sunday on or before today
     "roll_to_family_main": True,
     "instock_main_eligible_only": False,  # True: in-stock only where the main itself is eligible
@@ -989,7 +990,6 @@ UI-blocked days, applied per metric. Default off: it is on exactly when `ui_para
 "blocked_scope": {
     "ui_parameters_path": "ui-data/parameter_config/<timestamp>_<id>",  # under the datastore root; None = off
     "rule": "after_scope_start",   # or "all"
-    "dc_solution_id": None,        # int or list of ints (e.g. 22): DC blocks of those solutions
     "kinds": ["product", "product_destination", "destination"],  # store block folders read
     "dc_kinds": ["product", "product_destination"],  # DC block folders read
     "metrics": "all",              # "all" (every metric of METRICS_ALL) or a list of metric names
@@ -1050,7 +1050,7 @@ A named inventory metric uses **on-hand + GIT units** on every day; retail = uni
 
 **Computed separately, joined as before** (`metrics.compute_kpis`): sales (`total_sales_*`, `AUR`, `AUC`, distinct counts) and `weighted_instock_rate`'s sales weights read real rows only; WOS (units / revenue / cost), mean stock, total mean stock, turnover and the DC metrics each build their own frame, each metric reading on-hand + GIT only when it is named, and are joined on the period keys exactly as before. `metrics.population_filters` apply per group as before (GIT rows carry the product dimensions, so a filter such as in-stock's NON-COMP exclusion is unaffected).
 
-**DC side** (`pipeline.build_dc_daily`, only when a metric that reads DC GIT — `dc_mean_stock`, `total_mean_stock`, `WOS_DC`, `WOS_TOTAL` — is named): DC GIT (`destination_type = 1`, `quantity > 0`, same shift, summed per `(product_id, warehouse_id, date)`, family main, report window) is full-outer-joined to the rolled `inventory_warehouse` rows; a GIT-only day has inventory 0 and `has_inventory_row = False`. `Year`/`Week` are then attached and the rows restricted to `scope_core`'s product-weeks exactly as before. DC blocked days (`blocked_scope.dc_solution_id`) then flag DC rows of both kinds, as blocked days do on the store side.
+**DC side** (`pipeline.build_dc_daily`, only when a metric that reads DC GIT — `dc_mean_stock`, `total_mean_stock`, `WOS_DC`, `WOS_TOTAL` — is named): DC GIT (`destination_type = 1`, `quantity > 0`, same shift, summed per `(product_id, warehouse_id, date)`, family main, report window) is full-outer-joined to the rolled `inventory_warehouse` rows; a GIT-only day has inventory 0 and `has_inventory_row = False`. `Year`/`Week` are then attached and the rows restricted to `scope_core`'s product-weeks exactly as before. DC blocked days (`scope_source.dc_solution_id`) then flag DC rows of both kinds, as blocked days do on the store side.
 
 **Never changed by `inventory_metrics`:** sales, the daily in-stock (it has its own `store_instock` union of days), lost sales (its sales denominator uses real rows only) and the DC in-stock rate (its own `dc_instock`). The comparable-pairs pair universe is built from real rows only ([Comparable pairs](#comparable-pairs-like-for-like-ytd--yoy--quarter--half)). The Metric Details text of a named metric states that it counts store / DC goods in transit.
 

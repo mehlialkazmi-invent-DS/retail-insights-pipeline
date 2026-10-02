@@ -21,6 +21,7 @@ from kpi_pipeline.scope import (
     apply_scope_adjustments,
     build_blocked_days,
     build_dc_blocked_days,
+    build_dc_scope,
     build_defined_scope,
     build_hybrid_scope,
     scope_summary_by_origin,
@@ -215,6 +216,7 @@ class KPIRunner:
     def build_scopes(self, fund_paste=None) -> None:
         build_defined_scope(self.ctx)
         build_blocked_days(self.ctx)
+        build_dc_scope(self.ctx)
         build_dc_blocked_days(self.ctx)
         build_hybrid_scope(self.ctx)
         apply_scope_adjustments(self.ctx, fund_paste=fund_paste)

@@ -205,9 +205,9 @@ CONFIG: Dict[str, Any] = {
     # DC IN-STOCK -- dc_in_stock_rate from an expanded inventory_warehouse grid (README: dc_instock)
     # ---------------------------------------------------------------------------
     # DC metrics (dc_mean_stock, WOS_DC, WOS_TOTAL's DC part, dc_in_stock_rate) read
-    # path_segments.inventory_warehouse for the STORE scope's products only (the product-weeks of
-    # scope_source), at every warehouse; there is no separate DC product scope. The DC scope
-    # (blocked_scope.dc_solution_id) only gives each DC pair its start date for the DC blocked days.
+    # path_segments.inventory_warehouse for the store scope's products (per week) at every warehouse.
+    # The DC scope (scope_source.dc_solution_id) is the network scope: it gives the DC blocked days their
+    # start dates and does not narrow the DC metrics.
     "dc_instock": {
         "enabled": False,
         "stock_threshold": 0,  # a day is stocked when inventory > stock_threshold
@@ -218,6 +218,7 @@ CONFIG: Dict[str, Any] = {
     "scope_source": {
         "mode": "defined_scope",  # "defined_scope" | "operation_scope"
         "solution_id": 21,  # operation scope solution(s): an int or a list; also the blocked_scope solution(s)
+        "dc_solution_id": None,  # DC (network) scope: start dates of the DC blocked days; DC metrics keep the store scope's products
         "run_date": None,  # "YYYY-MM-DD" Sunday; None = latest Sunday on or before today
         "roll_to_family_main": True,
         "active_only": True,
@@ -234,7 +235,6 @@ CONFIG: Dict[str, Any] = {
     "blocked_scope": {
         "ui_parameters_path": None,  # path under the datastore root; None = blocked scope off
         "rule": "after_scope_start",  # or "all"
-        "dc_solution_id": None,  # None = no DC blocks; an int or a list of DC solutions
         "kinds": ["product", "product_destination", "destination"],  # store block folders read
         "dc_kinds": ["product", "product_destination"],  # DC block folders read (no destination folder)
         "metrics": "all",  # metrics that drop blocked days: "all" or a list from METRICS_ALL
@@ -869,6 +869,11 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "active_only": bool(scope_source_cfg["active_only"]),
         "instock_main_eligible_only": bool(scope_source_cfg["instock_main_eligible_only"]),
         "instock_exclude_unsuperseded_sizes": bool(scope_source_cfg["instock_exclude_unsuperseded_sizes"]),
+        "dc_solution_id": (
+            _solution_ids(scope_source_cfg["dc_solution_id"], "scope_source.dc_solution_id")
+            if scope_source_cfg["dc_solution_id"] is not None
+            else None
+        ),
     }
     if scope_source["mode"] not in ("defined_scope", "operation_scope"):
         raise ValueError(
@@ -877,6 +882,8 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     if scope_source["run_date"] is not None and scope_source["run_date"].weekday() != 6:
         raise ValueError(f"scope_source.run_date must be a Sunday; got {scope_source['run_date']}")
     operation_scope_mode = scope_source["mode"] == "operation_scope"
+    if scope_source["dc_solution_id"] is not None and not operation_scope_mode:
+        raise ValueError("scope_source.dc_solution_id requires scope_source.mode='operation_scope'")
     if operation_scope_mode and grain == "product_store_week":
         raise ValueError("scope_source.mode='operation_scope' does not support defined_scope.grain='product_store_week'")
 
@@ -889,7 +896,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             if ui_parameters_path is not None
             else None
         ),
-        # DC blocks of the same snapshot, read only when dc_solution_id is set.
+        # DC blocks of the same snapshot, read only when scope_source.dc_solution_id is set.
         "dc_path": (
             fund_paste(bucket, *ui_parameters_path.strip("/").split("/"), "dc_blocked_scope")
             if ui_parameters_path is not None
@@ -912,11 +919,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             f"allowed: {list(METRICS_ALL)} or 'all'"
         )
     blocked_scope["metrics"] = [m for m in METRICS_ALL if m in blocked_requested]
-    blocked_scope["dc_solution_id"] = (
-        _solution_ids(blocked_scope_cfg["dc_solution_id"], "blocked_scope.dc_solution_id")
-        if blocked_scope_cfg["dc_solution_id"] is not None
-        else None
-    )
     for key in ("kinds", "dc_kinds"):
         kinds = list(blocked_scope_cfg[key])
         unknown_kinds = sorted(set(kinds) - {"product", "product_destination", "destination"})
@@ -926,9 +928,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
                 f"got {kinds}"
             )
         blocked_scope[key] = kinds
-    if blocked_scope["dc_solution_id"] is not None:
-        if blocked_scope["path"] is None:
-            raise ValueError("blocked_scope.dc_solution_id requires blocked_scope.ui_parameters_path")
 
     instock_daily_cfg = instock_cfg["daily"]
     history_start_raw = instock_daily_cfg["history_start"]

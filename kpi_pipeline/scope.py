@@ -166,11 +166,27 @@ def build_blocked_days(ctx: KPIContext) -> None:
     print(f"blocked scope rule={cfg['rule']} | blocked pair-days in window: {ctx.blocked_days.count():,}")
 
 
+def build_dc_scope(ctx: KPIContext) -> None:
+    """Build ctx.dc_scope_pairs: the DC (network) scope's (product_id, warehouse_id) pairs from
+    operation/scope of scope_source.dc_solution_id, with the store scope's run_date, roll-up to the family
+    main, earliest start and active filter (None when dc_solution_id is None). The DC blocked days take their
+    start dates from these pairs; the DC metrics themselves keep the store scope's products
+    (pipeline.build_dc_daily / build_dc_inst)."""
+    if ctx.dc_scope_pairs is not None:
+        ctx.dc_scope_pairs.unpersist()
+    ctx.dc_scope_pairs = None
+    solution_ids = ctx.settings["SCOPE_SOURCE"]["dc_solution_id"]
+    if solution_ids is None:
+        return
+    ctx.dc_scope_pairs = _scope_start_pairs(ctx, solution_ids, "warehouse_id").cache()
+    print(f"DC scope pairs (solution_id in {solution_ids}): {ctx.dc_scope_pairs.count():,}")
+
+
 def build_dc_blocked_days(ctx: KPIContext) -> None:
     """Build ctx.dc_blocked_days: the (product_id, warehouse_id, date) days a DC block covers, dropped by the
     DC metrics named in blocked_scope.metrics (dc_mean_stock, WOS_DC, the DC part of WOS_TOTAL /
     total_mean_stock, dc_in_stock_rate), like the store blocks on the store metrics (None unless
-    blocked_scope.dc_solution_id is set).
+    scope_source.dc_solution_id and blocked_scope.ui_parameters_path are set).
 
     The DC solution's operation/scope run (same run_date, roll-up, active filter and earliest
     scope_start as the store scope, location = warehouse) gives each DC pair its scope_start; blocks of
@@ -181,12 +197,11 @@ def build_dc_blocked_days(ctx: KPIContext) -> None:
         ctx.dc_blocked_days.unpersist()
     ctx.dc_blocked_days = None
     s = ctx.settings
-    solution_ids = s["BLOCKED_SCOPE"]["dc_solution_id"]
-    if solution_ids is None:
+    if ctx.dc_scope_pairs is None or s["BLOCKED_SCOPE"]["path"] is None:
         return
-    dc_pairs = _scope_start_pairs(ctx, solution_ids, "warehouse_id")
+    solution_ids = s["SCOPE_SOURCE"]["dc_solution_id"]
     ctx.dc_blocked_days = _applied_block_days(
-        ctx, dc_pairs, "warehouse_id", s["BLOCKED_SCOPE"]["dc_path"], solution_ids, s["BLOCKED_SCOPE"]["dc_kinds"]
+        ctx, ctx.dc_scope_pairs, "warehouse_id", s["BLOCKED_SCOPE"]["dc_path"], solution_ids, s["BLOCKED_SCOPE"]["dc_kinds"]
     ).cache()
     print(
         f"DC blocked scope rule={s['BLOCKED_SCOPE']['rule']} | blocked DC pair-days in window: "

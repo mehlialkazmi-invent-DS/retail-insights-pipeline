@@ -72,7 +72,10 @@ class KPIContext:
     # (is_blocked) on scoped_daily, and removed from the metrics named in blocked_scope.metrics. None when
     # blocked scope is off.
     blocked_days: Optional[DataFrame] = None
-    # blocked_scope.dc_solution_id set only: cached (product_id, warehouse_id, date) blocked days. Flagged
+    # scope_source.dc_solution_id set only: (product_id, warehouse_id, scope_start, main_eligible) of the DC
+    # (network) scope, the start dates of the DC blocked days. DC metrics always use the store scope's products.
+    dc_scope_pairs: Optional[DataFrame] = None
+    # scope_source.dc_solution_id and blocked_scope.ui_parameters_path set only: cached (product_id, warehouse_id, date) blocked days. Flagged
     # (is_blocked) on dc_daily and removed from the DC metrics named in blocked_scope.metrics. None otherwise.
     dc_blocked_days: Optional[DataFrame] = None
 

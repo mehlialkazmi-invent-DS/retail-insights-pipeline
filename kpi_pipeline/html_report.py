@@ -298,7 +298,7 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
                     **base,
                     "definition": base["definition"] + " Days blocked in the UI blocked scope are excluded.",
                 }
-    if settings["BLOCKED_SCOPE"]["dc_solution_id"] is not None:
+    if (settings["SCOPE_SOURCE"]["dc_solution_id"] is not None and settings["BLOCKED_SCOPE"]["path"] is not None):
         for metric in _DC_BLOCKED_DAY_METRICS:
             if metric in blocked_metrics:
                 base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
@@ -366,7 +366,7 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
         dc_notes = []
         if goods_in_transit["dc_instock"]:
             dc_notes.append("A day with goods in transit to the DC also counts as stocked.")
-        if settings["BLOCKED_SCOPE"]["dc_solution_id"] is not None and "dc_in_stock_rate" in blocked_metrics:
+        if (settings["SCOPE_SOURCE"]["dc_solution_id"] is not None and settings["BLOCKED_SCOPE"]["path"] is not None) and "dc_in_stock_rate" in blocked_metrics:
             dc_notes.append("Days blocked in the UI DC blocked scope are excluded.")
         if dc_notes:
             base = DEFAULT_METRIC_DEFINITIONS["dc_in_stock_rate"]
