@@ -453,6 +453,10 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
         # are not operation-scope pairs and are kept.
         sub_only = ctx.operation_scope_pairs.filter(~F.col("main_eligible")).select(*pair_keys)
         pairs = pairs.join(sub_only, on=pair_keys, how="left_anti")
+    if s["SCOPE_SOURCE"]["instock_exclude_unsuperseded_sizes"]:
+        # Sizes of a superseded class color that are not in the supersession: likely NGF, so left out of
+        # in-stock (client rule); they stay in every other metric.
+        pairs = pairs.join(broadcast(_unsuperseded_sizes(ctx)), on="product_id", how="left_anti")
     daily = get_instock_daily_raw(ctx).join(pairs, on=pair_keys, how="left_semi")
     if blocked is not None:
         daily = daily.join(blocked, on=day_keys, how="left_anti")
@@ -555,6 +559,21 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
             "stocked_pairs", "available_days", *part_cols,
         )
         .join(ctx.product_dims, on="product_id", how="left")
+    )
+
+
+def _unsuperseded_sizes(ctx: KPIContext) -> DataFrame:
+    """product_ids in no item_family row whose class color (products.option_code) has at least one size
+    in item_family (as a main or a sub): sizes "not created in the supersession" of a superseded class
+    color (scope_source.instock_exclude_unsuperseded_sizes)."""
+    family_ids = get_item_family_raw(ctx).select("product_id").distinct()
+    products = ctx.spark.read.format("delta").load(ctx.settings["PATH_PRODUCTS"]).select("product_id", "option_code")
+    superseded_class_colors = products.join(family_ids, on="product_id", how="inner").select("option_code").distinct()
+    return (
+        products.join(superseded_class_colors, on="option_code", how="inner")
+        .join(family_ids, on="product_id", how="left_anti")
+        .select("product_id")
+        .distinct()
     )
 
 

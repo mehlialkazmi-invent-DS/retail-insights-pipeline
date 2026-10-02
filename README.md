@@ -964,11 +964,14 @@ Chooses the table that defines the scope universe. Default `"defined_scope"` kee
     "run_date": None,            # Sunday "YYYY-MM-DD"; None = latest Sunday on or before today
     "roll_to_family_main": True,
     "instock_main_eligible_only": False,  # True: in-stock only where the main itself is eligible
+    "instock_exclude_unsuperseded_sizes": False,  # True: in-stock leaves out sizes not in a supersession
     "active_only": True,
 },
 ```
 
 **`instock_main_eligible_only`** (tbretail `True`, generic `False`): in-stock (and weighted in-stock, which uses the same frame) counts only the stores where the main item itself is eligible — a store where only a superseded (sub) item is eligible was intentionally not assorted the new item, so it leaves in-stock (client rule). Those stores stay in every other metric (sales, revenue, inventory, WOS, turnover, lost sales), so all volume and inventory is captured. The pair's start is still the earliest start of the main and sub rows there. Built from `ctx.operation_scope_pairs.main_eligible` (`scope._scope_start_pairs`) and applied in `pipeline.build_instock_daily`; scope additions are not operation-scope pairs and are kept. Requires `mode = "operation_scope"`, `roll_to_family_main = True` and `instock.method = "daily"`.
+
+**`instock_exclude_unsuperseded_sizes`** (tbretail `True`, generic `False`): in-stock leaves out the sizes "not created in the supersession" — a product in no `item_family` row whose class color (`products.option_code`) has at least one size in `item_family` (as main or sub). The client treats these like NGF: out of in-stock, still in sales, revenue, inventory, WOS, turnover and lost sales (`pipeline._unsuperseded_sizes`, applied in `build_instock_daily`). Requires `instock.method = "daily"`.
 
 Rows of `solution_id` for that `run_date` that are still open (`end_date` null or `>= run_date`) are reduced to `(product_id, store_id)` pairs; with `roll_to_family_main`, every row is rolled to its family main (`coalesce(parent_id, product_id)`; a product without a main keeps its own id), so a store where only a sub-item is in scope gets the main, and each pair keeps its **earliest** `start_date` as `scope_start` (kept on `ctx.operation_scope_pairs`; `scope._scope_start_pairs`). `active_only` keeps products with `is_active = true`. The scope is built once and every metric uses it. `scope_adjustments`, `input_filters.daily_data` and the population filters apply on top as before; `input_filters.defined_scope` does **not** (the `defined_scope` table is not read in this mode, so tbretail's `week_start_date < '2026-08-02'` entry is unused). Needs `defined_scope.grain` of `product` or `product_store` (`product_store_week` is rejected; the in-stock and blocked days need `product_store`).
 

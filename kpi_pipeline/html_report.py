@@ -349,6 +349,8 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
             store_scope += " (input filter: " + " AND ".join(cfg["input_filters"]) + ")"
         if settings["SCOPE_SOURCE"]["instock_main_eligible_only"]:
             store_scope += "; only stores where the main (new) item itself is eligible"
+        if settings["SCOPE_SOURCE"]["instock_exclude_unsuperseded_sizes"]:
+            store_scope += "; sizes of a superseded class color that are not in the supersession are excluded"
         out["in_stock_rate"] = {
             "label": "In-Stock Rate",
             "definition": (

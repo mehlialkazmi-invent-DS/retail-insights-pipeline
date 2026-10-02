@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `instock.method` + `instock.daily` / `instock.weekly_source`, and "blocked days removed" as flagged and
 > removed per `blocked_scope.metrics` (see "Config simplification" and "Per-metric blocked scope gate").
 
+#### In-stock leaves out sizes not in a supersession (`scope_source.instock_exclude_unsuperseded_sizes`)
+
+Client rule: a size of a superseded class color (`products.option_code` with any size in `item_family`)
+that is itself in no `item_family` row was not created in the supersession and is likely NGF, so it leaves
+in-stock and weighted in-stock but stays in every other metric (`pipeline._unsuperseded_sizes`). Requires
+`instock.method="daily"`. tbretail `True`, generic `False`.
+
+**Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/{pipeline,html_report}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-03
+
 #### In-stock only where the main item is eligible (`scope_source.instock_main_eligible_only`)
 
 Client rule for supersessions: a store where only the superseded (sub) item is eligible, not the main, was

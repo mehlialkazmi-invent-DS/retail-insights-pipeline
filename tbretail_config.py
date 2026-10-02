@@ -270,6 +270,9 @@ CONFIG: Dict[str, Any] = {
         # In-stock only at stores where the main item itself is eligible (sub-only stores stay in every
         # other metric). Needs roll_to_family_main and instock.method "daily".
         "instock_main_eligible_only": True,
+        # In-stock leaves out sizes not in a supersession whose class color is (likely NGF); they stay
+        # in every other metric. Needs instock.method "daily".
+        "instock_exclude_unsuperseded_sizes": True,
     },
     # ---------------------------------------------------------------------------
     # BLOCKED SCOPE -- UI blocked days (README: blocked_scope)
@@ -915,6 +918,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "roll_to_family_main": bool(scope_source_cfg["roll_to_family_main"]),
         "active_only": bool(scope_source_cfg["active_only"]),
         "instock_main_eligible_only": bool(scope_source_cfg["instock_main_eligible_only"]),
+        "instock_exclude_unsuperseded_sizes": bool(scope_source_cfg["instock_exclude_unsuperseded_sizes"]),
     }
     if scope_source["mode"] not in ("defined_scope", "operation_scope"):
         raise ValueError(
@@ -1005,6 +1009,8 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             "scope_source.instock_main_eligible_only requires scope_source.mode='operation_scope', "
             "roll_to_family_main=True and instock.method='daily'"
         )
+    if scope_source["instock_exclude_unsuperseded_sizes"] and instock_method != "daily":
+        raise ValueError("scope_source.instock_exclude_unsuperseded_sizes requires instock.method='daily'")
     if report_end_mode == "latest_day" and instock_method != "daily":
         raise ValueError(
             "reporting_window.report_end='latest_day' requires instock.method='daily': the YTD cut at the "
