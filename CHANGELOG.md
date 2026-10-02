@@ -16,7 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### DC blocked scope reads only the `product` and `product_destination` kinds
 
 `dc_blocked_scope` has no `destination` folder (a live run failed with PATH_NOT_FOUND on it); DC blocks
-come only per product and per product x warehouse, so `inputs.DC_BLOCKED_SCOPE_KINDS` reads those two.
+come only per product and per product x warehouse. New `blocked_scope.kinds` / `dc_kinds` (required, subsets of
+`product` / `product_destination` / `destination`) choose which folders are read; both configs: stores all three,
+DC `product` + `product_destination`.
+
+**Affected (also):** `config.py`, `tbretail_config.py`
 
 **Affected:** `kpi_pipeline/{inputs,scope}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
 

@@ -284,6 +284,8 @@ CONFIG: Dict[str, Any] = {
         "ui_parameters_path": "ui-data/parameter_config/2026-09-30-065549_23d44fd8-8e05-475b-835d-8812ffb50b21",
         "rule": "after_scope_start",  # or "all"
         "dc_solution_id": 22,  # None = no DC blocks
+        "kinds": ["product", "product_destination", "destination"],  # store block folders read
+        "dc_kinds": ["product", "product_destination"],  # DC block folders read (no destination folder)
         "metrics": [
             "in_stock_rate", "weighted_instock_rate", "dc_in_stock_rate", "total_inventory", "mean_stock",
             "mean_stock_retail", "mean_stock_cost", "dc_mean_stock", "total_mean_stock", "WOS", "wos_revenue",
@@ -965,6 +967,15 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         )
     blocked_scope["metrics"] = [m for m in METRICS_ALL if m in blocked_requested]
     blocked_scope["dc_solution_id"] = blocked_scope_cfg["dc_solution_id"]
+    for key in ("kinds", "dc_kinds"):
+        kinds = list(blocked_scope_cfg[key])
+        unknown_kinds = sorted(set(kinds) - {"product", "product_destination", "destination"})
+        if unknown_kinds or not kinds:
+            raise ValueError(
+                f"blocked_scope.{key} must be a non-empty subset of product / product_destination / destination; "
+                f"got {kinds}"
+            )
+        blocked_scope[key] = kinds
     if blocked_scope["dc_solution_id"] is not None:
         if type(blocked_scope["dc_solution_id"]) is not int:
             raise ValueError("blocked_scope.dc_solution_id must be an integer or None")

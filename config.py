@@ -231,6 +231,8 @@ CONFIG: Dict[str, Any] = {
         "ui_parameters_path": None,  # path under the datastore root; None = blocked scope off
         "rule": "after_scope_start",  # or "all"
         "dc_solution_id": None,  # None = no DC blocks; an integer is the DC solution
+        "kinds": ["product", "product_destination", "destination"],  # store block folders read
+        "dc_kinds": ["product", "product_destination"],  # DC block folders read (no destination folder)
         "metrics": "all",  # metrics that drop blocked days: "all" or a list from METRICS_ALL
     },
     # ---------------------------------------------------------------------------
@@ -901,6 +903,15 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         )
     blocked_scope["metrics"] = [m for m in METRICS_ALL if m in blocked_requested]
     blocked_scope["dc_solution_id"] = blocked_scope_cfg["dc_solution_id"]
+    for key in ("kinds", "dc_kinds"):
+        kinds = list(blocked_scope_cfg[key])
+        unknown_kinds = sorted(set(kinds) - {"product", "product_destination", "destination"})
+        if unknown_kinds or not kinds:
+            raise ValueError(
+                f"blocked_scope.{key} must be a non-empty subset of product / product_destination / destination; "
+                f"got {kinds}"
+            )
+        blocked_scope[key] = kinds
     if blocked_scope["dc_solution_id"] is not None:
         if type(blocked_scope["dc_solution_id"]) is not int:
             raise ValueError("blocked_scope.dc_solution_id must be an integer or None")

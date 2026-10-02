@@ -253,6 +253,8 @@ Inventory for the score filter is the **last available daily snapshot in the fis
     "ui_parameters_path": None,        # path under the datastore root; None = OFF, set = ON
     "rule": "after_scope_start",       # or "all"
     "dc_solution_id": None,            # int (not bool, e.g. 22; tbretail 22): DC blocks of that solution
+    "kinds": ["product", "product_destination", "destination"],  # store block folders read
+    "dc_kinds": ["product", "product_destination"],  # DC block folders read
     "metrics": "all",                  # "all" or a list from METRICS_ALL: the metrics that DROP blocked days
 }
 ```
