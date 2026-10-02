@@ -255,9 +255,9 @@ CONFIG: Dict[str, Any] = {
     # DC IN-STOCK -- OFF: no dc_in_stock_rate in the report (README: dc_instock)
     # ---------------------------------------------------------------------------
     # DC metrics (dc_mean_stock, WOS_DC, WOS_TOTAL's DC part, dc_in_stock_rate) read
-    # path_segments.inventory_warehouse for the store scope's products (per week) at every warehouse.
-    # The DC scope (scope_source.dc_solution_id) is the network scope: it gives the DC blocked days their
-    # start dates and does not narrow the DC metrics.
+    # path_segments.inventory_warehouse for the store scope's products (per week): the store scope leads.
+    # With scope_source.dc_solution_id set, only the DC scope's product x warehouse pairs among them count;
+    # with None, every warehouse. The DC scope also gives the DC blocked days their start dates.
     "dc_instock": {
         "enabled": False,
         "stock_threshold": 0,  # a day is stocked when inventory > stock_threshold
@@ -268,7 +268,7 @@ CONFIG: Dict[str, Any] = {
     "scope_source": {
         "mode": "operation_scope",  # "defined_scope" | "operation_scope"
         "solution_id": 21,  # an int or a list; also the blocked_scope solution(s)
-        "dc_solution_id": 22,  # DC (network) scope: start dates of the DC blocked days; DC metrics keep the store scope's products
+        "dc_solution_id": 22,  # DC (network) scope: DC metrics' warehouse pairs, among the store scope's products; DC blocks
         "run_date": None,  # "YYYY-MM-DD" Sunday; None = latest Sunday on or before today
         "roll_to_family_main": True,
         "active_only": True,

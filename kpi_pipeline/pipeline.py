@@ -651,6 +651,11 @@ def _get_inventory_warehouse_parent_rolled(ctx: KPIContext) -> DataFrame:
     return ctx.inventory_warehouse_rolled
 
 
+def _dc_scope_keys(ctx: KPIContext) -> DataFrame:
+    """(product_id, warehouse_id) of the DC (network) scope, scope_source.dc_solution_id."""
+    return ctx.dc_scope_pairs.select("product_id", "warehouse_id")
+
+
 def build_dc_daily(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
     """Daily DC (warehouse) inventory for the in-scope product population.
 
@@ -705,6 +710,9 @@ def build_dc_daily(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
         )
         .join(scope_product_weeks, on=["product_id", "Year", "Week"], how="left_semi")
     )
+    if ctx.dc_scope_pairs is not None:
+        # DC (network) scope: only its product x warehouse pairs, among the store scope's products.
+        dc = dc.join(_dc_scope_keys(ctx), on=["product_id", "warehouse_id"], how="left_semi")
     return dc.join(ctx.product_dims, on="product_id", how="left").join(
         broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month")),
         on=["Year", "Week"],
@@ -758,6 +766,10 @@ def build_dc_inst(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
     # so it is absent from the metric rather than reading 0%.
     inv = _get_inventory_warehouse_parent_rolled(ctx)
     pairs = inv.groupBy("product_id", "warehouse_id").agg(F.min("date").alias("first_stocked_date"))
+    if ctx.dc_scope_pairs is not None:
+        # DC (network) scope: only its product x warehouse pairs (before the per-day expansion); the store
+        # scope's product-weeks still apply below.
+        pairs = pairs.join(_dc_scope_keys(ctx), on=["product_id", "warehouse_id"], how="left_semi")
     cal = broadcast(
         _calendar_frame(ctx, *part_cols).filter(F.col("date").between(F.lit(start), F.lit(end)))
     )

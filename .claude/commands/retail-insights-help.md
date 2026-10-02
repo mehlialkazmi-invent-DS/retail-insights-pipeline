@@ -229,7 +229,7 @@ Inventory for the score filter is the **last available daily snapshot in the fis
 "scope_source": {
     "mode": "defined_scope",   # "defined_scope" (default) | "operation_scope"
     "solution_id": 21,         # int or non-empty list of ints (not bool); also the blocked_scope solution(s)
-    "dc_solution_id": None,      # DC (network) scope, int or list (tbretail 22): DC blocked-day start dates
+    "dc_solution_id": None,      # DC (network) scope, int or list (tbretail 22): DC metrics' warehouse pairs among store-scope products; DC blocks
     "run_date": None,          # Sunday "YYYY-MM-DD"; None = latest Sunday on or before TODAY
     "roll_to_family_main": True,
     "instock_main_eligible_only": False,  # True: in-stock only where the main itself is eligible
