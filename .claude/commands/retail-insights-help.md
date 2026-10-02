@@ -228,7 +228,7 @@ Inventory for the score filter is the **last available daily snapshot in the fis
 ```python
 "scope_source": {
     "mode": "defined_scope",   # "defined_scope" (default) | "operation_scope"
-    "solution_id": 21,         # int or non-empty list of ints (not bool); also the blocked_scope solution(s)
+    "solution_id": 21,         # store scope solution(s), int or list (blocks: blocked_scope.solution_id)
     "dc_solution_id": None,      # DC (network) scope, int or list (tbretail 22): DC metrics' warehouse pairs among store-scope products; DC blocks
     "run_date": None,          # Sunday "YYYY-MM-DD"; None = latest Sunday on or before TODAY
     "roll_to_family_main": True,
@@ -253,11 +253,15 @@ Inventory for the score filter is the **last available daily snapshot in the fis
 "blocked_scope": {
     "ui_parameters_path": None,        # path under the datastore root; None = OFF, set = ON
     "rule": "after_scope_start",       # or "all"
+    "solution_id": 21,             # store blocks of these solution(s) only (int or list), whatever scope_source reads
+    "dc_solution_id": None,        # DC blocks of these solution(s) (tbretail 22); None = no DC blocks
     "kinds": ["product", "product_destination", "destination"],  # store block folders read
     "dc_kinds": ["product", "product_destination"],  # DC block folders read
     "metrics": "all",                  # "all" or a list from METRICS_ALL: the metrics that DROP blocked days
 }
 ```
+
+**Block solutions** (`blocked_scope.solution_id`, `blocked_scope.dc_solution_id`): the blocked-scope snapshot is filtered to these solutions, independently of the solutions `scope_source` reads. Adding e.g. allocation (51) to `scope_source.solution_id` widens the scope but does not pull in its blocks unless 51 is also listed here. DC blocks need `scope_source.dc_solution_id` (the DC pairs they match). tbretail: 21 and 22.
 Reads `{ui_parameters_path}/blocked_scope/{product,product_destination,destination}` (parquet; `destination_id` = store) for `scope_source.solution_id`; requires `scope_source.mode="operation_scope"`. Rule `after_scope_start`: a block applies to a pair only if `block.start_date >= scope_start` (same day applies; an earlier block is ignored — the pair was set up again after it); `all` applies every matched block. An applied block covers the pair's days from `start_date` to `end_date` (null = open-ended), clipped to the report window (`ctx.blocked_days`, `scope.build_blocked_days`). Block `product_id`s are NOT rolled to the family main: only blocks on the main's own `product_id` apply, as in the client reference script (`scope._applied_block_days`, shared with the DC blocks — see §6.1b). A missing `blocked_scope/<kind>` folder fails the run. Pairs added by `scope_adjustments` are never blocked. Always set `ui_parameters_path` explicitly (the newest snapshot may hold no blocks for the solution).
 `dc_solution_id` (None = no DC blocks) does the same for `{ui_parameters_path}/dc_blocked_scope/<kind>` of that solution (`destination_id` = warehouse); each DC pair's `scope_start` comes from `operation/scope` of that solution (same `run_date`, family roll-up, earliest start and `active_only` as `scope_source`); DC pairs outside it get no blocks (`ctx.dc_blocked_days`, `scope.build_dc_blocked_days`). Requires `ui_parameters_path`.
 

@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `instock.method` + `instock.daily` / `instock.weekly_source`, and "blocked days removed" as flagged and
 > removed per `blocked_scope.metrics` (see "Config simplification" and "Per-metric blocked scope gate").
 
+#### Block solutions separate from scope solutions: `blocked_scope.solution_id` / `dc_solution_id`
+
+The store and DC blocked-scope snapshots are filtered to their own solution lists (tbretail 21 / 22),
+independently of `scope_source`, so reading more scope solutions (e.g. 24, 51) never pulls their blocks in.
+`blocked_scope.dc_solution_id` needs `scope_source.dc_solution_id`; None = no DC blocks.
+
+**Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/{scope,html_report}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-03
+
 #### DC (network) scope named in config: `scope_source.dc_solution_id`
 
 `scope_source.dc_solution_id` (int, list or None; tbretail 22, generic None) replaces

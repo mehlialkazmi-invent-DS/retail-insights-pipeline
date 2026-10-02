@@ -267,7 +267,7 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     "scope_source": {
         "mode": "operation_scope",  # "defined_scope" | "operation_scope"
-        "solution_id": 21,  # an int or a list; also the blocked_scope solution(s)
+        "solution_id": 21,  # store scope solution(s), int or list (blocks: blocked_scope.solution_id)
         "dc_solution_id": 22,  # DC (network) scope: DC metrics' warehouse pairs, among the store scope's products; DC blocks
         "run_date": None,  # "YYYY-MM-DD" Sunday; None = latest Sunday on or before today
         "roll_to_family_main": True,
@@ -288,6 +288,8 @@ CONFIG: Dict[str, Any] = {
         # Airflow variable ui_parameters_path (the newest folder, 2026-09-30-204511_..., has only solution 51 blocks)
         "ui_parameters_path": "ui-data/parameter_config/2026-10-02-065120_9b661f5c-9e01-4431-8f8e-9a415d5cb4e7",
         "rule": "after_scope_start",  # or "all"
+        "solution_id": 21,  # store blocks of these solution(s) only (int or list), whatever scope_source reads
+        "dc_solution_id": 22,  # DC blocks of these solution(s); None = no DC blocks (also needs scope_source.dc_solution_id)
         "kinds": ["product", "product_destination", "destination"],  # store block folders read
         "dc_kinds": ["product", "product_destination"],  # DC block folders read (no destination folder)
         "metrics": [
@@ -992,6 +994,14 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
                 f"got {kinds}"
             )
         blocked_scope[key] = kinds
+    blocked_scope["solution_id"] = _solution_ids(blocked_scope_cfg["solution_id"], "blocked_scope.solution_id")
+    blocked_scope["dc_solution_id"] = (
+        _solution_ids(blocked_scope_cfg["dc_solution_id"], "blocked_scope.dc_solution_id")
+        if blocked_scope_cfg["dc_solution_id"] is not None
+        else None
+    )
+    if blocked_scope["dc_solution_id"] is not None and scope_source["dc_solution_id"] is None:
+        raise ValueError("blocked_scope.dc_solution_id needs scope_source.dc_solution_id (the DC pairs the blocks match)")
 
     instock_daily_cfg = instock_cfg["daily"]
     history_start_raw = instock_daily_cfg["history_start"]

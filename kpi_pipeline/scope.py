@@ -161,7 +161,7 @@ def build_blocked_days(ctx: KPIContext) -> None:
     if cfg["path"] is None:
         return
     ctx.blocked_days = _applied_block_days(
-        ctx, ctx.operation_scope_pairs, "store_id", cfg["path"], ctx.settings["SCOPE_SOURCE"]["solution_id"], cfg["kinds"]
+        ctx, ctx.operation_scope_pairs, "store_id", cfg["path"], cfg["solution_id"], cfg["kinds"]
     ).cache()
     print(f"blocked scope rule={cfg['rule']} | blocked pair-days in window: {ctx.blocked_days.count():,}")
 
@@ -197,9 +197,9 @@ def build_dc_blocked_days(ctx: KPIContext) -> None:
         ctx.dc_blocked_days.unpersist()
     ctx.dc_blocked_days = None
     s = ctx.settings
-    if ctx.dc_scope_pairs is None or s["BLOCKED_SCOPE"]["path"] is None:
+    if ctx.dc_scope_pairs is None or s["BLOCKED_SCOPE"]["path"] is None or s["BLOCKED_SCOPE"]["dc_solution_id"] is None:
         return
-    solution_ids = s["SCOPE_SOURCE"]["dc_solution_id"]
+    solution_ids = s["BLOCKED_SCOPE"]["dc_solution_id"]
     ctx.dc_blocked_days = _applied_block_days(
         ctx, ctx.dc_scope_pairs, "warehouse_id", s["BLOCKED_SCOPE"]["dc_path"], solution_ids, s["BLOCKED_SCOPE"]["dc_kinds"]
     ).cache()
