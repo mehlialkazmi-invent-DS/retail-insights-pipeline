@@ -379,18 +379,8 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
     in_stock_days = oh_days.select(*day_keys).distinct()
     shift = cfg["git_date_shift_days"]
     if shift is not None:
-        git = (
-            read_goods_in_transit_source(ctx.spark, s)
-            .filter(F.col("date").between(F.date_sub(F.lit(start), shift), F.date_sub(F.lit(end), shift)))
-            .filter((F.col("destination_type") == 0) & (F.col("quantity") > 0))
-            .select(
-                "product_id",
-                F.col("destination_id").alias("store_id"),
-                F.date_add(F.col("date"), shift).alias("date"),
-            )
-        )
         git_days = (
-            _roll_to_item_family_parent(git, ctx)
+            _goods_in_transit_days(ctx, 0, "store_id", shift)
             .join(pair_start, on=pair_keys, how="inner")
             .filter(F.col("date") >= F.col("count_from"))
             .select(*day_keys)
@@ -439,6 +429,25 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
         )
         .join(ctx.product_dims, on="product_id", how="left")
     )
+
+
+def _goods_in_transit_days(ctx: KPIContext, destination_type: int, location_col: str, shift: int) -> DataFrame:
+    """Distinct (product_id, <location_col>, date) days with goods in transit (quantity > 0) to one
+    destination type (0 = store, 1 = warehouse), rolled to the family main, for the report window.
+    A snapshot dated D - shift describes the end of day D (shift -1: snapshot D+1 -> day D).
+    """
+    start, end = ctx.settings["EFFECTIVE_REPORT_START_DATE"], ctx.settings["REPORT_END_DATE"]
+    git = (
+        read_goods_in_transit_source(ctx.spark, ctx.settings)
+        .filter(F.col("date").between(F.date_sub(F.lit(start), shift), F.date_sub(F.lit(end), shift)))
+        .filter((F.col("destination_type") == destination_type) & (F.col("quantity") > 0))
+        .select(
+            "product_id",
+            F.col("destination_id").alias(location_col),
+            F.date_add(F.col("date"), shift).alias("date"),
+        )
+    )
+    return _roll_to_item_family_parent(git, ctx).distinct()
 
 
 def _roll_to_item_family_parent(df: DataFrame, ctx: KPIContext) -> DataFrame:
@@ -520,7 +529,9 @@ def build_dc_inst(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
     The grid is inventory-derived: each (product_id, warehouse_id) pair runs from its own first
     inventory_warehouse row to the report window's end, missing days 0-filled and counted as
     stockouts. That is the same bound the store-level in-stock denominator uses, so the two
-    series stay on one definition (see README's "dc_instock" section).
+    series stay on one definition (see README's "dc_instock" section). A day is stocked when
+    inventory > stock_threshold or, with dc_instock.git_date_shift_days, goods are in transit to the
+    DC. DC blocked days (ctx.dc_blocked_days) leave the grid.
     """
     s = ctx.settings
     if not s.get("DC_INSTOCK_ENABLED", False):
@@ -568,9 +579,20 @@ def build_dc_inst(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
         .join(inv, on=["product_id", "warehouse_id", "date"], how="left")
         .withColumn("inventory", F.coalesce(F.col("inventory"), F.lit(0.0)))
     )
+    day_keys = ["product_id", "warehouse_id", "date"]
+    # DC blocked days (dc_instock.blocked_scope_solution_id) leave both stocked and available days.
+    if ctx.dc_blocked_days is not None:
+        grid = grid.join(ctx.dc_blocked_days, on=day_keys, how="left_anti")
+    stocked = F.col("inventory") > F.lit(threshold)
+    # dc_instock.git_date_shift_days: a day with goods in transit to the DC also counts as stocked.
+    shift = s["DC_INSTOCK_GIT_DATE_SHIFT_DAYS"]
+    if shift is not None:
+        git_days = _goods_in_transit_days(ctx, 1, "warehouse_id", shift).withColumn("has_git", F.lit(True))
+        grid = grid.join(git_days, on=day_keys, how="left")
+        stocked = stocked | F.col("has_git").isNotNull()
 
     dc_inst = grid.groupBy("product_id", "warehouse_id", "Year", "Week").agg(
-        F.sum((F.col("inventory") > F.lit(threshold)).cast("int")).alias("dc_stocked_days"),
+        F.sum(stocked.cast("int")).alias("dc_stocked_days"),
         F.count(F.lit(1)).alias("dc_available_days"),
     )
     return dc_inst.join(ctx.product_dims, on="product_id", how="left").join(

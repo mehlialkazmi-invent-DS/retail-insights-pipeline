@@ -264,7 +264,8 @@ _BLOCKED_DAY_METRICS = (
 
 def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
     """Definition overrides that depend on the run's settings: the daily in-stock method
-    (instock_daily) and the blocked-days note on the daily-data metrics (blocked_scope)."""
+    (instock_daily), the blocked-days note on the daily-data metrics (blocked_scope) and the DC
+    goods-in-transit / DC blocked-days notes on DC In-Stock Rate (dc_instock)."""
     out: Dict[str, Dict[str, str]] = {}
     if settings["BLOCKED_SCOPE"]["path"] is not None:
         for metric in _BLOCKED_DAY_METRICS:
@@ -297,6 +298,15 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
             "store_scope": store_scope,
             "formula": "Σ(in_stock_days) ÷ Σ(available_days)",
         }
+    if settings["DC_INSTOCK_ENABLED"]:
+        dc_notes = []
+        if settings["DC_INSTOCK_GIT_DATE_SHIFT_DAYS"] is not None:
+            dc_notes.append("A day with goods in transit to the DC also counts as stocked.")
+        if settings["DC_INSTOCK_BLOCKED_SCOPE_SOLUTION_ID"] is not None:
+            dc_notes.append("Days blocked in the UI DC blocked scope are excluded.")
+        if dc_notes:
+            base = DEFAULT_METRIC_DEFINITIONS["dc_in_stock_rate"]
+            out["dc_in_stock_rate"] = {**base, "definition": base["definition"] + " " + " ".join(dc_notes)}
     return out
 
 

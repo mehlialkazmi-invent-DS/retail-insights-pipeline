@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### ✨ Added
+
+#### DC in-stock: goods in transit and DC blocked scope
+
+`dc_instock.git_date_shift_days` (None = off, int not bool) counts a DC grid day as stocked when goods
+are in transit to the DC (`goods_in_transit` `destination_type=1`, `quantity>0`, rolled to the family
+main; snapshot D+1 = end of day D, so `-1`), unioned with `inventory > stock_threshold`.
+`dc_instock.blocked_scope_solution_id` (None = off, int not bool) removes
+`{blocked_scope.ui_parameters_path}/dc_blocked_scope` days of that solution from both DC stocked and
+available days by `blocked_scope.rule`, against each DC pair's `scope_start` from `operation/scope` of
+that solution (same run_date, roll-up, earliest start and active filter as `scope_source`); DC pairs
+outside it get no blocks; requires `blocked_scope.ui_parameters_path`. Built once per run as
+`ctx.dc_blocked_days` (`scope.build_dc_blocked_days`), only when `dc_instock.enabled`.
+`dc_mean_stock` / `WOS_DC` / `WOS_TOTAL` are not blocked. The DC In-Stock Rate Metric Details text
+mentions both when on. Both keys are required. `tbretail_config.py` sets `-1` and `22`, with
+`dc_instock` still off.
+
+**Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/{inputs,scope,pipeline,runner,context,html_report}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-02
+
+### 🔄 Changed
+
+#### Operation scope rolled to the family main; blocks on the main's own product_id only
+
+`scope_source.main_items_only` is replaced by `scope_source.roll_to_family_main`: every scope row is
+rolled to its family main (`coalesce(parent_id, product_id)`; no main keeps its own id), so a store
+where only a sub-item is in scope now gets the main, and each pair keeps its **earliest** start_date
+as `scope_start` (was: sub-item rows dropped, latest start_date kept). Block product_ids are no
+longer rolled to the family main: only blocks on the main's own product_id apply, as in the client
+reference script. Store and DC blocks share `scope._applied_block_days`; store and DC goods in
+transit share `pipeline._goods_in_transit_days`. Expect more store pairs (stores reached only via a
+sub-item) and earlier scope starts, so more blocks pass the `after_scope_start` rule.
+
+**Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/{inputs,scope,pipeline,context}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-02
+
 ## [Released]
 
 ### 🐛 Fixed

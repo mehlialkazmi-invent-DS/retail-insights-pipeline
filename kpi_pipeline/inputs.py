@@ -390,26 +390,28 @@ def get_item_family_raw(ctx) -> DataFrame:
     return ctx.item_family_raw
 
 
-def read_operation_scope_source(spark: SparkSession, settings: Dict[str, Any], run_date) -> DataFrame:
-    """Platform scope table (operation/scope): the solution's rows for one run_date that are still
-    open on it (end_date null or >= run_date), as (product_id, store_id, start_date).
+def read_operation_scope_source(
+    spark: SparkSession, settings: Dict[str, Any], run_date, solution_id: int, location_col: str
+) -> DataFrame:
+    """Platform scope table (operation/scope): one solution's rows for one run_date that are still
+    open on it (end_date null or >= run_date), as (product_id, <location_col>, start_date).
+    location_id is the store for a store solution and the warehouse for a DC solution.
 
     Fails loudly when the solution has no rows for run_date -- a wrong solution_id or run_date must
     not silently produce an empty report.
     """
-    cfg = settings["SCOPE_SOURCE"]
     path = settings["PATH_SCOPE"]
-    print(f"reading operation scope: {path} (solution_id={cfg['solution_id']}, run_date={run_date})")
+    print(f"reading operation scope: {path} (solution_id={solution_id}, run_date={run_date})")
     rows = (
         spark.read.format("delta").load(path)
-        .filter((F.col("solution_id") == cfg["solution_id"]) & (F.col("run_date") == F.lit(run_date)))
+        .filter((F.col("solution_id") == solution_id) & (F.col("run_date") == F.lit(run_date)))
         .filter(F.col("end_date").isNull() | (F.col("end_date") >= F.lit(run_date)))
-        .select("product_id", F.col("location_id").alias("store_id"), F.to_date("start_date").alias("start_date"))
+        .select("product_id", F.col("location_id").alias(location_col), F.to_date("start_date").alias("start_date"))
     )
     if rows.limit(1).count() == 0:
         raise ValueError(
-            f"No operation scope rows for solution_id={cfg['solution_id']} run_date={run_date} at {path}; "
-            "check scope_source.solution_id / scope_source.run_date."
+            f"No operation scope rows for solution_id={solution_id} run_date={run_date} at {path}; "
+            "check the solution_id setting and scope_source.run_date."
         )
     return rows
 
@@ -423,36 +425,44 @@ def read_active_product_ids(spark: SparkSession, settings: Dict[str, Any]) -> Da
     )
 
 
+# Source key columns of each UI blocked-scope kind. destination_id is the location: the store in
+# blocked_scope, the warehouse in dc_blocked_scope (renamed per caller, see blocked_scope_keys).
 BLOCKED_SCOPE_KINDS = {
     "product": ["product_id"],
-    "product_destination": ["product_id", "store_id"],
-    "destination": ["store_id"],
+    "product_destination": ["product_id", "destination_id"],
+    "destination": ["destination_id"],
 }
 
 
-def read_blocked_scope_source(spark: SparkSession, settings: Dict[str, Any], kind: str) -> DataFrame:
-    """One kind of the UI blocked-scope snapshot ({ui_parameters_path}/blocked_scope/{kind}) for the
-    configured solution, as (<key columns of the kind>, block_start, block_end). destination_id is the
-    store. Fails loudly (Spark read error) when the snapshot folder is missing.
+def blocked_scope_keys(kind: str, location_col: str) -> List[str]:
+    """Join keys of one blocked-scope kind, destination_id named location_col (store_id / warehouse_id)."""
+    return [location_col if c == "destination_id" else c for c in BLOCKED_SCOPE_KINDS[kind]]
+
+
+def read_blocked_scope_source(
+    spark: SparkSession, folder: str, solution_id: int, kind: str, location_col: str
+) -> DataFrame:
+    """One kind of a UI blocked-scope snapshot folder ({ui_parameters_path}/blocked_scope or
+    {ui_parameters_path}/dc_blocked_scope, then /{kind}) for one solution, as
+    (blocked_scope_keys(kind, location_col), block_start, block_end). Fails loudly (Spark read error)
+    when the folder is missing.
     """
-    key_cols = BLOCKED_SCOPE_KINDS[kind]
-    path = f"{settings['BLOCKED_SCOPE']['path']}/{kind}"
-    print(f"reading blocked_scope/{kind}: {path}")
-    key_exprs = {
-        "product_id": F.col("product_id").cast("int"),
-        "store_id": F.col("destination_id").cast("int"),
-    }
+    path = f"{folder}/{kind}"
+    print(f"reading blocked scope {kind} (solution_id={solution_id}): {path}")
     blocks = (
         spark.read.parquet(path)
-        .filter(F.col("solution_id") == settings["SCOPE_SOURCE"]["solution_id"])
+        .filter(F.col("solution_id") == solution_id)
         .select(
-            *[key_exprs[c].alias(c) for c in key_cols],
+            *[
+                F.col(source).cast("int").alias(key)
+                for source, key in zip(BLOCKED_SCOPE_KINDS[kind], blocked_scope_keys(kind, location_col))
+            ],
             F.to_date("start_date").alias("block_start"),
             F.to_date("end_date").alias("block_end"),
         )
     )
     if blocks.filter(F.col("block_start").isNull()).limit(1).count() > 0:
-        raise ValueError(f"blocked_scope/{kind} has rows without start_date at {path}")
+        raise ValueError(f"blocked scope {kind} has rows without start_date at {path}")
     return blocks
 
 
@@ -472,8 +482,8 @@ def get_instock_daily_raw(ctx) -> DataFrame:
 
     Deliberately NOT the input_filters.daily_data read that get_daily_data_raw uses: that filter
     typically drops unusable days (usable = 1), but the daily in-stock method needs to see them so
-    they can leave the store-day denominator. Not item-family-rolled either: scope pairs are family
-    mains and only their own daily rows count.
+    they can leave the store-day denominator. Not item-family-rolled here either: noob/daily-data is
+    already rolled to the family main upstream, the same id space as the rolled scope pairs.
     """
     s = ctx.settings
     date_col = s["DAILY_TIME_COLUMNS"]["date"]

@@ -40,12 +40,15 @@ class KPIContext:
     defined_scope_keys: Optional[DataFrame] = None
     scope_keys: List[str] = field(default_factory=list)
     # scope_source.mode="operation_scope" only: (product_id, store_id, scope_start) of the platform
-    # scope after the main-item / active filters. Source of each pair's scope start date for the
-    # blocked-scope rule and the daily in-stock count start.
+    # scope after the family roll-up (earliest start per pair) and active filter. Source of each
+    # pair's scope start date for the blocked-scope rule and the daily in-stock count start.
     operation_scope_pairs: Optional[DataFrame] = None
     # blocked_scope.ui_parameters_path set only: cached (product_id, store_id, date) days removed
     # from every daily-data-derived metric. None when blocked scope is off.
     blocked_days: Optional[DataFrame] = None
+    # dc_instock.enabled and dc_instock.blocked_scope_solution_id set only: cached
+    # (product_id, warehouse_id, date) days removed from dc_in_stock_rate. None otherwise.
+    dc_blocked_days: Optional[DataFrame] = None
 
     scope_adjustments_applied: bool = False
     scope_before_adjustments: Optional[DataFrame] = None

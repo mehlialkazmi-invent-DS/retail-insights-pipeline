@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+from functools import reduce
 from typing import Any, Callable, Dict, List, Optional
 
 from pyspark.sql import DataFrame
@@ -13,8 +14,8 @@ from pyspark.sql.window import Window
 from kpi_pipeline.context import KPIContext
 from kpi_pipeline.inputs import (
     BLOCKED_SCOPE_KINDS,
+    blocked_scope_keys,
     get_daily_data_raw,
-    get_item_family_raw,
     read_active_product_ids,
     read_blocked_scope_source,
     read_csv_source,
@@ -60,29 +61,38 @@ def _scope_run_date(ctx: KPIContext) -> datetime.date:
     return today - datetime.timedelta(days=(today.weekday() + 1) % 7)
 
 
-def _operation_scope_pairs(ctx: KPIContext) -> DataFrame:
-    """Scope universe from the platform scope table (scope_source.mode="operation_scope").
+def _scope_start_pairs(ctx: KPIContext, solution_id: int, location_col: str) -> DataFrame:
+    """(product_id, <location_col>, scope_start) from one solution's operation/scope run.
 
-    One run_date of operation/scope for the configured solution, rows still open on that date.
-    main_items_only: rows of sub-items (family members that are not the main) are dropped, NOT
-    rolled onto their main -- only the main's own scope rows define its pairs. active_only: pairs of
-    inactive products are dropped. Each (product_id, store_id) keeps its latest start_date as
-    scope_start; the full frame is kept on ctx.operation_scope_pairs for the blocked-scope rule and
-    the daily in-stock count start. Returns the distinct pairs at the configured scope grain, without
-    any time column, like _defined_scope_pairs.
+    roll_to_family_main: every row is rolled to its family main (a product without a main keeps its
+    own product_id), so a location where only a sub-item is in scope gets the main. A pair with
+    several rows (the main's and its sub-items') keeps the EARLIEST start_date as scope_start.
+    active_only: pairs of inactive products are dropped.
     """
     cfg = ctx.settings["SCOPE_SOURCE"]
-    rows = read_operation_scope_source(ctx.spark, ctx.settings, _scope_run_date(ctx))
-    if cfg["main_items_only"]:
-        item_family = get_item_family_raw(ctx)
-        mains = item_family.filter(F.col("is_main")).select("product_id").distinct()
-        sub_items = item_family.select("product_id").distinct().join(mains, on="product_id", how="left_anti")
-        rows = rows.join(broadcast(sub_items), on="product_id", how="left_anti")
-    pairs = rows.groupBy("product_id", "store_id").agg(F.max("start_date").alias("scope_start"))
+    rows = read_operation_scope_source(ctx.spark, ctx.settings, _scope_run_date(ctx), solution_id, location_col)
+    if cfg["roll_to_family_main"]:
+        from kpi_pipeline.pipeline import _roll_to_item_family_parent
+
+        rows = _roll_to_item_family_parent(rows, ctx)
+    pairs = rows.groupBy("product_id", location_col).agg(F.min("start_date").alias("scope_start"))
     if cfg["active_only"]:
         pairs = pairs.join(read_active_product_ids(ctx.spark, ctx.settings), on="product_id", how="inner")
     if pairs.filter(F.col("scope_start").isNull()).limit(1).count() > 0:
-        raise ValueError("operation scope rows without start_date")
+        raise ValueError(f"operation scope rows without start_date (solution_id={solution_id})")
+    return pairs
+
+
+def _operation_scope_pairs(ctx: KPIContext) -> DataFrame:
+    """Scope universe from the platform scope table (scope_source.mode="operation_scope").
+
+    One run_date of operation/scope for scope_source.solution_id, rows still open on that date,
+    reduced to (product_id, store_id, scope_start) by _scope_start_pairs. The full frame is kept on
+    ctx.operation_scope_pairs for the blocked-scope rule and the daily in-stock count start. Returns
+    the distinct pairs at the configured scope grain, without any time column, like
+    _defined_scope_pairs.
+    """
+    pairs = _scope_start_pairs(ctx, ctx.settings["SCOPE_SOURCE"]["solution_id"], "store_id")
     if ctx.operation_scope_pairs is not None:
         ctx.operation_scope_pairs.unpersist()
     ctx.operation_scope_pairs = pairs.cache()
@@ -92,20 +102,51 @@ def _operation_scope_pairs(ctx: KPIContext) -> DataFrame:
     ).distinct()
 
 
+def _applied_block_days(
+    ctx: KPIContext, pairs: DataFrame, location_col: str, folder: str, solution_id: int
+) -> DataFrame:
+    """(product_id, <location_col>, date) days removed by one UI blocked-scope snapshot folder.
+
+    The folder has three kinds -- product, product_destination (product x location) and destination
+    (location) -- each with start_date / end_date (null = open-ended). A block is matched to `pairs`
+    (with scope_start) on the main's own product_id: block product_ids are NOT rolled to the family
+    main, so a block on a sub-item code blocks nothing. With blocked_scope.rule "after_scope_start" a
+    block applies to a pair only when block.start_date >= the pair's scope_start (same day: the block
+    applies); an earlier block was superseded by the pair being set up again and is ignored. Rule
+    "all" applies every matched block. An applied block covers block start_date .. end_date, clipped
+    to the report window.
+    """
+    rule = ctx.settings["BLOCKED_SCOPE"]["rule"]
+    start, end = ctx.settings["EFFECTIVE_REPORT_START_DATE"], ctx.settings["REPORT_END_DATE"]
+    matched = reduce(
+        DataFrame.unionByName,
+        [
+            pairs.join(
+                read_blocked_scope_source(ctx.spark, folder, solution_id, kind, location_col),
+                on=blocked_scope_keys(kind, location_col),
+                how="inner",
+            ).select("product_id", location_col, "scope_start", "block_start", "block_end")
+            for kind in BLOCKED_SCOPE_KINDS
+        ],
+    )
+    applies = (F.col("block_start") >= F.col("scope_start")) if rule == "after_scope_start" else F.lit(True)
+    return (
+        matched.filter(applies)
+        .withColumn("first_day", F.greatest(F.col("block_start"), F.lit(start)))
+        .withColumn("last_day", F.least(F.coalesce(F.col("block_end"), F.lit(end)), F.lit(end)))
+        .filter(F.col("first_day") <= F.col("last_day"))
+        .select("product_id", location_col, F.explode(F.sequence("first_day", "last_day")).alias("date"))
+        .distinct()
+    )
+
+
 def build_blocked_days(ctx: KPIContext) -> None:
     """Build ctx.blocked_days: the (product_id, store_id, date) days a UI block removes from the
     report, once per run (None when blocked_scope.ui_parameters_path is None).
 
-    The UI blocked-scope snapshot has three kinds -- product, product_destination (product x store)
-    and destination (store) -- each with start_date / end_date (null = open-ended). A block is matched
-    to operation-scope pairs and, with rule "after_scope_start", applies to a pair only when
-    block.start_date >= the pair's scope_start (same day: the block applies); an earlier block was
-    superseded by the pair being set up again and is ignored. Rule "all" applies every matched block.
-    An applied block covers block start_date .. end_date, clipped to the report window.
-
-    With SCOPE_SOURCE["main_items_only"] (the pairs are family mains only) block product_ids are
-    rolled to the family main first, so a block on an old item code reaches the main item's pairs.
-    Pairs added by scope_adjustments are not operation-scope pairs, so no block reaches them.
+    Blocks of {ui_parameters_path}/blocked_scope for scope_source.solution_id, matched to the
+    operation-scope pairs by _applied_block_days. Pairs added by scope_adjustments are not
+    operation-scope pairs, so no block reaches them.
     """
     if ctx.blocked_days is not None:
         ctx.blocked_days.unpersist()
@@ -113,34 +154,36 @@ def build_blocked_days(ctx: KPIContext) -> None:
     cfg = ctx.settings["BLOCKED_SCOPE"]
     if cfg["path"] is None:
         return
-    start, end = ctx.settings["EFFECTIVE_REPORT_START_DATE"], ctx.settings["REPORT_END_DATE"]
-    pairs = ctx.operation_scope_pairs
-    matched = None
-    for kind, keys in BLOCKED_SCOPE_KINDS.items():
-        blocks = read_blocked_scope_source(ctx.spark, ctx.settings, kind)
-        if ctx.settings["SCOPE_SOURCE"]["main_items_only"] and "product_id" in keys:
-            from kpi_pipeline.pipeline import _roll_to_item_family_parent
-
-            blocks = _roll_to_item_family_parent(blocks, ctx)
-        kind_matched = pairs.join(blocks, on=keys, how="inner").select(
-            "product_id", "store_id", "scope_start", "block_start", "block_end"
-        )
-        matched = kind_matched if matched is None else matched.unionByName(kind_matched)
-
-    applies = (F.col("block_start") >= F.col("scope_start")) if cfg["rule"] == "after_scope_start" else F.lit(True)
-    applied = (
-        matched.filter(applies)
-        .withColumn("first_day", F.greatest(F.col("block_start"), F.lit(start)))
-        .withColumn("last_day", F.least(F.coalesce(F.col("block_end"), F.lit(end)), F.lit(end)))
-        .filter(F.col("first_day") <= F.col("last_day"))
-    )
-    ctx.blocked_days = (
-        applied.withColumn("date", F.explode(F.sequence("first_day", "last_day")))
-        .select("product_id", "store_id", "date")
-        .distinct()
-        .cache()
-    )
+    ctx.blocked_days = _applied_block_days(
+        ctx, ctx.operation_scope_pairs, "store_id", cfg["path"], ctx.settings["SCOPE_SOURCE"]["solution_id"]
+    ).cache()
     print(f"blocked scope rule={cfg['rule']} | blocked pair-days in window: {ctx.blocked_days.count():,}")
+
+
+def build_dc_blocked_days(ctx: KPIContext) -> None:
+    """Build ctx.dc_blocked_days: the (product_id, warehouse_id, date) days removed from
+    dc_in_stock_rate (None unless dc_instock.enabled and dc_instock.blocked_scope_solution_id is set).
+
+    The DC solution's operation/scope run (same run_date, roll-up, active filter and earliest
+    scope_start as the store scope, location = warehouse) gives each DC pair its scope_start; blocks of
+    {ui_parameters_path}/dc_blocked_scope for that solution are applied by blocked_scope.rule
+    (_applied_block_days). DC pairs outside that scope receive no blocks.
+    """
+    if ctx.dc_blocked_days is not None:
+        ctx.dc_blocked_days.unpersist()
+    ctx.dc_blocked_days = None
+    s = ctx.settings
+    solution_id = s["DC_INSTOCK_BLOCKED_SCOPE_SOLUTION_ID"]
+    if not s["DC_INSTOCK_ENABLED"] or solution_id is None:
+        return
+    dc_pairs = _scope_start_pairs(ctx, solution_id, "warehouse_id")
+    ctx.dc_blocked_days = _applied_block_days(
+        ctx, dc_pairs, "warehouse_id", s["BLOCKED_SCOPE"]["dc_path"], solution_id
+    ).cache()
+    print(
+        f"DC blocked scope rule={s['BLOCKED_SCOPE']['rule']} | blocked DC pair-days in window: "
+        f"{ctx.dc_blocked_days.count():,}"
+    )
 
 
 def _defined_scope_weekly(ctx: KPIContext, raw: DataFrame) -> DataFrame:

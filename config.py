@@ -368,9 +368,21 @@ CONFIG: Dict[str, Any] = {
     # grid starts at its own first stocked day, so a pair ranged at a DC but never once stocked is
     # absent rather than reading 0% (see README's "dc_instock" section). When disabled,
     # dc_in_stock_rate is emitted as a literal null column so the output shape stays constant.
+    #   git_date_shift_days:       None = stocked means inventory > stock_threshold only. An integer
+    #                              also counts days with goods in transit to the DC
+    #                              (goods_in_transit destination_type 1, quantity > 0, rolled to the
+    #                              family main); a snapshot dated D+1 describes the end of day D -> -1.
+    #   blocked_scope_solution_id: None = no DC blocks. An integer (the DC solution, e.g. 22) removes
+    #                              {blocked_scope.ui_parameters_path}/dc_blocked_scope days of that
+    #                              solution by blocked_scope.rule, against each DC pair's scope_start
+    #                              from operation/scope of that solution (same run_date / roll-up /
+    #                              active filter as scope_source). DC pairs outside it get no blocks.
+    #                              Requires blocked_scope.ui_parameters_path.
     "dc_instock": {
         "enabled": False,
         "stock_threshold": 0,  # a day counts as "stocked" when inventory > stock_threshold
+        "git_date_shift_days": None,
+        "blocked_scope_solution_id": None,
     },
     # ---------------------------------------------------------------------------
     # SCOPE SOURCE — which table defines the scope universe
@@ -379,26 +391,27 @@ CONFIG: Dict[str, Any] = {
     #   "operation_scope" -> the platform scope table (path_segments.scope): solution_id, one
     #                        run_date (None = latest Sunday on or before today), rows open on that
     #                        date (end_date null or >= run_date). Needs defined_scope.grain
-    #                        product or product_store. Every pair keeps its latest start_date
-    #                        (scope_start), used by blocked_scope and instock_daily.count_start.
-    #                        solution_id also selects the solution of the blocked_scope snapshot.
-    #                        main_items_only: only family-main / no-family products' own rows are
-    #                        kept (sub-item rows are dropped, NOT rolled onto the main); blocked_scope
-    #                        then rolls its block product_ids to the family main to match them.
+    #                        product or product_store. solution_id also selects the solution of the
+    #                        blocked_scope snapshot.
+    #                        roll_to_family_main: every row is rolled to its family main (no main:
+    #                        own product_id), so a store with only a sub-item in scope gets the main.
+    #                        Every pair keeps its EARLIEST start_date (scope_start), used by
+    #                        blocked_scope and instock_daily.count_start. Block product_ids are not
+    #                        rolled: only blocks on the main's own product_id apply.
     #                        active_only: products with is_active = true only.
     # scope_adjustments apply on top of either mode, as before, and input_filters.daily_data and
     # metrics.population_filters still apply. input_filters.defined_scope is read only in
     # "defined_scope" mode: operation_scope mode ignores it.
-    # CAUTION: scope_adjustments additions are not operation-scope pairs: they skip main_items_only /
+    # CAUTION: scope_adjustments additions are not operation-scope pairs: they skip roll_to_family_main /
     # active_only, have no scope_start and receive no blocks. A product-only addition (store_col None)
     # becomes every store with a daily-data row in the window. Every metric, in-stock included, uses
     # this one scope with its additions: in-stock counts an addition from its first daily row, with no
-    # main-item, active or blocked-scope filter.
+    # family roll-up, active or blocked-scope filter.
     "scope_source": {
         "mode": "defined_scope",
         "solution_id": 21,
         "run_date": None,  # "YYYY-MM-DD" Sunday; None = latest Sunday on or before today
-        "main_items_only": True,
+        "roll_to_family_main": True,
         "active_only": True,
     },
     # ---------------------------------------------------------------------------
@@ -1147,7 +1160,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "run_date": (
             datetime.date.fromisoformat(scope_source_run_date) if scope_source_run_date else None
         ),
-        "main_items_only": bool(scope_source_cfg["main_items_only"]),
+        "roll_to_family_main": bool(scope_source_cfg["roll_to_family_main"]),
         "active_only": bool(scope_source_cfg["active_only"]),
     }
     if scope_source["mode"] not in ("defined_scope", "operation_scope"):
@@ -1171,11 +1184,27 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             if ui_parameters_path is not None
             else None
         ),
+        # DC blocks of the same snapshot, read only when dc_instock.blocked_scope_solution_id is set.
+        "dc_path": (
+            fund_paste(bucket, *ui_parameters_path.strip("/").split("/"), "dc_blocked_scope")
+            if ui_parameters_path is not None
+            else None
+        ),
     }
     if blocked_scope["rule"] not in ("after_scope_start", "all"):
         raise ValueError(f"blocked_scope.rule must be 'after_scope_start' or 'all'; got {blocked_scope['rule']!r}")
     if blocked_scope["path"] is not None and not operation_scope_mode:
         raise ValueError("blocked_scope.ui_parameters_path requires scope_source.mode='operation_scope'")
+
+    dc_instock_git_date_shift_days = dc_instock_cfg["git_date_shift_days"]
+    if dc_instock_git_date_shift_days is not None and type(dc_instock_git_date_shift_days) is not int:
+        raise ValueError("dc_instock.git_date_shift_days must be an integer or None")
+    dc_instock_blocked_scope_solution_id = dc_instock_cfg["blocked_scope_solution_id"]
+    if dc_instock_blocked_scope_solution_id is not None:
+        if type(dc_instock_blocked_scope_solution_id) is not int:
+            raise ValueError("dc_instock.blocked_scope_solution_id must be an integer or None")
+        if blocked_scope["path"] is None:
+            raise ValueError("dc_instock.blocked_scope_solution_id requires blocked_scope.ui_parameters_path")
 
     instock_daily_cfg = cfg["instock_daily"]
     history_start_raw = instock_daily_cfg["history_start"]
@@ -1405,6 +1434,8 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "INSTOCK_DAILY": instock_daily,
         "DC_INSTOCK_ENABLED": dc_instock_enabled,
         "DC_INSTOCK_STOCK_THRESHOLD": dc_instock_stock_threshold,
+        "DC_INSTOCK_GIT_DATE_SHIFT_DAYS": dc_instock_git_date_shift_days,
+        "DC_INSTOCK_BLOCKED_SCOPE_SOLUTION_ID": dc_instock_blocked_scope_solution_id,
         **paths,
         "DEFINED_SCOPE": defined_scope,
         "INPUT_FILTERS": cfg.get("input_filters", {}),
