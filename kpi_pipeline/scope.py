@@ -14,6 +14,7 @@ from pyspark.sql.window import Window
 from kpi_pipeline.context import KPIContext
 from kpi_pipeline.inputs import (
     BLOCKED_SCOPE_KINDS,
+    DC_BLOCKED_SCOPE_KINDS,
     blocked_scope_keys,
     get_daily_data_raw,
     read_active_product_ids,
@@ -109,12 +110,12 @@ def _operation_scope_pairs(ctx: KPIContext) -> DataFrame:
 
 
 def _applied_block_days(
-    ctx: KPIContext, pairs: DataFrame, location_col: str, folder: str, solution_id: int
+    ctx: KPIContext, pairs: DataFrame, location_col: str, folder: str, solution_id: int, kinds=tuple(BLOCKED_SCOPE_KINDS)
 ) -> DataFrame:
     """(product_id, <location_col>, date) days covered by one UI blocked-scope snapshot folder.
 
-    The folder has three kinds -- product, product_destination (product x location) and destination
-    (location) -- each with start_date / end_date (null = open-ended). A block is matched to `pairs`
+    ``kinds`` are the folder's kinds -- product, product_destination (product x location) and destination
+    (location) for blocked_scope; product and product_destination for dc_blocked_scope -- each with start_date / end_date (null = open-ended). A block is matched to `pairs`
     (with scope_start) on the main's own product_id: block product_ids are NOT rolled to the family
     main, so a block on a sub-item code blocks nothing. With blocked_scope.rule "after_scope_start" a
     block applies to a pair only when block.start_date >= the pair's scope_start (same day: the block
@@ -132,7 +133,7 @@ def _applied_block_days(
                 on=blocked_scope_keys(kind, location_col),
                 how="inner",
             ).select("product_id", location_col, "scope_start", "block_start", "block_end")
-            for kind in BLOCKED_SCOPE_KINDS
+            for kind in kinds
         ],
     )
     applies = (F.col("block_start") >= F.col("scope_start")) if rule == "after_scope_start" else F.lit(True)
@@ -187,7 +188,7 @@ def build_dc_blocked_days(ctx: KPIContext) -> None:
         return
     dc_pairs = _scope_start_pairs(ctx, solution_id, "warehouse_id")
     ctx.dc_blocked_days = _applied_block_days(
-        ctx, dc_pairs, "warehouse_id", s["BLOCKED_SCOPE"]["dc_path"], solution_id
+        ctx, dc_pairs, "warehouse_id", s["BLOCKED_SCOPE"]["dc_path"], solution_id, DC_BLOCKED_SCOPE_KINDS
     ).cache()
     print(
         f"DC blocked scope rule={s['BLOCKED_SCOPE']['rule']} | blocked DC pair-days in window: "

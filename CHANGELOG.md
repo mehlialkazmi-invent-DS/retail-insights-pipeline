@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `instock.method` + `instock.daily` / `instock.weekly_source`, and "blocked days removed" as flagged and
 > removed per `blocked_scope.metrics` (see "Config simplification" and "Per-metric blocked scope gate").
 
+#### DC blocked scope reads only the `product` and `product_destination` kinds
+
+`dc_blocked_scope` has no `destination` folder (a live run failed with PATH_NOT_FOUND on it); DC blocks
+come only per product and per product x warehouse, so `inputs.DC_BLOCKED_SCOPE_KINDS` reads those two.
+
+**Affected:** `kpi_pipeline/{inputs,scope}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-03
+
 #### In-stock leaves out sizes not in a supersession (`scope_source.instock_exclude_unsuperseded_sizes`)
 
 Client rule: a size of a superseded class color (`products.option_code` with any size in `item_family`)

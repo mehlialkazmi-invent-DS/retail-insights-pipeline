@@ -447,6 +447,11 @@ BLOCKED_SCOPE_KINDS = {
 }
 
 
+# Kinds of the DC snapshot folder (dc_blocked_scope): DC blocks only come per product and per product x
+# warehouse -- the folder has no destination kind.
+DC_BLOCKED_SCOPE_KINDS = ("product", "product_destination")
+
+
 def blocked_scope_keys(kind: str, location_col: str) -> List[str]:
     """Join keys of one blocked-scope kind, destination_id named location_col (store_id / warehouse_id)."""
     return [location_col if c == "destination_id" else c for c in BLOCKED_SCOPE_KINDS[kind]]
