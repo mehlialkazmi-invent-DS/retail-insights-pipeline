@@ -61,8 +61,8 @@ CONFIG: Dict[str, Any] = {
         "mode": "full",  # "full" computes from the source tables; "html_only" renders saved outputs
     },
     "reporting_window": {  # README: Reporting window
-        "as_of_date": "2026-08-02",  # update before each run
-        "run_min_date": "2025-02-08",  # resolves to Sunday 2025-02-02, the start of fiscal 2025
+        "as_of_date": "2026-10-02",  # update before each run
+        "run_min_date": "2024-02-06",  # resolves to Sunday 2024-02-04
         "report_end": "latest_day",  # YTD to as_of_date; fiscal_cal upload must extend past it
     },
     # =============================================================================
@@ -99,13 +99,13 @@ CONFIG: Dict[str, Any] = {
         "date_col": "week_start_date",  # date_col / year_col / week_col: product_store_week grain only
         "year_col": None,
         "week_col": None,
-        "backfill_leading_gap": True,  # product_store_week only
+        "backfill_leading_gap": False,  # product_store_week only
     },
     # Additions skip the operation-scope roll-up and blocks; CSV exports: README, "tbretail setup".
     "scope_adjustments": {
         "additions": [
             {
-                "enabled": True,
+                "enabled": False,
                 "label": "jab_products",
                 "source": "csv",
                 "path": (
@@ -190,7 +190,7 @@ CONFIG: Dict[str, Any] = {
         "product_planning_level": ["operation", "product_planning_level"],  # product_agg_level -> product_id map
     },
     "input_filters": {  # Spark SQL expressions applied when reading each source (README: input_filters)
-        "defined_scope": ["week_start_date < '2026-08-02'"],  # unused while scope_source is operation_scope
+        "defined_scope": [],  # unused while scope_source is operation_scope
         "lost_sales": [],
         "daily_data": ["usable = 1"],
         "inventory_warehouse": [],
@@ -219,7 +219,7 @@ CONFIG: Dict[str, Any] = {
         "daily": {
             "count_start": "earliest",  # earlier of scope start and first daily row
             "require_daily_data": True,
-            "history_start": "2024-01-21",  # report_dfu's earliest week
+            "history_start": "2024-02-04",  # first day searched for a pair's first daily row
             "usable_only": True,
             "input_filters": ["store_id NOT IN (829, 639, 917)"],  # ECOM stores leave in-stock only
         },
@@ -281,7 +281,7 @@ CONFIG: Dict[str, Any] = {
     # lost_sales_pct are left out: a blocked pair can still sell its existing stock.
     "blocked_scope": {
         # Airflow variable ui_parameters_path (the newest folder, 2026-09-30-204511_..., has only solution 51 blocks)
-        "ui_parameters_path": "ui-data/parameter_config/2026-09-30-065549_23d44fd8-8e05-475b-835d-8812ffb50b21",
+        "ui_parameters_path": "ui-data/parameter_config/2026-10-02-065120_9b661f5c-9e01-4431-8f8e-9a415d5cb4e7",
         "rule": "after_scope_start",  # or "all"
         "dc_solution_id": 22,  # None = no DC blocks
         "kinds": ["product", "product_destination", "destination"],  # store block folders read
@@ -360,7 +360,7 @@ CONFIG: Dict[str, Any] = {
     # COMPARISONS
     # =============================================================================
     "comparisons": {
-        "enabled": ["yoy", "ytd"],  # any of COMPARISON_KINDS_ALL
+        "enabled": ["yoy"],  # any of COMPARISON_KINDS_ALL
     },
     "comparable_pairs": {  # like-for-like (README: Comparable pairs)
         "enabled": True,
@@ -440,7 +440,7 @@ CONFIG: Dict[str, Any] = {
     "output": {
         "save_outputs": True,
         "path_segments": ["analysis", "tbretail_kpis", "outputs"],
-        "run_date": "2026-09-14",
+        "run_date": "2026-10-02",
         "save_mode": "full_refresh",  # "initial" | "incremental" | "full_refresh"
         "allow_overwrite_existing": True,
         "recompute_comparisons_from_history": True,
