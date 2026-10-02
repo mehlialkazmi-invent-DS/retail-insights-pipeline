@@ -12,36 +12,44 @@ from kpi_pipeline.context import KPIContext
 from kpi_pipeline.filters import apply_group_population_filter
 
 
-def _inventory_exprs(with_git: bool):
-    """(units, retail, cost) store inventory expressions of a scoped_daily row: on-hand, or with
-    ``with_git`` on-hand + goods in transit (retail = units x price_without_tax, cost = units x cogs,
-    rounded like inventory_retail / inventory_cost)."""
-    if not with_git:
-        return F.col("inventory"), F.col("inventory_retail"), F.col("inventory_cost")
-    units = F.col("inventory") + F.col("git_quantity")
-    return units, F.round(units * F.col("price_without_tax"), 2), F.round(units * F.col("cogs"), 2)
+def _day_sums(real_flag: str, units: bool = True, retail_cost: bool = False):
+    """Per-day aggregates of one inventory frame for _day_avg: "<x>_oh" (on-hand) and "<x>_git" (on-hand
+    + goods in transit) sums plus has_real, whether the day has a real (non GIT-only) row.
+
+    A goods-in-transit-only row has on-hand 0, so the on-hand sums equal the real rows' own sums; only
+    the set of days differs, which _day_avg handles."""
+    with_git = F.col("inventory") + F.col("git_quantity")
+    exprs = [F.max(real_flag).alias("has_real")]
+    if units:
+        exprs += [F.sum("inventory").alias("units_oh"), F.sum(with_git).alias("units_git")]
+    if retail_cost:
+        exprs += [
+            F.sum("inventory_retail").alias("retail_oh"),
+            F.sum(F.round(with_git * F.col("price_without_tax"), 2)).alias("retail_git"),
+            F.sum("inventory_cost").alias("cost_oh"),
+            F.sum(F.round(with_git * F.col("cogs"), 2)).alias("cost_git"),
+        ]
+    return exprs
 
 
-def _dc_inventory_expr(with_git: bool):
-    """DC inventory units of a dc_daily row: on-hand, or with ``with_git`` on-hand + goods in transit."""
-    return F.col("inventory") + F.col("git_quantity") if with_git else F.col("inventory")
+def _day_avg(value: str, with_git: bool):
+    """Average of a _day_sums column over days. With goods in transit: every day, on-hand + GIT. Without:
+    only the days with a real row, on-hand only -- exactly the value without inventory_git."""
+    if with_git:
+        return F.avg(f"{value}_git")
+    return F.avg(F.when(F.col("has_real"), F.col(f"{value}_oh")))
 
 
-def _mean_stock_frame(daily_scoped: DataFrame, keys: Sequence[str], with_git: bool = False) -> DataFrame:
+def _mean_stock_frame(daily_scoped: DataFrame, keys: Sequence[str], git_metrics: Sequence[str]) -> DataFrame:
     """mean_stock/mean_stock_retail/mean_stock_cost from a (possibly population-filtered)
-    daily_scoped frame, on-hand or (``with_git``) on-hand + goods in transit. Factored out so turnover
-    can recompute its own mean-stock over its own population override instead of reusing the public
-    mean_stock metric's frame verbatim."""
-    units, retail, cost = _inventory_exprs(with_git)
-    seg_day = daily_scoped.groupBy(*keys, "date").agg(
-        F.sum(units).alias("daily_inv"),
-        F.sum(retail).alias("daily_inv_retail"),
-        F.sum(cost).alias("daily_inv_cost"),
-    )
+    daily_scoped frame; each counts goods in transit only when named in ``git_metrics``. Factored out so
+    turnover can recompute its own mean-stock over its own population override instead of reusing the
+    public mean_stock metric's frame verbatim."""
+    seg_day = daily_scoped.groupBy(*keys, "date").agg(*_day_sums("has_daily_row", retail_cost=True))
     return seg_day.groupBy(*keys).agg(
-        F.avg("daily_inv").alias("mean_stock"),
-        F.avg("daily_inv_retail").alias("mean_stock_retail"),
-        F.avg("daily_inv_cost").alias("mean_stock_cost"),
+        _day_avg("units", "mean_stock" in git_metrics).alias("mean_stock"),
+        _day_avg("retail", "mean_stock_retail" in git_metrics).alias("mean_stock_retail"),
+        _day_avg("cost", "mean_stock_cost" in git_metrics).alias("mean_stock_cost"),
     )
 
 
@@ -63,10 +71,11 @@ def compute_kpis(
     override, so this changes nothing for configs that don't use the feature.
 
     inventory_git (config.py): scoped_daily / dc_daily also carry goods-in-transit-only days
-    (has_daily_row / has_inventory_row False) and a git_quantity. Sales, weighted-instock's sales
-    weights and every inventory metric NOT named in inventory_git.metrics read only the real rows with
-    on-hand inventory, so they are exactly what they were without the feature. A metric that is named
-    reads all rows with on-hand + git_quantity. Each group is computed on its own and joined as before.
+    (has_daily_row / has_inventory_row False) and a git_quantity. Sales and weighted-instock's sales
+    weights read only the real rows. Every inventory metric reads on-hand on the days with a real row,
+    exactly as without the feature, unless it is named in inventory_git.metrics: then it reads on-hand +
+    git_quantity on every day (_day_sums / _day_avg). Each metric is gated on its own; each group is
+    computed on its own and joined as before.
     """
     group_keys = list(group_keys)
     keys = [period_col] + group_keys
@@ -79,15 +88,8 @@ def compute_kpis(
     inst = inst_in.filter(period_filter)
     dc_daily = dc_daily_in.filter(period_filter)
     dc_inst = dc_inst_in.filter(period_filter)
-    # Real daily-data / inventory_warehouse rows: what a metric reads unless it is gated on GIT.
+    # Real daily-data rows (no goods-in-transit-only days): the sales metrics' rows.
     real_daily = daily_scoped.filter(F.col("has_daily_row"))
-    real_dc = dc_daily.filter(F.col("has_inventory_row"))
-
-    def store_rows(metric: str) -> DataFrame:
-        return daily_scoped if metric in git_metrics else real_daily
-
-    def dc_rows(metric: str) -> DataFrame:
-        return dc_daily if metric in git_metrics else real_dc
 
     sales_pop = apply_group_population_filter(real_daily, "sales", ctx.settings)
     sales = (
@@ -129,26 +131,25 @@ def compute_kpis(
     # same days, not as a full week of inventory against a part week of sales.
     week_keys = ["product_id", "Year", "Week"] + group_keys
     period_extra = [period_col] if period_col not in week_keys else []
-    wos_units, wos_retail, wos_cost_inventory = _inventory_exprs("wos" in git_metrics)
-    wos_pop = apply_group_population_filter(store_rows("wos"), "wos", ctx.settings)
+    wos_pop = apply_group_population_filter(daily_scoped, "wos", ctx.settings)
     daily_by_date = wos_pop.groupBy(*week_keys, *period_extra, "date").agg(
         F.max("week_days").alias("week_days"),
-        F.sum(wos_units).alias("daily_total_inventory"),
+        *_day_sums("has_daily_row", retail_cost=True),
         F.sum("sales_quantity").alias("daily_sales_units"),
-        F.sum(wos_retail).alias("daily_total_inventory_retail"),
         F.sum("sales_revenue").alias("daily_sales_revenue"),
-        F.sum(wos_cost_inventory).alias("daily_total_inventory_cost"),
         F.sum("sales_cost").alias("daily_sales_cost"),
     )
     daily_data_week = (
         daily_by_date.groupBy(*week_keys, *period_extra)
         .agg(
             F.max("week_days").alias("week_days"),
-            F.avg("daily_total_inventory").alias("avg_daily_total_inventory"),
+            _day_avg("units", "WOS" in git_metrics).alias("avg_daily_total_inventory"),
+            # WOS_TOTAL's store part: on-hand + GIT only when WOS_TOTAL itself is named.
+            _day_avg("units", "WOS_TOTAL" in git_metrics).alias("avg_daily_store_inventory_total"),
             F.sum("daily_sales_units").alias("weekly_sales_units"),
-            F.avg("daily_total_inventory_retail").alias("avg_daily_inventory_retail"),
+            _day_avg("retail", "wos_revenue" in git_metrics).alias("avg_daily_inventory_retail"),
             F.sum("daily_sales_revenue").alias("weekly_sales_revenue"),
-            F.avg("daily_total_inventory_cost").alias("avg_daily_inventory_cost"),
+            _day_avg("cost", "wos_cost" in git_metrics).alias("avg_daily_inventory_cost"),
             F.sum("daily_sales_cost").alias("weekly_sales_cost"),
         )
         .withColumn("week_share", F.col("week_days") / F.lit(7.0))
@@ -179,19 +180,22 @@ def compute_kpis(
     # Left join a DC-inventory frame built at the identical week_keys+period_extra grain;
     # weeks with no DC record fill to 0 (the product simply had no warehouse inventory that
     # week), not dropped.
-    dc_wos_pop = apply_group_population_filter(dc_rows("wos_dc"), "wos_dc_total", ctx.settings)
+    dc_wos_pop = apply_group_population_filter(dc_daily, "wos_dc_total", ctx.settings)
     dc_daily_week = (
         dc_wos_pop.groupBy(*week_keys, *period_extra, "date")
-        .agg(F.sum(_dc_inventory_expr("wos_dc" in git_metrics)).alias("daily_dc_inventory"))
+        .agg(*_day_sums("has_inventory_row"))
         .groupBy(*week_keys, *period_extra)
-        .agg(F.avg("daily_dc_inventory").alias("avg_daily_dc_inventory"))
+        .agg(
+            _day_avg("units", "WOS_DC" in git_metrics).alias("avg_daily_dc_inventory"),
+            _day_avg("units", "WOS_TOTAL" in git_metrics).alias("avg_daily_dc_inventory_total"),
+        )
     )
     daily_data_week = (
         daily_data_week.join(dc_daily_week, on=week_keys + period_extra, how="left")
         .withColumn("avg_daily_dc_inventory", F.coalesce(F.col("avg_daily_dc_inventory"), F.lit(0.0)))
         .withColumn(
             "avg_daily_total_inventory_combined",
-            F.col("avg_daily_total_inventory") + F.col("avg_daily_dc_inventory"),
+            F.col("avg_daily_store_inventory_total") + F.coalesce(F.col("avg_daily_dc_inventory_total"), F.lit(0.0)),
         )
         .withColumn(
             "wos_dc",
@@ -216,37 +220,40 @@ def compute_kpis(
         (F.sum(F.col("wos_total") * F.col("weekly_sales_units")) / F.sum("weekly_sales_units")).alias("WOS_TOTAL"),
     )
 
-    mean_stock_pop = apply_group_population_filter(store_rows("mean_stock"), "mean_stock", ctx.settings)
-    mean_stock = _mean_stock_frame(mean_stock_pop, keys, "mean_stock" in git_metrics)
+    mean_stock_pop = apply_group_population_filter(daily_scoped, "mean_stock", ctx.settings)
+    mean_stock = _mean_stock_frame(mean_stock_pop, keys, git_metrics)
 
     # dc_mean_stock / total_mean_stock: plain per-day averages (not the WOS ratio), same shape
-    # as _mean_stock_frame, at the same `keys` grain. dc_mean_stock gates the DC part of
-    # total_mean_stock, mean_stock its store part.
-    dc_mean_units = _dc_inventory_expr("dc_mean_stock" in git_metrics)
-    dc_inv_pop = apply_group_population_filter(dc_rows("dc_mean_stock"), "dc_inventory", ctx.settings)
-    dc_mean_stock = (
-        dc_inv_pop.groupBy(*keys, "date")
-        .agg(F.sum(dc_mean_units).alias("daily_dc_inv"))
-        .groupBy(*keys)
-        .agg(F.avg("daily_dc_inv").alias("dc_mean_stock"))
+    # as _mean_stock_frame, at the same `keys` grain. total_mean_stock is averaged over the store
+    # days; with goods in transit (total_mean_stock named) both its store and DC part count it.
+    dc_inv_pop = apply_group_population_filter(dc_daily, "dc_inventory", ctx.settings)
+    dc_day = dc_inv_pop.groupBy(*keys, "date").agg(*_day_sums("has_inventory_row"))
+    dc_mean_stock = dc_day.groupBy(*keys).agg(
+        _day_avg("units", "dc_mean_stock" in git_metrics).alias("dc_mean_stock")
     )
-    total_store_units, _, _ = _inventory_exprs("mean_stock" in git_metrics)
-    total_store_pop = apply_group_population_filter(store_rows("mean_stock"), "dc_inventory", ctx.settings)
-    total_store_day = total_store_pop.groupBy(*keys, "date").agg(F.sum(total_store_units).alias("store_daily_inv"))
-    total_dc_day = dc_inv_pop.groupBy(*keys, "date").agg(F.sum(dc_mean_units).alias("dc_daily_inv"))
+    total_git = "total_mean_stock" in git_metrics
+    total_store_pop = apply_group_population_filter(daily_scoped, "dc_inventory", ctx.settings)
+    total_store_day = total_store_pop.groupBy(*keys, "date").agg(*_day_sums("has_daily_row"))
     total_mean_stock = (
-        total_store_day.join(total_dc_day, on=[*keys, "date"], how="left")
-        .withColumn("dc_daily_inv", F.coalesce(F.col("dc_daily_inv"), F.lit(0.0)))
-        .withColumn("total_daily_inv", F.col("store_daily_inv") + F.col("dc_daily_inv"))
+        total_store_day.join(
+            dc_day.select(*keys, "date", F.col("units_oh").alias("dc_oh"), F.col("units_git").alias("dc_git")),
+            on=[*keys, "date"],
+            how="left",
+        )
+        .withColumn("units_oh", F.col("units_oh") + F.coalesce(F.col("dc_oh"), F.lit(0.0)))
+        .withColumn("units_git", F.col("units_git") + F.coalesce(F.col("dc_git"), F.lit(0.0)))
         .groupBy(*keys)
-        .agg(F.avg("total_daily_inv").alias("total_mean_stock"))
+        .agg(_day_avg("units", total_git).alias("total_mean_stock"))
     )
 
     turnover_pop = apply_group_population_filter(real_daily, "turnover", ctx.settings)
-    turnover_stock_pop = apply_group_population_filter(store_rows("inventory_turnover_rate"), "turnover", ctx.settings)
-    turnover_mean_stock = _mean_stock_frame(
-        turnover_stock_pop, keys, "inventory_turnover_rate" in git_metrics
-    ).select(*keys, "mean_stock")
+    turnover_stock_pop = apply_group_population_filter(daily_scoped, "turnover", ctx.settings)
+    turnover_mean_stock = (
+        turnover_stock_pop.groupBy(*keys, "date")
+        .agg(*_day_sums("has_daily_row"))
+        .groupBy(*keys)
+        .agg(_day_avg("units", "inventory_turnover_rate" in git_metrics).alias("mean_stock"))
+    )
     turnover = (
         turnover_pop.groupBy(*keys)
         .agg(F.sum("sales_quantity").alias("sales_units"))

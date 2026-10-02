@@ -13,16 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 `inventory_git` = `{"git_date_shift_days": None | int, "metrics": [...]}` (both keys required; default
 off) adds goods in transit (GIT) to on-hand on the metrics named in `metrics`; every metric not named keeps
-on-hand only and its exact previous value. Gates: `total_inventory`; `mean_stock` (`mean_stock`,
-`mean_stock_retail`, `mean_stock_cost` and the store part of `total_mean_stock`); `wos` (`WOS`,
-`wos_revenue`, `wos_cost` and the store part of `WOS_TOTAL`); `inventory_turnover_rate` (the mean stock
-inside it); `dc_mean_stock` (and the DC part of `total_mean_stock`); `wos_dc` (`WOS_DC` and the DC part of
-`WOS_TOTAL`). A gated metric uses on-hand + GIT units (retail = units x `price_without_tax`, cost = units
+on-hand only and its exact previous value. Each metric is chosen on its own from `INVENTORY_GIT_METRICS_ALL` (`total_inventory`, `mean_stock`, `mean_stock_retail`, `mean_stock_cost`, `dc_mean_stock`, `total_mean_stock`, `WOS`, `wos_revenue`, `wos_cost`, `WOS_DC`, `WOS_TOTAL`, `inventory_turnover_rate`); `total_mean_stock` / `WOS_TOTAL` count store and DC GIT when named. `metrics.metric_cols` is now validated against `METRICS_ALL`, the list of every metric the pipeline can report. A gated metric uses on-hand + GIT units (retail = units x `price_without_tax`, cost = units
 x `cogs`, rounded like `inventory_retail` / `inventory_cost`). `materialize()` raises on an unknown name, a
 non-empty `metrics` with `git_date_shift_days` None, a non-int (or bool) shift, and a non-empty `metrics`
 without `use_fiscal_calendar=True`; settings key `INVENTORY_GIT`.
 
-Store side (`pipeline.build_scoped_daily`, only when a store gate is on, else no GIT read): daily data
+Store side (`pipeline.build_scoped_daily`, only when a store-GIT metric is named, else no GIT read): daily data
 (restricted to the scoped pairs first, which commutes with the blocked-day removal) ->
 store GIT quantity per product x store x day (`destination_type 0`, `quantity > 0`, shifted, summed, rolled
 to the family main, window, scoped pairs) -> full outer join (a GIT-only day gets zero sales / on-hand and
@@ -30,14 +26,14 @@ to the family main, window, scoped pairs) -> full outer join (a GIT-only day get
 days whose daily row `input_filters.daily_data` removed (`usable = 1`) dropped
 (`inputs.get_daily_data_excluded_days`, built once per run and cached on `ctx.daily_data_excluded_days`; the GIT
 frame is used once and not cached) -> blocked scope removes both kinds of rows -> scope product-week semi-join.
-DC side (`pipeline.build_dc_daily`, only when `dc_mean_stock` or `wos_dc` is on): DC GIT
+DC side (`pipeline.build_dc_daily`, only when a DC-GIT metric is named): DC GIT
 (`destination_type 1`) full-outer-joined to the rolled `inventory_warehouse` rows (`has_inventory_row`). In
 `metrics.compute_kpis`, sales, distinct counts and weighted-instock's sales weights read real rows only; WOS,
 mean stock, total mean stock, turnover and the DC metrics each build their own frame (all rows with on-hand
 + GIT when gated, real rows on-hand otherwise) and are joined as before. Sales, in-stock, lost sales and the
 DC in-stock rate never change; the comparable-pairs pair universe uses real rows only. The in-stock GIT days
 now derive from the same `_goods_in_transit_quantity` helper (unchanged behaviour). The Metric Details text
-of a gated metric states that it counts goods in transit. `tbretail_config.py` sets `-1` and all six metrics.
+of a gated metric states that it counts goods in transit. `tbretail_config.py` sets `-1` and every inventory metric.
 
 **Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/{context,inputs,pipeline,metrics,comparable,html_report,runner}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
 

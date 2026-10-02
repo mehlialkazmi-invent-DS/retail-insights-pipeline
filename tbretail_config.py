@@ -104,7 +104,7 @@
 #                comp_ids_primary, NON-COMP excluded by design). NON-COMP still counts toward
 #                every other Overall metric (sales, inventory, lost_sales_pct, etc.), same as
 #                kpi-skill-toolkit; lost sales excludes ECOM only (via report_dfu and sales_filter).
-#   Inventory:   inventory_git (shift -1, all six metrics on) adds goods in transit to on-hand on total
+#   Inventory:   inventory_git (shift -1, every inventory metric on) adds goods in transit to on-hand on total
 #                inventory, mean stock (+ retail / cost), WOS (units / revenue / cost), turnover, DC mean
 #                stock, WOS (DC) and WOS (Total): store GIT is rolled to the main item, joined to the daily
 #                data and then blocked scope removes days; each group is computed on its own and joined as
@@ -144,13 +144,25 @@ COMPARISON_KINDS_ALL = ("yoy", "ytd")
 # sync with retail-insights-pipeline/config.py -- see its COMPARABLE_KINDS_ALL comment.
 COMPARABLE_KINDS_ALL = ("ytd", "yoy", "quarter", "half")
 
-# inventory_git.metrics gate names, in canonical order: the inventory metrics that can add goods in
-# transit (GIT) to on-hand inventory. Store side: total_inventory, mean_stock (+ retail / cost), wos
-# (WOS, wos_revenue, wos_cost and the store part of WOS_TOTAL), inventory_turnover_rate (the mean stock
-# inside it). DC side: dc_mean_stock (and the DC part of total_mean_stock), wos_dc (WOS_DC and the DC
-# part of WOS_TOTAL). total_mean_stock's store part follows mean_stock.
+# Every metric the pipeline can report, in canonical order: metrics.metric_cols (and scope_diff_metrics)
+# pick from this list. Sales: total_sales_quantity, total_sales_revenue, AUR, AUC, distinct counts.
+# Inventory: total_inventory, mean_stock (+ retail / cost), dc_mean_stock, total_mean_stock, WOS
+# (+ revenue / cost), WOS_DC, WOS_TOTAL, inventory_turnover_rate. Service: in_stock_rate,
+# weighted_instock_rate, dc_in_stock_rate, lost_sales_pct.
+METRICS_ALL = (
+    "total_sales_quantity", "total_sales_revenue", "AUR", "AUC", "total_inventory",
+    "distinct_product_count", "distinct_store_count", "distinct_pair_count",
+    "mean_stock", "mean_stock_retail", "mean_stock_cost", "dc_mean_stock", "total_mean_stock",
+    "WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL", "inventory_turnover_rate",
+    "in_stock_rate", "weighted_instock_rate", "dc_in_stock_rate", "lost_sales_pct",
+)
+
+# The inventory metrics that can add goods in transit (GIT) to on-hand inventory: inventory_git.metrics
+# picks from this list, each metric on its own. Store GIT feeds the store metrics, DC GIT dc_mean_stock /
+# WOS_DC; total_mean_stock and WOS_TOTAL count both their store and their DC GIT when named.
 INVENTORY_GIT_METRICS_ALL = (
-    "total_inventory", "mean_stock", "wos", "inventory_turnover_rate", "dc_mean_stock", "wos_dc",
+    "total_inventory", "mean_stock", "mean_stock_retail", "mean_stock_cost", "dc_mean_stock",
+    "total_mean_stock", "WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL", "inventory_turnover_rate",
 )
 
 CONFIG: Dict[str, Any] = {
@@ -591,26 +603,29 @@ CONFIG: Dict[str, Any] = {
     # ---------------------------------------------------------------------------
     # INVENTORY GIT — gated goods in transit on the inventory metrics
     # ---------------------------------------------------------------------------
-    # ON for tbretail, all six metrics (OFF in the generic config: metrics = []). A metric named in
+    # ON for tbretail, every inventory metric (OFF in the generic config: metrics = []). A metric named in
     # "metrics" uses on-hand + goods in transit (GIT) units (retail = units x price_without_tax, cost =
     # units x cogs); a metric left out keeps on-hand only and its exact previous value. Drop a name to
     # turn that metric's GIT off.
     #   git_date_shift_days: -1 (a snapshot dated D+1 describes the end of day D, as instock_daily).
     #                        None = off; required (an integer) when "metrics" is not empty.
-    #   metrics:             "total_inventory", "mean_stock" (+ mean_stock_retail / _cost), "wos" (WOS,
-    #                        wos_revenue, wos_cost and the store part of WOS_TOTAL),
-    #                        "inventory_turnover_rate" (the mean stock inside it), "dc_mean_stock" (and
-    #                        the DC part of total_mean_stock), "wos_dc" (WOS_DC and the DC part of
-    #                        WOS_TOTAL). total_mean_stock's store part follows "mean_stock".
+    #   metrics:             any of INVENTORY_GIT_METRICS_ALL (top of this file), each on its own:
+    #                        total_inventory, mean_stock, mean_stock_retail, mean_stock_cost,
+    #                        dc_mean_stock, total_mean_stock, WOS, wos_revenue, wos_cost, WOS_DC,
+    #                        WOS_TOTAL, inventory_turnover_rate (its mean stock). total_mean_stock and
+    #                        WOS_TOTAL count store and DC goods in transit when named.
     # Store GIT = goods_in_transit destination_type 0, quantity > 0, summed per product x store x day
     # rolled to the family main, limited to scoped pairs; it is joined to the daily rows (a GIT-only
     # day gets zero sales / on-hand) BEFORE blocked scope removes days, so blocked days drop both. GIT-only
     # days on which input_filters.daily_data ("usable = 1") removed the pair's daily row are dropped.
-    # DC GIT = destination_type 1, per product x warehouse x day (DC blocked days are not applied to the
-    # DC inventory metrics). Sales, in-stock and lost sales never change.
+    # DC GIT = destination_type 1, per product x warehouse x day; DC blocked days
+    # (blocked_scope.dc_solution_id) then remove DC rows of both kinds. Sales, in-stock and lost sales never change.
     "inventory_git": {
         "git_date_shift_days": -1,
-        "metrics": ["total_inventory", "mean_stock", "wos", "inventory_turnover_rate", "dc_mean_stock", "wos_dc"],
+        "metrics": [
+            "total_inventory", "mean_stock", "mean_stock_retail", "mean_stock_cost", "dc_mean_stock",
+            "total_mean_stock", "WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL", "inventory_turnover_rate",
+        ],
     },
     # ---------------------------------------------------------------------------
     # LOST-SALES ENSEMBLE — blend two lost-sales models by product sales speed
@@ -1511,6 +1526,9 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
 
     metrics = cfg["metrics"]
     population_filters = dict(metrics.get("population_filters", {}) or {})
+    unknown_metric_cols = sorted(set(metrics["metric_cols"]) - set(METRICS_ALL))
+    if unknown_metric_cols:
+        raise ValueError(f"metrics.metric_cols has unknown metrics {unknown_metric_cols}; allowed: {list(METRICS_ALL)}")
     _validate_population_filters(population_filters, metrics["metric_cols"])
     _validate_scope_diff_metrics(metrics["scope_diff_metrics"], metrics["metric_cols"])
 

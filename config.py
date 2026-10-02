@@ -45,9 +45,9 @@
 #                         into a daily product x warehouse grid running from each pair's own first
 #                         stocked day to the report window's end, 0-filling the gaps as stockouts.
 #                         Requires path_segments.item_family. See README's "dc_instock" section.
-#   inventory_git       — goods in transit added to on-hand on the metrics you name (total_inventory,
-#                         mean_stock, wos, inventory_turnover_rate, dc_mean_stock, wos_dc); the rest
-#                         stay on-hand only. See README's "inventory_git" section.
+#   inventory_git       — goods in transit added to on-hand on the inventory metrics you name (any of
+#                         INVENTORY_GIT_METRICS_ALL); the rest stay on-hand only. See README's
+#                         "inventory_git" section. metrics.metric_cols picks from METRICS_ALL.
 #
 #   NOTE: inventory_warehouse's product_id is item-family-rolled onto its parent
 #   (path_segments.item_family) before being restricted to scope_core, matching defined_scope's
@@ -76,13 +76,25 @@ COMPARISON_KINDS_ALL = ("yoy", "ytd")
 #             fiscal_calendar.half_periods=True.
 COMPARABLE_KINDS_ALL = ("ytd", "yoy", "quarter", "half")
 
-# inventory_git.metrics gate names, in canonical order: the inventory metrics that can add goods in
-# transit (GIT) to on-hand inventory. Store side: total_inventory, mean_stock (+ retail / cost), wos
-# (WOS, wos_revenue, wos_cost and the store part of WOS_TOTAL), inventory_turnover_rate (the mean stock
-# inside it). DC side: dc_mean_stock (and the DC part of total_mean_stock), wos_dc (WOS_DC and the DC
-# part of WOS_TOTAL). total_mean_stock's store part follows mean_stock.
+# Every metric the pipeline can report, in canonical order: metrics.metric_cols (and scope_diff_metrics)
+# pick from this list. Sales: total_sales_quantity, total_sales_revenue, AUR, AUC, distinct counts.
+# Inventory: total_inventory, mean_stock (+ retail / cost), dc_mean_stock, total_mean_stock, WOS
+# (+ revenue / cost), WOS_DC, WOS_TOTAL, inventory_turnover_rate. Service: in_stock_rate,
+# weighted_instock_rate, dc_in_stock_rate, lost_sales_pct.
+METRICS_ALL = (
+    "total_sales_quantity", "total_sales_revenue", "AUR", "AUC", "total_inventory",
+    "distinct_product_count", "distinct_store_count", "distinct_pair_count",
+    "mean_stock", "mean_stock_retail", "mean_stock_cost", "dc_mean_stock", "total_mean_stock",
+    "WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL", "inventory_turnover_rate",
+    "in_stock_rate", "weighted_instock_rate", "dc_in_stock_rate", "lost_sales_pct",
+)
+
+# The inventory metrics that can add goods in transit (GIT) to on-hand inventory: inventory_git.metrics
+# picks from this list, each metric on its own. Store GIT feeds the store metrics, DC GIT dc_mean_stock /
+# WOS_DC; total_mean_stock and WOS_TOTAL count both their store and their DC GIT when named.
 INVENTORY_GIT_METRICS_ALL = (
-    "total_inventory", "mean_stock", "wos", "inventory_turnover_rate", "dc_mean_stock", "wos_dc",
+    "total_inventory", "mean_stock", "mean_stock_retail", "mean_stock_cost", "dc_mean_stock",
+    "total_mean_stock", "WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL", "inventory_turnover_rate",
 )
 
 CONFIG: Dict[str, Any] = {
@@ -499,17 +511,17 @@ CONFIG: Dict[str, Any] = {
     #   git_date_shift_days: None = off. An integer turns GIT on: a goods_in_transit snapshot dated D+1
     #                        describes the end of day D, so the date shifts by -1 (as instock_daily).
     #                        Required (an integer) when "metrics" is not empty.
-    #   metrics:             any of "total_inventory", "mean_stock" (+ mean_stock_retail / _cost),
-    #                        "wos" (WOS, wos_revenue, wos_cost and the store part of WOS_TOTAL),
-    #                        "inventory_turnover_rate" (the mean stock inside it), "dc_mean_stock" (and
-    #                        the DC part of total_mean_stock), "wos_dc" (WOS_DC and the DC part of
-    #                        WOS_TOTAL). total_mean_stock's store part follows "mean_stock".
+    #   metrics:             any of INVENTORY_GIT_METRICS_ALL (top of this file), each on its own:
+    #                        total_inventory, mean_stock, mean_stock_retail, mean_stock_cost,
+    #                        dc_mean_stock, total_mean_stock, WOS, wos_revenue, wos_cost, WOS_DC,
+    #                        WOS_TOTAL, inventory_turnover_rate (its mean stock). total_mean_stock and
+    #                        WOS_TOTAL count store and DC goods in transit when named.
     # Store GIT = goods_in_transit destination_type 0, quantity > 0, summed per product x store x day
     # rolled to the family main, limited to scoped pairs; it is joined to the daily rows (a GIT-only
     # day gets zero sales / on-hand) BEFORE blocked scope removes days, so blocked days drop both. GIT-only
     # days on which input_filters.daily_data removed the pair's daily row (e.g. usable = 1) are dropped.
-    # DC GIT = destination_type 1, per product x warehouse x day (DC blocked days are not applied to the
-    # DC inventory metrics). Sales, in-stock and lost sales never change. Requires
+    # DC GIT = destination_type 1, per product x warehouse x day; DC blocked days
+    # (blocked_scope.dc_solution_id) then remove DC rows of both kinds. Sales, in-stock and lost sales never change. Requires
     # fiscal_calendar.use_fiscal_calendar=True when "metrics" is not empty.
     "inventory_git": {
         "git_date_shift_days": None,
@@ -1437,6 +1449,9 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
 
     metrics = cfg["metrics"]
     population_filters = dict(metrics.get("population_filters", {}) or {})
+    unknown_metric_cols = sorted(set(metrics["metric_cols"]) - set(METRICS_ALL))
+    if unknown_metric_cols:
+        raise ValueError(f"metrics.metric_cols has unknown metrics {unknown_metric_cols}; allowed: {list(METRICS_ALL)}")
     _validate_population_filters(population_filters, metrics["metric_cols"])
     _validate_scope_diff_metrics(metrics["scope_diff_metrics"], metrics["metric_cols"])
 

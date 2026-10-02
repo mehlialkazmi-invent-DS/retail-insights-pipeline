@@ -8,10 +8,14 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 from pyspark.sql import DataFrame, SparkSession
 
-# inventory_git.metrics gate names (see config.py), split by the side of the report they read:
-# store metrics read build_scoped_daily's store goods in transit, DC metrics build_dc_daily's.
-STORE_GIT_METRICS = ("total_inventory", "mean_stock", "wos", "inventory_turnover_rate")
-DC_GIT_METRICS = ("dc_mean_stock", "wos_dc")
+# inventory_git.metrics names (config.py's INVENTORY_GIT_METRICS_ALL) by the goods in transit they read:
+# store metrics build_scoped_daily's store GIT, DC metrics build_dc_daily's DC GIT; total_mean_stock and
+# WOS_TOTAL read both.
+STORE_GIT_METRICS = (
+    "total_inventory", "mean_stock", "mean_stock_retail", "mean_stock_cost", "total_mean_stock",
+    "WOS", "wos_revenue", "wos_cost", "WOS_TOTAL", "inventory_turnover_rate",
+)
+DC_GIT_METRICS = ("dc_mean_stock", "total_mean_stock", "WOS_DC", "WOS_TOTAL")
 
 
 @dataclass

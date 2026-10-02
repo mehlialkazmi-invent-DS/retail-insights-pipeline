@@ -633,8 +633,8 @@ def build_dc_daily(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
     id space), which changes dc_mean_stock/WOS_DC/WOS_TOTAL for families with inventory split
     across old and current item codes.
 
-    Carries has_inventory_row and git_quantity. Without inventory_git on a DC metric (dc_mean_stock,
-    wos_dc) every row is a real inventory_warehouse row (has_inventory_row True, git_quantity 0). With
+    Carries has_inventory_row and git_quantity. Without a DC-GIT metric named in inventory_git.metrics
+    (context.DC_GIT_METRICS) every row is a real inventory_warehouse row (has_inventory_row True, git_quantity 0). With
     one on, DC goods in transit (destination_type 1, quantity > 0, summed per product x warehouse x day,
     rolled to the family main, report window) is full-outer-joined to the rows on (product_id,
     warehouse_id, date): a GIT-only day has inventory 0 and has_inventory_row False. The Year/Week

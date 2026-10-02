@@ -262,32 +262,15 @@ _BLOCKED_DAY_METRICS = (
 )
 
 
-# Inventory metric -> (store gate, DC gate): the inventory_git.metrics names that decide whether its
-# store part / DC part counts goods in transit (None = the metric has no such part).
-_GIT_METRIC_GATES: Dict[str, Tuple[Optional[str], Optional[str]]] = {
-    "total_inventory": ("total_inventory", None),
-    "mean_stock": ("mean_stock", None),
-    "mean_stock_retail": ("mean_stock", None),
-    "mean_stock_cost": ("mean_stock", None),
-    "WOS": ("wos", None),
-    "wos_revenue": ("wos", None),
-    "wos_cost": ("wos", None),
-    "inventory_turnover_rate": ("inventory_turnover_rate", None),
-    "dc_mean_stock": (None, "dc_mean_stock"),
-    "total_mean_stock": ("mean_stock", "dc_mean_stock"),
-    "WOS_DC": (None, "wos_dc"),
-    "WOS_TOTAL": ("wos", "wos_dc"),
+# Inventory metrics that can count goods in transit (inventory_git.metrics) -> what they then count.
+_GIT_METRIC_NOTES: Dict[str, str] = {
+    **{m: "store" for m in (
+        "total_inventory", "mean_stock", "mean_stock_retail", "mean_stock_cost",
+        "WOS", "wos_revenue", "wos_cost", "inventory_turnover_rate",
+    )},
+    **{m: "DC" for m in ("dc_mean_stock", "WOS_DC")},
+    **{m: "store and DC" for m in ("total_mean_stock", "WOS_TOTAL")},
 }
-
-
-def _git_note(store_gate: Optional[str], dc_gate: Optional[str], on: set) -> str:
-    """Definition sentence for a metric whose store / DC part counts goods in transit (empty when neither does)."""
-    included = [label for label, gate in (("store", store_gate), ("DC", dc_gate)) if gate is not None and gate in on]
-    if not included:
-        return ""
-    if len(included) == 2 or store_gate is None or dc_gate is None:
-        return f" Inventory counts {' and '.join(included)} goods in transit on top of on-hand."
-    return f" The {included[0]} part counts goods in transit on top of on-hand; the other part is on-hand only."
 
 
 def _last_saturday(day: datetime.date) -> datetime.date:
@@ -315,11 +298,13 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
                 "definition": base["definition"] + " DC days blocked in the UI DC blocked scope are excluded.",
             }
     git_metrics = set(settings["INVENTORY_GIT"]["metrics"])
-    for metric, (store_gate, dc_gate) in _GIT_METRIC_GATES.items():
-        note = _git_note(store_gate, dc_gate, git_metrics)
-        if note:
-            base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
-            out[metric] = {**base, "definition": base["definition"] + note}
+    for metric in git_metrics:
+        base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
+        out[metric] = {
+            **base,
+            "definition": base["definition"]
+            + f" Inventory counts {_GIT_METRIC_NOTES[metric]} goods in transit on top of on-hand.",
+        }
     if settings["REPORT_END_MODE"] == "latest_day":
         last_saturday = _last_saturday(settings["REPORT_END_DATE"])
         base = DEFAULT_METRIC_DEFINITIONS["lost_sales_pct"]
