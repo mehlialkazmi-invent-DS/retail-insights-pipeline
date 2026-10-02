@@ -105,7 +105,7 @@ def _operation_scope_pairs(ctx: KPIContext) -> DataFrame:
 def _applied_block_days(
     ctx: KPIContext, pairs: DataFrame, location_col: str, folder: str, solution_id: int
 ) -> DataFrame:
-    """(product_id, <location_col>, date) days removed by one UI blocked-scope snapshot folder.
+    """(product_id, <location_col>, date) days covered by one UI blocked-scope snapshot folder.
 
     The folder has three kinds -- product, product_destination (product x location) and destination
     (location) -- each with start_date / end_date (null = open-ended). A block is matched to `pairs`
@@ -141,8 +141,9 @@ def _applied_block_days(
 
 
 def build_blocked_days(ctx: KPIContext) -> None:
-    """Build ctx.blocked_days: the (product_id, store_id, date) days a UI block removes from the
-    report, once per run (None when blocked_scope.ui_parameters_path is None).
+    """Build ctx.blocked_days: the (product_id, store_id, date) days a UI block covers, once per run
+    (None when blocked_scope.ui_parameters_path is None). The metrics named in blocked_scope.metrics
+    drop them; the frames only flag them (pipeline._flag_blocked_days).
 
     Blocks of {ui_parameters_path}/blocked_scope for scope_source.solution_id, matched to the
     operation-scope pairs by _applied_block_days. Pairs added by scope_adjustments are not
@@ -161,9 +162,10 @@ def build_blocked_days(ctx: KPIContext) -> None:
 
 
 def build_dc_blocked_days(ctx: KPIContext) -> None:
-    """Build ctx.dc_blocked_days: the (product_id, warehouse_id, date) days removed from every DC metric
-    (dc_mean_stock, WOS_DC, the DC part of WOS_TOTAL / total_mean_stock, dc_in_stock_rate), like the
-    store blocks on the store metrics (None unless blocked_scope.dc_solution_id is set).
+    """Build ctx.dc_blocked_days: the (product_id, warehouse_id, date) days a DC block covers, dropped by the
+    DC metrics named in blocked_scope.metrics (dc_mean_stock, WOS_DC, the DC part of WOS_TOTAL /
+    total_mean_stock, dc_in_stock_rate), like the store blocks on the store metrics (None unless
+    blocked_scope.dc_solution_id is set).
 
     The DC solution's operation/scope run (same run_date, roll-up, active filter and earliest
     scope_start as the store scope, location = warehouse) gives each DC pair its scope_start; blocks of

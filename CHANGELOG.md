@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> The entries below were written as each feature landed; later in this release the keys were merged.
+> Read `inventory_git` / `instock_daily.git_date_shift_days` / `dc_instock.git_date_shift_days` /
+> `item_family_rollup.goods_in_transit` as `goods_in_transit.*`, `instock_daily` / `instock_source` as
+> `instock.method` + `instock.daily` / `instock.weekly_source`, and "blocked days removed" as flagged and
+> removed per `blocked_scope.metrics` (see "Config simplification" and "Per-metric blocked scope gate").
+
+#### Comparable pairs: `comparable_pairs.pair_days`
+
+`comparable_pairs.pair_days` (`"unblocked"` | `"all"`, required) chooses whether blocked days make a pair
+present in a year for the like-for-like universe (`comparable._build_comparable_kind`). `"unblocked"` keeps
+the previous behaviour; each metric then applies its own `blocked_scope.metrics` gate on the comparable
+pairs, as on the other tabs. Also: the sales output rows drop blocked days only when every reported
+metric (`metric_cols`) drops them, so no metric loses rows; the HTML blocked-day notes now cover every
+listed metric (distinct counts, weighted in-stock's weights, lost sales %'s denominator, both sides of the
+combined metrics); dead fallbacks for older settings dicts removed (`DEFAULT_*_COLUMN_MAP`,
+`INSTOCK_SOURCE_ENABLED`, `INSTOCK_DAILY["enabled"]`, soft `dc_instock` reads).
+
+**Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/{comparable,metrics,pipeline,inputs,html_report}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-02
+
 ### ✨ Added
 
 #### Gated goods in transit on the inventory metrics (`inventory_git`)
@@ -92,6 +113,72 @@ rolled to the family main.
 **Date:** 2026-10-02
 
 ### 🔄 Changed
+
+#### Config simplification: one `instock`, one `goods_in_transit`; both configs shorter
+
+`config.py` and `tbretail_config.py` keep **every** section and key (switched-off features included) but merge
+the keys that described one feature in several places, and lose their long comment essays (rationale, history,
+caveats and examples moved to `README.md`; the config comments are a short header per section plus a pointer;
+`tbretail_config.py`'s one-time CSV export notes are now README's "tbretail setup"). Every other key and every
+value is unchanged. `materialize()` (duplicated in both files, changed identically) indexes the new keys directly.
+
+| Old key | New key |
+| --- | --- |
+| `instock_daily.enabled = True` | `instock.method = "daily"` |
+| `instock_source.enabled = True` | `instock.method = "weekly_source"` |
+| both off (generic default) | `instock.method = "lost_sales_source"` |
+| `instock_daily.{count_start, require_daily_data, history_start, usable_only, input_filters}` | `instock.daily.{...}` (same keys) |
+| `instock_source.{path_segments, week_col, product_col, store_col, in_stock_col, total_days_col, product_agg_level_col, fallback_sources}` | `instock.weekly_source.{...}` (same keys) |
+| `instock_daily.git_date_shift_days` | `goods_in_transit.date_shift_days` + `goods_in_transit.store_instock = True` |
+| `dc_instock.git_date_shift_days` | `goods_in_transit.date_shift_days` + `goods_in_transit.dc_instock = True` (the key is removed from `dc_instock`) |
+| `inventory_git.git_date_shift_days` | `goods_in_transit.date_shift_days` |
+| `inventory_git.metrics` | `goods_in_transit.inventory_metrics` |
+| `item_family_rollup.goods_in_transit` | `goods_in_transit.roll_to_family_main` (env `KPI_ITEM_FAMILY_ROLLUP_GOODS_IN_TRANSIT` dropped) |
+| env `KPI_INSTOCK_SOURCE_ENABLED` | env `KPI_INSTOCK_METHOD` (`daily` / `weekly_source` / `lost_sales_source`); the other `KPI_INSTOCK_*` names are unchanged and set `instock.weekly_source.*` |
+| settings `INVENTORY_GIT`, `DC_INSTOCK_GIT_DATE_SHIFT_DAYS`, `INSTOCK_DAILY["git_date_shift_days"]`, `ITEM_FAMILY_ROLLUP["goods_in_transit"]` | one `GOODS_IN_TRANSIT = {date_shift_days, roll_to_family_main, store_instock, dc_instock, inventory_metrics}`; new `INSTOCK_METHOD` (`INSTOCK_DAILY`, `INSTOCK_SOURCE_ENABLED`, `INSTOCK_SOURCE_COLUMN_MAP` stay, derived from `instock`) |
+
+`goods_in_transit.date_shift_days = None` means goods in transit is off everywhere: `store_instock` / `dc_instock` must
+then be `False` and `inventory_metrics` empty (else `ValueError`); `store_instock = True` requires
+`instock.method = "daily"`; a non-empty `inventory_metrics` still requires `use_fiscal_calendar`. All existing
+validations keep working under the new names (`latest_day` requires method `daily`; the `lost_sales_ensemble`
+incompatibilities; the `count_start` rules). `instock.method` rejects unknown names with the allowed list. Values:
+tbretail `-1` / roll `True` / `store_instock True` / `dc_instock True` / all 12 inventory metrics; generic `None` /
+`True` / `False` / `False` / `[]`.
+
+**Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/{context,inputs,pipeline,metrics,html_report,runner}.py`, `README.md`, `.claude/commands/retail-insights-help.md`, `main.ipynb`
+
+**Date:** 2026-10-02
+
+#### Per-metric blocked scope gate (`blocked_scope.metrics`)
+
+New key `blocked_scope.metrics`: the metrics that drop blocked days, `"all"` or a list from `METRICS_ALL` (unknown
+names raise; `settings["BLOCKED_SCOPE"]["metrics"]` is the resolved list in `METRICS_ALL` order). Store blocks
+(`ctx.blocked_days`) and DC blocks (`ctx.dc_blocked_days`, `blocked_scope.dc_solution_id`) are no longer removed
+from every row: a metric in the list reads only unblocked rows, a metric not in the list reads blocked and
+unblocked rows alike. `build_scoped_daily` / `build_dc_daily` flag the blocked days (`is_blocked`, one left join)
+instead of anti-joining them; `metrics.compute_kpis` keeps one aggregation pass per frame and family with
+conditional aggregation (`F.when(~is_blocked, x)` in sum / avg / countDistinct, and per-metric `<metric>_day` /
+`<metric>_has` day columns replacing `_day_sums`). Per family: the sales group (`total_sales_quantity`,
+`total_sales_revenue`, `AUR`, `AUC`, the distinct counts) each by its own gate; `total_inventory`, `mean_stock`
+(+ retail / cost), `WOS`, `wos_revenue`, `wos_cost`, `inventory_turnover_rate` (sales units and mean stock) and the
+store part of `total_mean_stock` / `WOS_TOTAL` each by their own gate; `dc_mean_stock`, `WOS_DC` and the DC part of
+`total_mean_stock` / `WOS_TOTAL` drop DC blocked days by that metric's gate; `in_stock_rate`: the daily in-stock frame
+(`build_instock_daily`) removes blocked store-days, on-hand days and GIT days only when it is in the list, and
+`weighted_instock_rate` uses that frame with its sales weights dropping blocked days when it is in the list;
+`dc_in_stock_rate`: `build_dc_inst` removes DC blocked days only when in the list (new `dc_unblocked_days` column
+for the pair universe); `lost_sales_pct`: the daily-data sales in its denominator drop blocked days only when in the
+list (the weekly lost-sales numerator never changes). The comparable-pairs pair / year universe stays the real,
+unblocked rows; `scope_diff` and the scope debug are unchanged. The Metric Details blocked-days notes appear only on
+listed metrics. Generic default `"all"`: turning blocked scope on behaves exactly as before. `tbretail_config.py`
+lists `in_stock_rate`, `weighted_instock_rate`, `dc_in_stock_rate`, `total_inventory`, `mean_stock`, `mean_stock_retail`,
+`mean_stock_cost`, `dc_mean_stock`, `total_mean_stock`, `WOS`, `wos_revenue`, `wos_cost`, `WOS_DC`, `WOS_TOTAL` and
+`inventory_turnover_rate`: sales units, revenue, AUR, AUC, the distinct counts and `lost_sales_pct` now **keep**
+blocked days (a blocked pair can still sell its existing stock), so those tbretail numbers change; the other
+tbretail metrics keep their blocked-day behaviour.
+
+**Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/{context,pipeline,metrics,comparable,html_report}.py`, `README.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-02
 
 #### Population rules confirmed for tbretail; `lost_base` weeks and Weekly display slots under `latest_day`
 

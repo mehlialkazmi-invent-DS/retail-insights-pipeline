@@ -127,7 +127,7 @@ def _restrict_frames(
     comparable genuinely like-for-like rather than something that silently weakens with the scope
     configuration.
 
-    Frames carrying no store_id of their own -- inst_data/lost_base when instock_source/lost_sales_source has no
+    Frames carrying no store_id of their own -- inst_data/lost_base when instock.weekly_source/lost_sales_source has no
     store_col, plus scope_pairs/scope_pair_weeks when neither scope nor lost-sales has a store
     dimension -- are restricted to the pair universe's DISTINCT PRODUCTS instead. Collapsing to
     distinct products first is what stops that join fanning their rows out one-per-store; their
@@ -346,11 +346,19 @@ def _build_comparable_kind(
     def _in_number(frame: DataFrame) -> DataFrame:
         return frame.filter(F.col(numbered.number_col) == number) if numbered else frame
 
-    # The pair / year universe comes from real daily-data rows only: a goods-in-transit-only day
-    # (inventory_git) never makes a pair "present" in a year.
-    scoped_daily_pop = _in_number(pf["scoped_daily"]).filter(F.col("has_daily_row"))
-    dc_daily_pop = _in_number(pf["dc_daily"]).filter(F.col("has_inventory_row"))
+    # The pair / year universe comes from real rows only: a goods-in-transit-only day never makes a pair
+    # "present" in a year. comparable_pairs.pair_days "unblocked" (default) also leaves blocked days out,
+    # "all" counts them; either way every metric then applies its own blocked_scope.metrics gate, as on
+    # the other tabs. dc_inst's blocked days may be counted in its metric, so its universe reads
+    # dc_unblocked_days for "unblocked".
+    unblocked_only = ctx.settings["COMPARABLE_PAIRS_PAIR_DAYS"] == "unblocked"
+    present = F.col("has_daily_row") & ~F.col("is_blocked") if unblocked_only else F.col("has_daily_row")
+    dc_present = F.col("has_inventory_row") & ~F.col("is_blocked") if unblocked_only else F.col("has_inventory_row")
+    scoped_daily_pop = _in_number(pf["scoped_daily"]).filter(present)
+    dc_daily_pop = _in_number(pf["dc_daily"]).filter(dc_present)
     dc_inst_pop = _in_number(pf["dc_inst"])
+    if unblocked_only:
+        dc_inst_pop = dc_inst_pop.filter(F.col("dc_unblocked_days") > 0)
 
     years = sorted(r["Year"] for r in scoped_daily_pop.select("Year").distinct().collect())
     if numbered:

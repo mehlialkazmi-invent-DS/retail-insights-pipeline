@@ -255,14 +255,19 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
 }
 
 
-# Metrics computed from the scoped daily-data rows, i.e. the ones blocked scope removes days from.
+# Metrics that read the store blocked days (scoped daily-data rows, or the daily in-stock / lost-sales
+# sales built from them): each notes the exclusion when it is in blocked_scope.metrics. The DC metrics
+# (_DC_BLOCKED_DAY_METRICS) note DC blocked days; total_mean_stock / WOS_TOTAL / WOS_DC have both sides.
 _BLOCKED_DAY_METRICS = (
-    "total_sales_revenue", "total_sales_quantity", "AUR", "AUC", "total_inventory", "mean_stock",
-    "mean_stock_retail", "mean_stock_cost", "WOS", "wos_revenue", "wos_cost", "inventory_turnover_rate",
+    "total_sales_revenue", "total_sales_quantity", "AUR", "AUC", "distinct_product_count",
+    "distinct_store_count", "distinct_pair_count", "total_inventory", "mean_stock", "mean_stock_retail",
+    "mean_stock_cost", "total_mean_stock", "WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL",
+    "inventory_turnover_rate", "weighted_instock_rate", "lost_sales_pct",
 )
+_DC_BLOCKED_DAY_METRICS = ("dc_mean_stock", "total_mean_stock", "WOS_DC", "WOS_TOTAL")
 
 
-# Inventory metrics that can count goods in transit (inventory_git.metrics) -> what they then count.
+# Inventory metrics that can count goods in transit (goods_in_transit.inventory_metrics) -> what they then count.
 _GIT_METRIC_NOTES: Dict[str, str] = {
     **{m: "store" for m in (
         "total_inventory", "mean_stock", "mean_stock_retail", "mean_stock_cost",
@@ -279,26 +284,30 @@ def _last_saturday(day: datetime.date) -> datetime.date:
 
 def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
     """Definition overrides that depend on the run's settings: the daily in-stock method
-    (instock_daily), the blocked-days note on the daily-data metrics (blocked_scope), the goods-in-transit
-    notes on the inventory metrics (inventory_git), the lost-sales period and WOS part-week notes (report_end
-    "latest_day") and the DC goods-in-transit / DC blocked-days notes on DC In-Stock Rate (dc_instock)."""
+    (instock.method "daily"), the blocked-days note on the metrics named in blocked_scope.metrics, the
+    goods-in-transit notes on the inventory metrics (goods_in_transit.inventory_metrics), the lost-sales
+    period and WOS part-week notes (report_end "latest_day") and the DC goods-in-transit / DC blocked-days
+    notes on DC In-Stock Rate (dc_instock)."""
     out: Dict[str, Dict[str, str]] = {}
+    blocked_metrics = settings["BLOCKED_SCOPE"]["metrics"]
     if settings["BLOCKED_SCOPE"]["path"] is not None:
         for metric in _BLOCKED_DAY_METRICS:
-            base = DEFAULT_METRIC_DEFINITIONS[metric]
-            out[metric] = {
-                **base,
-                "definition": base["definition"] + " Days blocked in the UI blocked scope are excluded.",
-            }
+            if metric in blocked_metrics:
+                base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
+                out[metric] = {
+                    **base,
+                    "definition": base["definition"] + " Days blocked in the UI blocked scope are excluded.",
+                }
     if settings["BLOCKED_SCOPE"]["dc_solution_id"] is not None:
-        for metric in ("dc_mean_stock", "total_mean_stock", "WOS_DC", "WOS_TOTAL"):
-            base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
-            out[metric] = {
-                **base,
-                "definition": base["definition"] + " DC days blocked in the UI DC blocked scope are excluded.",
-            }
-    git_metrics = set(settings["INVENTORY_GIT"]["metrics"])
-    for metric in git_metrics:
+        for metric in _DC_BLOCKED_DAY_METRICS:
+            if metric in blocked_metrics:
+                base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
+                out[metric] = {
+                    **base,
+                    "definition": base["definition"] + " DC days blocked in the UI DC blocked scope are excluded.",
+                }
+    goods_in_transit = settings["GOODS_IN_TRANSIT"]
+    for metric in goods_in_transit["inventory_metrics"]:
         base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
         out[metric] = {
             **base,
@@ -307,7 +316,7 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
         }
     if settings["REPORT_END_MODE"] == "latest_day":
         last_saturday = _last_saturday(settings["REPORT_END_DATE"])
-        base = DEFAULT_METRIC_DEFINITIONS["lost_sales_pct"]
+        base = out.get("lost_sales_pct", DEFAULT_METRIC_DEFINITIONS["lost_sales_pct"])
         out["lost_sales_pct"] = {
             **base,
             "definition": base["definition"]
@@ -325,12 +334,13 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
                 "its average inventory is weighted by elapsed days / 7.",
             }
     cfg = settings["INSTOCK_DAILY"]
-    if cfg["enabled"]:
+    if settings["INSTOCK_METHOD"] == "daily":
         in_stock = "on-hand inventory > 0"
-        if cfg["git_date_shift_days"] is not None:
+        if goods_in_transit["store_instock"]:
             in_stock += " or store goods in transit > 0"
+        blocked_excluded = settings["BLOCKED_SCOPE"]["path"] is not None and "in_stock_rate" in blocked_metrics
         excluded = " and ".join(
-            (["Blocked days"] if settings["BLOCKED_SCOPE"]["path"] is not None else [])
+            (["Blocked days"] if blocked_excluded else [])
             + (["unusable days"] if cfg["usable_only"] else [])
         )
         excluded = excluded[:1].upper() + excluded[1:]
@@ -350,9 +360,9 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
         }
     if settings["DC_INSTOCK_ENABLED"]:
         dc_notes = []
-        if settings["DC_INSTOCK_GIT_DATE_SHIFT_DAYS"] is not None:
+        if goods_in_transit["dc_instock"]:
             dc_notes.append("A day with goods in transit to the DC also counts as stocked.")
-        if settings["BLOCKED_SCOPE"]["dc_solution_id"] is not None:
+        if settings["BLOCKED_SCOPE"]["dc_solution_id"] is not None and "dc_in_stock_rate" in blocked_metrics:
             dc_notes.append("Days blocked in the UI DC blocked scope are excluded.")
         if dc_notes:
             base = DEFAULT_METRIC_DEFINITIONS["dc_in_stock_rate"]

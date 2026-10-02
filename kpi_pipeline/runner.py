@@ -114,8 +114,8 @@ class KPIRunner:
         print("SCOPE SOURCE:", s["SCOPE_SOURCE"])
         print("DEFINED_SCOPE path:", s["DEFINED_SCOPE"]["path"])
         print("BLOCKED_SCOPE:", s["BLOCKED_SCOPE"])
-        print("INSTOCK_DAILY:", s["INSTOCK_DAILY"])
-        print("INVENTORY_GIT:", s["INVENTORY_GIT"])
+        print("INSTOCK:", s["INSTOCK_METHOD"], "|", s["INSTOCK_DAILY"])
+        print("GOODS_IN_TRANSIT:", s["GOODS_IN_TRANSIT"])
         print("SLICE_DIMENSIONS:", s["SLICE_DIMENSIONS"])
         print("COMPARISONS:", s.get("COMPARISON_KINDS", ["yoy", "ytd"]))
         if s["SAVE_OUTPUTS"]:

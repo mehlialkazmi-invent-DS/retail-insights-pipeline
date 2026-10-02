@@ -8,9 +8,9 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 from pyspark.sql import DataFrame, SparkSession
 
-# inventory_git.metrics names (config.py's INVENTORY_GIT_METRICS_ALL) by the goods in transit they read:
-# store metrics build_scoped_daily's store GIT, DC metrics build_dc_daily's DC GIT; total_mean_stock and
-# WOS_TOTAL read both.
+# goods_in_transit.inventory_metrics names (config.py's INVENTORY_GIT_METRICS_ALL) by the goods in transit
+# they read: store metrics build_scoped_daily's store GIT, DC metrics build_dc_daily's DC GIT;
+# total_mean_stock and WOS_TOTAL read both.
 STORE_GIT_METRICS = (
     "total_inventory", "mean_stock", "mean_stock_retail", "mean_stock_cost", "total_mean_stock",
     "WOS", "wos_revenue", "wos_cost", "WOS_TOTAL", "inventory_turnover_rate",
@@ -68,12 +68,12 @@ class KPIContext:
     # scope after the family roll-up (earliest start per pair) and active filter. Source of each
     # pair's scope start date for the blocked-scope rule and the daily in-stock count start.
     operation_scope_pairs: Optional[DataFrame] = None
-    # blocked_scope.ui_parameters_path set only: cached (product_id, store_id, date) days removed
-    # from every daily-data-derived metric. None when blocked scope is off.
+    # blocked_scope.ui_parameters_path set only: cached (product_id, store_id, date) blocked days. Flagged
+    # (is_blocked) on scoped_daily, and removed from the metrics named in blocked_scope.metrics. None when
+    # blocked scope is off.
     blocked_days: Optional[DataFrame] = None
-    # blocked_scope.dc_solution_id set only: cached
-    # (product_id, warehouse_id, date) days removed from every DC metric (DC inventory, DC WOS, DC
-    # in-stock). None otherwise.
+    # blocked_scope.dc_solution_id set only: cached (product_id, warehouse_id, date) blocked days. Flagged
+    # (is_blocked) on dc_daily and removed from the DC metrics named in blocked_scope.metrics. None otherwise.
     dc_blocked_days: Optional[DataFrame] = None
 
     scope_adjustments_applied: bool = False
@@ -116,7 +116,7 @@ class KPIContext:
 
     daily_data_raw: Optional[DataFrame] = None
     # Scope-independent (pair, date) days input_filters.daily_data removes, built once and shared by
-    # every build_scoped_daily call when a store inventory_git gate is on.
+    # every build_scoped_daily call when a store goods_in_transit.inventory_metrics gate is on.
     daily_data_excluded_days: Optional[DataFrame] = None
     lost_sales_weekly_base: Optional[DataFrame] = None
     instock_weekly_base: Optional[DataFrame] = None

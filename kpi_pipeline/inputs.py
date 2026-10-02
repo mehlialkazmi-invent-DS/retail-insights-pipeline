@@ -8,29 +8,6 @@ from typing import Any, Dict, List, Optional
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
-# Fallback defaults when a settings dict predates lost_sales_source/instock_source (e.g. a
-# customer config that duplicates config.py's schema instead of importing it) and so lacks
-# these resolved keys entirely — reproduces the schema every pipeline read has always assumed.
-DEFAULT_LOST_SALES_COLUMN_MAP: Dict[str, Any] = {
-    "week_col": "week_start_date",
-    "product_col": "product_id",
-    "store_col": "store_id",
-    "lost_sales_col": "lost_sales",
-    "in_stock_col": "in_stock",
-    "total_days_col": "details.total_days",
-    "product_agg_level_col": None,
-}
-DEFAULT_INSTOCK_SOURCE_COLUMN_MAP: Dict[str, Any] = {
-    "week_col": "week_start_date",
-    "product_col": "product_id",
-    "store_col": "store_id",
-    "in_stock_col": "in_stock",
-    "total_days_col": "total_days",
-    "product_agg_level_col": None,
-    "fallback_sources": [],
-}
-
-
 def resolve_csv_path(path: str, location: str = "datastore") -> str:
     """Resolve a CSV path for Spark based on where the file physically lives.
 
@@ -213,7 +190,7 @@ def read_lost_sales_source(
     spark: SparkSession, settings: Dict[str, Any], path: Optional[str] = None, quiet: bool = False
 ) -> DataFrame:
     path = path or settings["PATH_LOST_SALES"]
-    col_map = settings.get("LOST_SALES_COLUMN_MAP") or DEFAULT_LOST_SALES_COLUMN_MAP
+    col_map = settings["LOST_SALES_COLUMN_MAP"]
     filters = _input_filters(settings, "lost_sales")
     if not quiet:
         print(f"reading lost_sales: {path}")
@@ -228,7 +205,7 @@ def read_lost_sales_source(
 
 
 def read_instock_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
-    """In-stock table for the instock_source override (only read when enabled).
+    """In-stock table of instock.weekly_source (only read when instock.method is "weekly_source").
 
     Renamed to canonical product_id/[store_id/]week_start_date/in_stock/total_days columns,
     regardless of what the source calls them (see INSTOCK_SOURCE_COLUMN_MAP).
@@ -242,9 +219,9 @@ def read_instock_source(spark: SparkSession, settings: Dict[str, Any], quiet: bo
     sources compute it the same way for any real week they both happen to cover.
     """
     path = settings["PATH_INSTOCK_SOURCE"]
-    col_map = settings.get("INSTOCK_SOURCE_COLUMN_MAP") or DEFAULT_INSTOCK_SOURCE_COLUMN_MAP
+    col_map = settings["INSTOCK_SOURCE_COLUMN_MAP"]
     if not quiet:
-        print(f"reading instock_source: {path}")
+        print(f"reading instock.weekly_source: {path}")
     raw = spark.read.format("delta").load(path)
 
     def _build(cm: Dict[str, Any]) -> DataFrame:
@@ -380,7 +357,7 @@ def get_daily_data_excluded_days(ctx) -> DataFrame:
 
 def read_inventory_warehouse_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
     """DC/warehouse daily inventory table -- plain product_id/warehouse_id/date/inventory
-    columns, no column-mapping needed (unlike lost_sales_source/instock_source)."""
+    columns, no column-mapping needed (unlike lost_sales_source/instock.weekly_source)."""
     path = settings["PATH_INVENTORY_WAREHOUSE"]
     filters = _input_filters(settings, "inventory_warehouse")
     if not quiet:
