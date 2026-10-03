@@ -407,6 +407,66 @@ def build_hybrid_scope(ctx: KPIContext) -> None:
     print("missing_weeks:", missing_weeks.count(), "| final_scope:", ctx.hybrid_scope_keys.count())
 
 
+def _fully_blocked_pairs(ctx: KPIContext) -> DataFrame:
+    """(product_id, store_id) of ctx.hybrid_scope_keys whose every in-window scope day is a blocked day: a
+    pair-week is fully blocked when its blocked days reach its days inside the window. The intervals of a pair
+    are disjoint, so summing their overlaps with a week counts each day once."""
+    pair_keys = ["product_id", "store_id"]
+    start, end = ctx.settings["EFFECTIVE_REPORT_START_DATE"], ctx.settings["REPORT_END_DATE"]
+    weeks = ctx.fiscal_week.select(
+        "Year",
+        "Week",
+        F.greatest(F.col("week_start_date"), F.lit(start)).alias("_from"),
+        F.least(F.col("week_end_date"), F.lit(end)).alias("_to"),
+    )
+    overlap = F.datediff(F.least(F.col("last_day"), F.col("_to")), F.greatest(F.col("first_day"), F.col("_from"))) + 1
+    return (
+        ctx.hybrid_scope_keys.select(*pair_keys, "Year", "Week")
+        .distinct()
+        .join(ctx.blocked_days.select(*pair_keys).distinct(), on=pair_keys, how="left_semi")
+        .join(broadcast(weeks), on=["Year", "Week"], how="inner")
+        .join(ctx.blocked_days, on=pair_keys, how="inner")
+        .groupBy(*pair_keys, "Year", "Week", "_from", "_to")
+        .agg(F.sum(F.greatest(F.lit(0), overlap)).alias("_blocked_days"))
+        .groupBy(*pair_keys)
+        .agg(F.min(F.col("_blocked_days") >= F.datediff(F.col("_to"), F.col("_from")) + 1).alias("_all_blocked"))
+        .filter(F.col("_all_blocked"))
+        .select(*pair_keys)
+    )
+
+
+def build_scope_removals(ctx: KPIContext) -> None:
+    """Build the cached removal sets once per scope build, read by the Scope debug summary and the pipeline:
+
+    * ctx.fully_blocked_pairs (blocked scope on): scope pairs blocked on every in-window scope day.
+    * ctx.instock_sub_only_pairs (instock.method "daily" + scope.instock_main_eligible_only): scope pairs
+      where only a sub item, not the main, is eligible.
+    * ctx.instock_unsuperseded_products (instock.method "daily" + scope.instock_exclude_unsuperseded_sizes):
+      sizes of a superseded class color outside the supersession.
+    """
+    from kpi_pipeline.pipeline import _unsuperseded_sizes
+
+    s = ctx.settings
+    for name in ("fully_blocked_pairs", "instock_sub_only_pairs", "instock_unsuperseded_products"):
+        if getattr(ctx, name) is not None:
+            getattr(ctx, name).unpersist()
+        setattr(ctx, name, None)
+
+    if ctx.blocked_days is not None:
+        ctx.fully_blocked_pairs = _fully_blocked_pairs(ctx).cache()
+        print(f"scope pairs blocked on every window day: {ctx.fully_blocked_pairs.count():,}")
+    if s["INSTOCK_METHOD"] != "daily":
+        return
+    if s["SCOPE"]["instock_main_eligible_only"]:
+        ctx.instock_sub_only_pairs = (
+            ctx.scope_pairs.filter(~F.col("main_eligible")).select("product_id", "store_id").cache()
+        )
+        print(f"in-stock removal, sub-item-only pairs: {ctx.instock_sub_only_pairs.count():,}")
+    if s["SCOPE"]["instock_exclude_unsuperseded_sizes"]:
+        ctx.instock_unsuperseded_products = _unsuperseded_sizes(ctx).cache()
+        print(f"in-stock removal, unsuperseded sizes: {ctx.instock_unsuperseded_products.count():,}")
+
+
 def scope_summary_by_origin(scope: DataFrame):
     """Row counts by scope_origin, plus a TOTAL row."""
     spark = scope.sparkSession

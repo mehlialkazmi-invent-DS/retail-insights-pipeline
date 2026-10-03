@@ -25,6 +25,7 @@ from kpi_pipeline.scope import (
     build_dc_scope,
     build_hybrid_scope,
     build_scope,
+    build_scope_removals,
     scope_summary_by_origin,
 )
 from kpi_pipeline.scope_debug import scope_universe_counts
@@ -229,6 +230,7 @@ class KPIRunner:
         build_dc_scope(self.ctx)
         build_dc_blocked_days(self.ctx)
         build_hybrid_scope(self.ctx)
+        build_scope_removals(self.ctx)
 
     def latest_overall_kpis(self) -> pd.DataFrame:
         """kpi_long's overall rows (root and dimension "overall") of the latest period of each period_type,

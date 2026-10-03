@@ -372,6 +372,22 @@ def build_scoped_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs_in: D
     )
 
 
+def instock_daily_pairs(ctx: KPIContext, scope_pairs: DataFrame) -> DataFrame:
+    """The (product_id, store_id) pairs instock.method="daily" counts: ``scope_pairs`` after
+    instock.daily.input_filters and the scope in-stock client rules, whose removal sets
+    scope.build_scope_removals built once."""
+    pairs = apply_input_filters(
+        scope_pairs, ctx.settings["INSTOCK_DAILY"]["input_filters"], "instock.daily.input_filters"
+    )
+    if ctx.instock_sub_only_pairs is not None:
+        # Client rule: stores where only a sub item (not the main) is eligible leave in-stock only.
+        pairs = pairs.join(ctx.instock_sub_only_pairs, on=["product_id", "store_id"], how="left_anti")
+    if ctx.instock_unsuperseded_products is not None:
+        # Client rule: sizes of a superseded class color outside the supersession (likely NGF) leave in-stock only.
+        pairs = pairs.join(broadcast(ctx.instock_unsuperseded_products), on="product_id", how="left_anti")
+    return pairs
+
+
 def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: DataFrame) -> DataFrame:
     """In-stock frame of instock.method="daily": per scope pair x fiscal week, stocked_pairs (in-stock days)
     and available_days (counted store-days), the shape of the weekly inst_data, from noob/daily-data.
@@ -403,14 +419,7 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
     cal = broadcast(_calendar_frame(ctx, *part_cols))
     fw = broadcast(_fiscal_week_parts(ctx))
 
-    pairs = apply_input_filters(scope_pairs, cfg["input_filters"], "instock.daily.input_filters")
-    if s["SCOPE"]["instock_main_eligible_only"]:
-        # Client rule: stores where only a sub item (not the main) is eligible leave in-stock only.
-        sub_only = ctx.scope_pairs.filter(~F.col("main_eligible")).select(*pair_keys)
-        pairs = pairs.join(sub_only, on=pair_keys, how="left_anti")
-    if s["SCOPE"]["instock_exclude_unsuperseded_sizes"]:
-        # Client rule: sizes of a superseded class color outside the supersession (likely NGF) leave in-stock only.
-        pairs = pairs.join(broadcast(_unsuperseded_sizes(ctx)), on="product_id", how="left_anti")
+    pairs = instock_daily_pairs(ctx, scope_pairs)
     daily = get_instock_daily_raw(ctx).join(pairs, on=pair_keys, how="left_semi")
     if blocked is not None:
         daily = _drop_blocked_days(daily, blocked, "store_id")

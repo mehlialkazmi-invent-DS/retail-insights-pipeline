@@ -115,12 +115,17 @@ For `time="daily"` the scope table already covers **every** window week, so the 
 A lightweight, read-only pre-flight count sanity-checks scope before the heavy computation. The **Scope debug** cell in `main.ipynb` (between the input previews and the pipeline run) calls:
 
 ```python
-runner.build_dimensions()
-runner.build_scopes(fund_paste=fund.paste)
+runner.prepare_scopes()
 display(runner.scope_debug_summary())
 ```
 
-`scope_debug_summary()` returns a DataFrame of distinct `product_id`, `store_id` and pair counts for the **final scope** (after hybrid backfill): an `overall` row plus one row per **active slice dimension** value (`slices`, `derived_dimensions`, enabled `dimension_sources`), using the KPI step's `value_filters`. With `grain = "product"` only `distinct_product_count` is shown. `build_dimensions()` / `build_scopes()` are idempotent; Cell 3's `runner.run()` rebuilds the same scope. NULL slice values show as `"NULL"` here, empty/None in `kpi_long`.
+`scope_debug_summary()` returns a DataFrame of distinct `product_id`, `store_id` and pair counts at each stage of removal, one column set per stage (`{stage}_product_count`, `{stage}_store_count`, `{stage}_pair_count`): an `overall` row plus one row per **active slice dimension** value (`slices`, `derived_dimensions`, enabled `dimension_sources`), using the KPI step's `value_filters`. Stages, in order:
+
+- `scope` — the final scope (scope source + hybrid backfill).
+- `unblocked` (blocked scope on) — scope pairs with at least one unblocked in-window scope day; a pair blocked on every day drops out of every metric in `blocked_scope.metrics`.
+- `instock` (`instock.method = "daily"`) — the pairs the daily in-stock rate counts: after `instock.daily.input_filters`, `scope.instock_main_eligible_only` and `scope.instock_exclude_unsuperseded_sizes`, starting from `unblocked` when `in_stock_rate` is in `blocked_scope.metrics`. `require_daily_data` is not applied (it needs the run's daily-data scan).
+
+Each stage is the population of the metrics it names, not of every metric: blocked days and the in-stock rules stay per metric inside `runner.run()`. The removal sets (`ctx.fully_blocked_pairs`, `ctx.instock_sub_only_pairs`, `ctx.instock_unsuperseded_products`) are built once by `scope.build_scope_removals` at the end of `build_scopes()`; this summary and the daily in-stock frame both read them. With `grain = "product"` only `scope_product_count` is shown. `prepare_scopes()` builds the scope once and `runner.run()` reuses it. NULL slice values show as `"NULL"` here, empty/None in `kpi_long`.
 
 ## Dimension sources → roots (population tabs from other tables)
 
@@ -1001,8 +1006,7 @@ from kpi_pipeline.io import save_outputs, load_saved_outputs
 
 # Pre-flight scope debug (distinct product/store counts overall + per slice)
 runner = KPIRunner(spark, settings)
-runner.build_dimensions()
-runner.build_scopes(fund_paste=fund.paste)
+runner.prepare_scopes()
 print(runner.scope_debug_summary())
 
 # Full run

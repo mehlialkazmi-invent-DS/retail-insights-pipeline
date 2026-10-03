@@ -34,7 +34,7 @@ If you are a new DS picking this up for the first time:
    - `reporting_window.as_of_date` → today or the last Sunday
    - `path_segments.scope` → path to your scope table
    - `scope.columns` → column names in that table (and `scope.time` / `scope.grain`)
-3. **Run `main.ipynb`** top to bottom. Cell 1 prints resolved settings. Cell 2 previews raw inputs. The **Scope debug** cell reports distinct product/store counts per slice. Cell 3 runs the pipeline.
+3. **Run `main.ipynb`** top to bottom. Cell 1 prints resolved settings. Cell 2 previews raw inputs. The **Scope debug** cell reports distinct product/store counts per slice, before and after the blocked-scope and in-stock removals. Cell 3 runs the pipeline.
 4. **Check the HTML report** written next to the notebook (Cell 6). It has a Metric Details tab explaining every metric.
 5. **If something looks wrong**, check the Troubleshooting section (§8) or ask me what each config key does.
 
@@ -86,8 +86,10 @@ kpi_pipeline/
   inputs.py        cached Delta reads (daily_data_raw, lost_sales_weekly_base) + input_filters;
                    prints the source date range for daily_data/lost_sales on every read
   scope.py         scope table (daily / weekly), score scope (hybrid),
-                   build_blocked_days (blocked_scope) — §3.2a/b
-  scope_debug.py   scope_universe_counts: pre-flight distinct product/store counts per slice
+                   build_blocked_days (blocked_scope) — §3.2a/b;
+                   build_scope_removals: removal sets built ONCE per scope build (§3.3a)
+  scope_debug.py   scope_universe_counts: pre-flight distinct product/store counts per slice,
+                   one column set per removal stage (scope / unblocked / instock)
                    (all active_slice_dimensions, root-defining columns included — this is a
                    raw diagnostic, unaware of the root/cut split the KPI step applies)
   pipeline.py      build_pipeline_frames: scoped_daily, inst_data, lost_base, dc_daily, dc_inst
@@ -356,11 +358,19 @@ Goods in transit has its own roll-up toggle, `goods_in_transit.roll_to_family_ma
 Before Cell 3's full run, the **Scope debug** cell in `main.ipynb` sanity-checks scope size and per-slice coverage — read-only, distinct from `runner.run()`:
 
 ```python
-runner.prepare_scopes(fund_paste=fund.paste)
+runner.prepare_scopes()
 display(runner.scope_debug_summary())
 ```
 
-`scope_debug_summary()` → `kpi_pipeline.scope_debug.scope_universe_counts(ctx)` returns distinct `product_id`, `store_id`, and pair counts for the **final scope** (after hybrid backfill): one `overall` row plus one row per active slice dimension value (`slices`, `derived_dimensions`, enabled `dimension_sources`). It applies the same `value_filters` as the KPI step, so counts match `kpi_long` per slice. Product-week scope (no `store_col`) shows only `distinct_product_count`. NULL slice values show as `"NULL"` here vs blank/None in `kpi_long`. `prepare_scopes` resets the run caches and builds the dimensions and scopes once; Cell 3's `runner.run()` reuses them instead of building them again (a later `run()` rebuilds). Skipped in `html_only` mode (no scope is built).
+`scope_debug_summary()` → `kpi_pipeline.scope_debug.scope_universe_counts(ctx)` returns distinct `product_id`, `store_id`, and pair counts at each **removal stage**, one column set per stage (`{stage}_product_count`, `{stage}_store_count`, `{stage}_pair_count`): one `overall` row plus one row per active slice dimension value (`slices`, `derived_dimensions`, enabled `dimension_sources`). It applies the same `value_filters` as the KPI step. Stages, in order — each is the population of the metrics it names, NOT of every metric:
+
+| Stage | Present when | Population of |
+|-------|--------------|---------------|
+| `scope` | always | every metric outside the two below — `hybrid_scope_keys` (scope source + score backfill) |
+| `unblocked` | blocked scope on | metrics in `blocked_scope.metrics` — scope pairs minus `ctx.fully_blocked_pairs` (blocked on every in-window scope day) |
+| `instock` | `instock.method="daily"` | `in_stock_rate` + `weighted_instock_rate` — after `instock.daily.input_filters`, `instock_main_eligible_only`, `instock_exclude_unsuperseded_sizes`; starts from `unblocked` only when `in_stock_rate` is in `blocked_scope.metrics`. `require_daily_data` is NOT applied (needs the run's daily-data scan) |
+
+**Removal sets are built once.** `scope.build_scope_removals` runs at the end of `build_scopes()` and caches `ctx.fully_blocked_pairs`, `ctx.instock_sub_only_pairs`, `ctx.instock_unsuperseded_products` (each `None` when its rule is off). The debug summary and `pipeline.build_instock_daily` (via the shared `pipeline.instock_daily_pairs`) both read them — never recompute a removal set elsewhere. Per-metric logic is unchanged: blocked days are still flagged per day and gated per metric by `blocked_scope.metrics`; `fully_blocked_pairs` feeds only the debug counts, never a pipeline frame; the in-stock rules apply only to the in-stock frame. Product-grain scope (no store) shows only `scope_product_count`. NULL slice values show as `"NULL"` here vs blank/None in `kpi_long`. `prepare_scopes` resets the run caches and builds the dimensions and scopes once; Cell 3's `runner.run()` reuses them instead of building them again (a later `run()` rebuilds). Skipped in `html_only` mode (no scope is built).
 
 ### 3.4 Slice dimensions → roots and cuts
 
@@ -1012,7 +1022,7 @@ and YTD = days 1..K; lost_base keeps weeks up to the last Saturday (§3.1b).
 | Cut value count looks doubled | A `dimension_source` table has multiple rows per `join_key` — pre-aggregate to one row per product (toolkit keeps arbitrary row) |
 | Only want one root value (e.g. only NVROUT products), or an expected root is missing | Set `root_values` on that `dimension_sources` entry: `{"yes": "nvrout"}` makes exactly one root; omit it to auto-discover one root per distinct value instead. `NULL` never gets its own root. |
 | A cut dimension shows a NULL bucket, or you want only one value | `slices.value_filters`: `["yes"]` keeps only `yes`; `[]` drops the NULL bucket; `{"exclude": ["nfg"]}` drops a set but keeps the rest incl NULL — see §3.4a. (For a `dimension_sources` column's own NULL bucket, use `fillna` on that source instead — it's a root, not a cut.) |
-| Scope debug counts don't match `kpi_long` per cut | The debug cell recomputes scope independently — re-run it after any config change (scope mode, `value_filters`) so it matches Cell 3. NULL values show as `"NULL"` here vs blank/None in `kpi_long` — see §3.3a. Note scope debug reports all `active_slice_dimensions` (root columns included), not root-restricted like `kpi_long`. |
+| Scope debug counts don't match `kpi_long` per cut | Re-run the debug cell after any config change (scope mode, `value_filters`, blocked scope, in-stock rules). Compare against the right stage: `instock_*` for in-stock metrics, `unblocked_*` for `blocked_scope.metrics`, `scope_*` otherwise — and `kpi_long` counts pairs with real daily rows, the debug counts scope pairs. NULL values show as `"NULL"` here vs blank/None in `kpi_long` — see §3.3a. Note scope debug reports all `active_slice_dimensions` (root columns included), not root-restricted like `kpi_long`. |
 | A root you expect is missing from the HTML report, or the root tab layer doesn't appear at all | The root tab only renders when more than one root exists in `kpi_long`. With a single root (`"overall"`, no root-producing `dimension_sources` enabled), the report renders exactly as before — this is expected, not a bug. Check `ctx.root_definitions` (or the "ROOTS:" print in the fiscal log) to confirm what was actually resolved. |
 | A metric looks right for `"overall"` but wrong/missing within a specific root | Confirm the root's `dim_col` actually has non-null values matching its `root_values` for the products you expect — a product missing that dimension_source's join key entirely gets `NULL` and never appears in any named root, only `"overall"` |
 | A metric (e.g. instock) is right in a named root but wrong in `"overall"` specifically | `"overall"` applies no population restriction of its own — if a segment (e.g. NON-COMP) should never count toward that metric even in `overall`, add a `metrics.population_filters` entry for it (see §3.4d) rather than trying to fix it via scope or roots |
@@ -1079,6 +1089,9 @@ and YTD = days 1..K; lost_base keeps weeks up to the last Saturday (§3.1b).
 | `blocked_days` | blocked_scope on only: cached `(product_id, store_id, first_day, last_day)` disjoint block intervals (range-joined on the day), flagged `is_blocked` on `scoped_daily` and removed from the metrics named in `blocked_scope.metrics` (daily in-stock included); `None` when off |
 | `scope_table_keys` | product×[store×]Year×Week keys from the scope table |
 | `hybrid_scope_keys` | final scope (scope table + score backfill), with `scope_origin` `scope` / `score` |
+| `fully_blocked_pairs` | blocked scope on only: cached `(product_id, store_id)` of `hybrid_scope_keys` blocked on every in-window scope day — built once by `scope.build_scope_removals`, read only by the Scope debug summary |
+| `instock_sub_only_pairs` | `instock.method="daily"` + `scope.instock_main_eligible_only`: cached `(product_id, store_id)` scope pairs where only a sub item is eligible — built once, read by `instock_daily_pairs` |
+| `instock_unsuperseded_products` | `instock.method="daily"` + `scope.instock_exclude_unsuperseded_sizes`: cached `product_id`s of unsuperseded sizes — built once, read by `instock_daily_pairs` |
 | `score_only_scope_keys` | score-filter scope (set when `use_hybrid_scope=True` or `run_scope_diff=True`) |
 | `daily_data_raw` | cached daily Delta read |
 | `lost_sales_weekly_base` | cached weekly lost-sales aggregates |
@@ -1092,7 +1105,7 @@ and YTD = days 1..K; lost_base keeps weeks up to the last Saturday (§3.1b).
 | `comparable_ytd_display` / `comparable_yoy_display` / `comparable_quarter_display` | display DataFrame per enabled kind (ytd/yoy: latest link; quarter: latest link per quarter number) |
 | `save_plan` | SavePlan from last save_outputs call |
 
-For a quick distinct product/store count of the final scope (overall + per slice) without running the KPI step, use `runner.scope_debug_summary()` — see §3.3a.
+For a quick distinct product/store count of the scope at each removal stage (overall + per slice) without running the KPI step, use `runner.scope_debug_summary()` — see §3.3a.
 
 ---
 

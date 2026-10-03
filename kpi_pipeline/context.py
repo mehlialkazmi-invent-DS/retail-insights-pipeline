@@ -64,6 +64,12 @@ class KPIContext:
 
     hybrid_scope_keys: Optional[DataFrame] = None
     score_only_scope_keys: Optional[DataFrame] = None
+    # Removal sets, built once by scope.build_scope_removals (None when their rule is off): cached
+    # (product_id, store_id) of hybrid_scope_keys blocked on every window day; cached (product_id, store_id)
+    # scope pairs where only a sub item is eligible; cached product_ids of unsuperseded sizes.
+    fully_blocked_pairs: Optional[DataFrame] = None
+    instock_sub_only_pairs: Optional[DataFrame] = None
+    instock_unsuperseded_products: Optional[DataFrame] = None
     hybrid_frames: Optional[Dict[str, DataFrame]] = None
     scope_frames: Optional[Dict[str, DataFrame]] = None
     score_frames: Optional[Dict[str, DataFrame]] = None
