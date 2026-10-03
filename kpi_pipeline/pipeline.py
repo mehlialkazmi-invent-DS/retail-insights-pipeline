@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
@@ -252,6 +252,31 @@ def _block_join(blocked: DataFrame, location_col: str):
     return intervals, on
 
 
+def _drop_fully_blocked_weeks(ctx: KPIContext, frame: DataFrame, blocked: DataFrame, keys: List[str]) -> DataFrame:
+    """``frame`` (keys, Year, Week) without the key-weeks whose every day inside the report window is blocked:
+    a week is fully blocked when the overlaps of its key's disjoint intervals with it cover all its days. A
+    partly blocked week stays, as a weekly source cannot say which days were blocked."""
+    start, end = ctx.settings["EFFECTIVE_REPORT_START_DATE"], ctx.settings["REPORT_END_DATE"]
+    weeks = ctx.fiscal_week.select(
+        "Year",
+        "Week",
+        F.greatest(F.col("week_start_date"), F.lit(start)).alias("_from"),
+        F.least(F.col("week_end_date"), F.lit(end)).alias("_to"),
+    )
+    overlap = F.datediff(F.least(F.col("last_day"), F.col("_to")), F.greatest(F.col("first_day"), F.col("_from"))) + 1
+    fully_blocked = (
+        frame.select(*keys, "Year", "Week")
+        .distinct()
+        .join(blocked, on=keys, how="inner")
+        .join(broadcast(weeks), on=["Year", "Week"], how="inner")
+        .groupBy(*keys, "Year", "Week", "_from", "_to")
+        .agg(F.sum(F.greatest(F.lit(0), overlap)).alias("_blocked_days"))
+        .filter(F.col("_blocked_days") >= F.datediff(F.col("_to"), F.col("_from")) + 1)
+        .select(*keys, "Year", "Week")
+    )
+    return frame.join(fully_blocked, on=[*keys, "Year", "Week"], how="left_anti")
+
+
 def _flag_blocked_days(df: DataFrame, blocked: Optional[DataFrame], location_col: str) -> DataFrame:
     """Add is_blocked: whether the row's day lies in one of ``blocked``'s intervals (False everywhere when
     blocked scope is off). Blocked days stay in the frame: each metric decides in metrics.compute_kpis
@@ -499,14 +524,18 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
     )
     removed_days = F.lit(0)
     if blocked is not None:
-        # The blocked days from each pair's count_from on, one row each (a pair's intervals are disjoint).
-        blocked_in_count = (
-            blocked.join(pair_start, on=pair_keys, how="inner")
-            .withColumn("first_day", F.greatest(F.col("first_day"), F.col("count_from")))
-            .filter(F.col("first_day") <= F.col("last_day"))
-            .select(*pair_keys, F.explode(F.sequence("first_day", "last_day")).alias("date"))
+        # Overlap of each blocked interval with each pair-week's counted days; a pair's intervals are disjoint,
+        # so the overlaps sum to each blocked day once.
+        overlap = F.datediff(
+            F.least(F.col("last_day"), F.col("week_end_date")),
+            F.greatest(F.col("first_day"), F.col("week_start_date"), F.col("count_from")),
+        ) + 1
+        n_blocked = (
+            store_days.join(blocked, on=pair_keys, how="inner")
+            .groupBy(*week_keys)
+            .agg(F.sum(F.greatest(F.lit(0), overlap)).alias("n_blocked"))
         )
-        store_days = store_days.join(pair_week_count(blocked_in_count, "n_blocked"), on=week_keys, how="left")
+        store_days = store_days.join(n_blocked, on=week_keys, how="left")
         removed_days = removed_days + F.coalesce(F.col("n_blocked"), F.lit(0))
     if unusable_days is not None:
         store_days = store_days.join(pair_week_count(unusable_days, "n_unusable"), on=week_keys, how="left")
@@ -747,7 +776,8 @@ def build_dc_inst(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
 
 def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, DataFrame]:
     """The metric frames of one scope variant: scoped_daily, inst_data, lost_base, dc_daily, dc_inst, plus
-    scope_pairs / scope_pair_weeks / lost_sales_weekly.
+    scope_core (the scope keys, held so its cache can be released) / scope_pairs / scope_pair_weeks /
+    lost_sales_weekly.
 
     Each metric family is restricted to scope on its own and they only meet in the per-period join
     (metrics.build_kpi_table). Goods in transit only reaches scoped_daily / dc_daily
@@ -817,7 +847,8 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
             else F.coalesce(F.col("total_days"), F.col("fiscal_week_days"))
         )
         inst_select_cols = ["product_id", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month"]
-        if "store_id" in instock_weekly.columns:
+        has_instock_store = "store_id" in instock_weekly.columns
+        if has_instock_store:
             inst_select_cols.insert(1, "store_id")
         inst_data = (
             instock_weekly.select(
@@ -827,7 +858,14 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
             )
             .filter(F.col("available_days") > 0)
             .join(ctx.product_dims, on="product_id", how="left")
-        ).cache()
+        )
+        # Only inst_data drops the fully blocked weeks: instock_weekly is lost_sales_weekly under
+        # lost_sales_source, and lost sales / lost_base keep every week.
+        instock_blocks = ctx.blocked_days if has_instock_store else ctx.blocked_product_days
+        if "in_stock_rate" in ctx.settings["BLOCKED_SCOPE"]["metrics"] and instock_blocks is not None:
+            block_keys = ["product_id", "store_id"] if has_instock_store else ["product_id"]
+            inst_data = _drop_fully_blocked_weeks(ctx, inst_data, instock_blocks, block_keys)
+        inst_data = inst_data.cache()
 
     scoped_daily = build_scoped_daily(ctx, scope_core, scope_pairs, has_store).cache()
     dc_daily = build_dc_daily(ctx, scope_core).cache()
@@ -885,6 +923,7 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
         "scoped_daily": scoped_daily,
         "inst_data": inst_data,
         "lost_base": lost_base,
+        "scope_core": scope_core,
         "scope_pairs": scope_pairs,
         "scope_pair_weeks": scope_pair_weeks,
         "lost_sales_weekly": lost_sales_weekly,

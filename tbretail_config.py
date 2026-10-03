@@ -795,6 +795,15 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             f"blocked_scope.metrics has unknown names {unknown_blocked_metrics}; "
             f"allowed: {list(METRICS_ALL)} or 'all'"
         )
+    # in_stock_rate and weighted_instock_rate read one in-stock frame, so they are blocked together: listing
+    # either drops blocked days from that frame and from the weighted sales weights (pipeline.build_instock_daily,
+    # metrics.compute_kpis read the list). Under instock.method weekly_source / lost_sales_source, which only
+    # have in-stock days per week, a pair-week (or product-week, for a source without a store column: "product"
+    # blocks only) is dropped from the in-stock frame when every day of the week in the window is blocked.
+    instock_pair = {"in_stock_rate", "weighted_instock_rate"}
+    if blocked_requested & instock_pair and not instock_pair <= blocked_requested:
+        print("note: in_stock_rate and weighted_instock_rate are blocked together; both are now in blocked_scope.metrics")
+        blocked_requested |= instock_pair
     blocked_scope["metrics"] = [m for m in METRICS_ALL if m in blocked_requested]
     for key in ("kinds", "dc_kinds"):
         kinds = list(blocked_scope_cfg[key])

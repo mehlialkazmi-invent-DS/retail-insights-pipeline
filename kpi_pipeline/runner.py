@@ -13,7 +13,7 @@ from kpi_pipeline.comparable import _KIND_CTX_ATTRS as COMPARABLE_KIND_ATTRS
 from kpi_pipeline.comparable import build_comparable_pairs
 from kpi_pipeline.comparisons import _KIND_CTX_ATTRS as COMPARISON_KIND_ATTRS
 from kpi_pipeline.comparisons import _selected_comparison_kinds, build_comparisons, build_scope_diff
-from kpi_pipeline.context import KPIContext
+from kpi_pipeline.context import KPIContext, release, release_frames
 from kpi_pipeline.fiscal import apply_report_end_mode, build_fiscal_and_products, build_fiscal_week_only
 from kpi_pipeline.html_report import render_kpi_html
 from kpi_pipeline.io import build_save_plan, load_saved_outputs, save_outputs
@@ -86,6 +86,14 @@ class KPIRunner:
         return self.ctx.settings
 
     def _reset_run_caches(self) -> None:
+        release(
+            self.ctx.daily_data_raw,
+            self.ctx.daily_data_excluded_days,
+            self.ctx.lost_sales_weekly_base,
+            self.ctx.instock_weekly_base,
+            self.ctx.item_family_raw,
+            self.ctx.inventory_warehouse_rolled,
+        )
         self.ctx.daily_data_raw = None
         self.ctx.daily_data_excluded_days = None
         self.ctx.lost_sales_weekly_base = None
@@ -243,6 +251,7 @@ class KPIRunner:
         ].reset_index(drop=True)
 
     def build_kpis(self) -> None:
+        release_frames(self.ctx.hybrid_frames)
         self.ctx.hybrid_frames = build_pipeline_frames(self.ctx, self.ctx.hybrid_scope_keys)
         self.ctx.kpi_long = build_kpi_long(self.ctx, self.ctx.hybrid_frames)
         print("kpi_long shape:", self.ctx.kpi_long.shape)
@@ -278,6 +287,8 @@ class KPIRunner:
                 "scope.run_scope_diff=True but score scope was not computed — "
                 "check build_hybrid_scope and the scope.run_scope_diff setting."
             )
+        release_frames(self.ctx.scope_frames)
+        release_frames(self.ctx.score_frames)
         self.ctx.scope_frames = build_pipeline_frames(self.ctx, self.ctx.scope_table_keys)
         self.ctx.score_frames = build_pipeline_frames(self.ctx, self.ctx.score_only_scope_keys)
         build_scope_diff(self.ctx)

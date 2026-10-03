@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+#### Blocked days on every in-stock method; in-stock metrics blocked together; empty scope fails; cache hygiene (no change to any tbretail value) - 2026-10-04
+
+`in_stock_rate` and `weighted_instock_rate` read one in-stock frame, so listing either in `blocked_scope.metrics`
+now adds the other in `materialize()` (with a printed note). Blocked days also apply under every
+`instock.method`. `daily` is unchanged (blocked days leave the counted store-days per day).
+`weekly_source` / `lost_sales_source` only have in-stock days per week, so a pair-week whose every window day is
+blocked is dropped from the in-stock frame (`pipeline._drop_fully_blocked_weeks`); a partly blocked week stays,
+and lost sales / `lost_base` keep every week. An in-stock source without a store column has no pairs to block, so
+only `"product"`-kind blocks apply, matched to each product's earliest `scope_start` under `blocked_scope.rule`
+(`scope.build_blocked_product_days`, new `ctx.blocked_product_days`); a printed note names the
+`product_destination` / `destination` kinds that cannot apply. A scope with no keys inside the report window
+(daily or weekly) now raises `ValueError` in `scope.build_scope`. The daily in-stock frame counts blocked days per
+pair-week by interval / week overlap instead of exploding one row per blocked day (same values). Cache hygiene:
+`_reset_run_caches` unpersists what it clears, `build_scope`, `build_blocked_days`, `build_kpis` and
+`build_scope_comparison` release the previous caches before rebuilding, the non-hybrid `hybrid_scope_keys` is no
+longer a second cache of `scope_table_keys`, `context.release` / `release_frames` are the unpersist helpers, and
+`scope_core` is in the `build_pipeline_frames` dict so it can be released. tbretail (`instock.method = "daily"`,
+both in-stock metrics already blocked) is unchanged.
+
+**Affected:** `config.py`, `tbretail_config.py`, `kpi_pipeline/context.py`, `kpi_pipeline/pipeline.py`,
+`kpi_pipeline/runner.py`, `kpi_pipeline/scope.py`, `README.md`, `docs/LOGIC_FLOW.md`,
+`.claude/commands/retail-insights-help.md`
+
 #### Scope debug counts after removals; removal sets built once (no change to any output) - 2026-10-04
 
 `runner.scope_debug_summary()` now shows distinct product / store / pair counts for each removal stage, one

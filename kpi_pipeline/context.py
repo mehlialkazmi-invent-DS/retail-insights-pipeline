@@ -17,6 +17,19 @@ STORE_GIT_METRICS = (
 DC_GIT_METRICS = ("dc_mean_stock", "total_mean_stock", "WOS_DC", "WOS_TOTAL")
 
 
+def release(*frames: Optional[DataFrame]) -> None:
+    """Unpersist the cached frames that exist."""
+    for frame in frames:
+        if frame is not None:
+            frame.unpersist()
+
+
+def release_frames(frames: Optional[Dict[str, DataFrame]]) -> None:
+    """Unpersist every cached frame of a build_pipeline_frames dict (None: nothing built yet)."""
+    if frames is not None:
+        release(*frames.values())
+
+
 @dataclass
 class KPIContext:
     spark: SparkSession
@@ -56,6 +69,9 @@ class KPIContext:
     scope_pairs: Optional[DataFrame] = None
     # blocked_scope on only: cached disjoint (product_id, store_id, first_day, last_day) block intervals.
     blocked_days: Optional[DataFrame] = None
+    # blocked_scope on, instock.method weekly_source / lost_sales_source, a source without a store column and
+    # in_stock_rate blocked: cached disjoint (product_id, first_day, last_day) "product"-kind block intervals.
+    blocked_product_days: Optional[DataFrame] = None
     # scope.dc_solution_id only: cached (product_id, warehouse_id, scope_start, main_eligible) of the
     # DC (network) scope.
     dc_scope_pairs: Optional[DataFrame] = None

@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import datetime
 from functools import reduce
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.functions import broadcast
 from pyspark.sql.window import Window
 
-from kpi_pipeline.context import KPIContext
+from kpi_pipeline.context import KPIContext, release
 from kpi_pipeline.inputs import (
     blocked_scope_keys,
     get_daily_data_raw,
@@ -66,10 +66,11 @@ def _scope_pairs(ctx: KPIContext, solution_ids: Optional[List[int]], location_co
 
 
 def _applied_block_intervals(
-    ctx: KPIContext, pairs: DataFrame, location_col: str, folder: str, solution_ids: List[int], kinds: List[str]
+    ctx: KPIContext, pairs: DataFrame, location_col: Optional[str], folder: str, solution_ids: List[int], kinds: List[str]
 ) -> DataFrame:
-    """(product_id, <location_col>, first_day, last_day): the days one UI blocked-scope snapshot folder blocks,
-    as disjoint per-pair date intervals inside the report window.
+    """(product_id[, <location_col>], first_day, last_day): the days one UI blocked-scope snapshot folder blocks,
+    as disjoint per-pair date intervals inside the report window. ``location_col`` None: product-level pairs
+    (product_id, scope_start) and only the "product" kind.
 
     ``kinds`` are the folder's kinds to read (product, product_destination, destination), each with
     start_date / end_date (null = open-ended). Blocks match `pairs` (with scope_start) on the main's own
@@ -85,6 +86,7 @@ def _applied_block_intervals(
     """
     rule = ctx.settings["BLOCKED_SCOPE"]["rule"]
     start, end = ctx.settings["EFFECTIVE_REPORT_START_DATE"], ctx.settings["REPORT_END_DATE"]
+    location = [] if location_col is None else [location_col]
     matched = reduce(
         DataFrame.unionByName,
         [
@@ -92,7 +94,7 @@ def _applied_block_intervals(
                 read_blocked_scope_source(ctx.spark, folder, solution_ids, kind, location_col),
                 on=blocked_scope_keys(kind, location_col),
                 how="inner",
-            ).select("product_id", location_col, "scope_start", "block_start", "block_end")
+            ).select("product_id", *location, "scope_start", "block_start", "block_end")
             for kind in kinds
         ],
     )
@@ -101,7 +103,7 @@ def _applied_block_intervals(
         matched.filter(applies)
         .select(
             "product_id",
-            location_col,
+            *location,
             F.greatest(F.col("block_start"), F.lit(start)).alias("first_day"),
             F.least(F.coalesce(F.col("block_end"), F.lit(end)), F.lit(end)).alias("last_day"),
         )
@@ -109,12 +111,12 @@ def _applied_block_intervals(
     )
     # An interval starts a new island when it begins after every earlier interval of the pair has ended (a
     # gap of at least one day); otherwise it extends the current island.
-    order = Window.partitionBy("product_id", location_col).orderBy("first_day", "last_day")
+    order = Window.partitionBy("product_id", *location).orderBy("first_day", "last_day")
     reached = F.max("last_day").over(order.rowsBetween(Window.unboundedPreceding, -1))
     return (
         clipped.withColumn("_starts", (reached.isNull() | (F.col("first_day") > F.date_add(reached, 1))).cast("int"))
         .withColumn("_island", F.sum("_starts").over(order.rowsBetween(Window.unboundedPreceding, Window.currentRow)))
-        .groupBy("product_id", location_col, "_island")
+        .groupBy("product_id", *location, "_island")
         .agg(F.min("first_day").alias("first_day"), F.max("last_day").alias("last_day"))
         .drop("_island")
     )
@@ -132,9 +134,9 @@ def build_blocked_days(ctx: KPIContext) -> None:
     (None when blocked_scope.ui_parameters_path is None). The metrics named in blocked_scope.metrics drop the
     blocked days; the daily frames only flag them (pipeline._flag_blocked_days).
     """
-    if ctx.blocked_days is not None:
-        ctx.blocked_days.unpersist()
+    release(ctx.blocked_days, ctx.blocked_product_days)
     ctx.blocked_days = None
+    ctx.blocked_product_days = None
     cfg = ctx.settings["BLOCKED_SCOPE"]
     if cfg["path"] is None:
         return
@@ -142,6 +144,35 @@ def build_blocked_days(ctx: KPIContext) -> None:
         ctx, ctx.scope_pairs, "store_id", cfg["path"], cfg["solution_id"], cfg["kinds"]
     ).cache()
     print(f"blocked scope rule={cfg['rule']} | blocked pair-days in window: {_blocked_pair_days(ctx.blocked_days):,}")
+    if ctx.settings["INSTOCK_METHOD"] != "daily" and "in_stock_rate" in cfg["metrics"] and not instock_source_has_store(
+        ctx.settings
+    ):
+        build_blocked_product_days(ctx)
+
+
+def instock_source_has_store(settings: Dict[str, Any]) -> bool:
+    """Whether the in-stock source of instock.method weekly_source / lost_sales_source has a store column."""
+    column_map_key = "INSTOCK_SOURCE_COLUMN_MAP" if settings["INSTOCK_METHOD"] == "weekly_source" else "LOST_SALES_COLUMN_MAP"
+    return settings[column_map_key]["store_col"] is not None
+
+
+def build_blocked_product_days(ctx: KPIContext) -> None:
+    """Build ctx.blocked_product_days, the cached (product_id, first_day, last_day) intervals of the "product"
+    block kind, for an in-stock source without a store column: the scope pairs grouped to products (earliest
+    scope_start) take the blocked_scope.rule. product_destination / destination blocks need a store and
+    cannot apply there (None when "product" is not in blocked_scope.kinds)."""
+    cfg = ctx.settings["BLOCKED_SCOPE"]
+    unusable_kinds = [k for k in cfg["kinds"] if k != "product"]
+    if unusable_kinds:
+        print(f"note: blocked_scope.kinds {unusable_kinds} cannot apply to an in-stock source without a store column")
+    if "product" not in cfg["kinds"]:
+        print("note: no block applies to the in-stock source (no store column, 'product' not in blocked_scope.kinds)")
+        return
+    products = ctx.scope_pairs.groupBy("product_id").agg(F.min("scope_start").alias("scope_start"))
+    ctx.blocked_product_days = _applied_block_intervals(
+        ctx, products, None, cfg["path"], cfg["solution_id"], ["product"]
+    ).cache()
+    print(f"blocked product-days (in-stock source without store): {_blocked_pair_days(ctx.blocked_product_days):,}")
 
 
 def build_dc_scope(ctx: KPIContext) -> None:
@@ -181,7 +212,7 @@ def build_dc_blocked_days(ctx: KPIContext) -> None:
     )
 
 
-def _weekly_scope_keys(ctx: KPIContext, raw: DataFrame) -> DataFrame:
+def _weekly_scope_keys(ctx: KPIContext, raw: DataFrame) -> Tuple[DataFrame, DataFrame]:
     """The scope table's own (product[, store], Year, Week) rows inside the report window, for time="weekly",
     with an optional leading-gap backfill.
 
@@ -228,7 +259,7 @@ def _weekly_scope_keys(ctx: KPIContext, raw: DataFrame) -> DataFrame:
     keyed = keyed.join(broadcast(window_weeks.select("Year", "Week")), on=["Year", "Week"], how="inner").cache()
 
     if not cfg["backfill_leading_gap"]:
-        return keyed.select(*ctx.scope_keys).distinct()
+        return keyed.select(*ctx.scope_keys).distinct(), keyed
 
     window_start = ctx.settings["EFFECTIVE_REPORT_START_DATE"]
     pair_first_week = (
@@ -247,7 +278,7 @@ def _weekly_scope_keys(ctx: KPIContext, raw: DataFrame) -> DataFrame:
         .select(*pair_keys, "Year", "Week")
     )
 
-    return keyed.unionByName(backfill).select(*ctx.scope_keys).distinct()
+    return keyed.unionByName(backfill).select(*ctx.scope_keys).distinct(), keyed
 
 
 def build_scope(ctx: KPIContext) -> None:
@@ -263,9 +294,12 @@ def build_scope(ctx: KPIContext) -> None:
         ["product_id", "store_id", "Year", "Week"] if has_store else ["product_id", "Year", "Week"]
     )
 
+    release(ctx.scope_table_keys, ctx.hybrid_scope_keys, ctx.score_only_scope_keys)
+    weekly_keyed = None
     if cfg["time"] == "weekly":
         raw = read_scope_source(ctx.spark, ctx.settings, cfg["solution_id"], "store_id", quiet=True)
-        ctx.scope_table_keys = _weekly_scope_keys(ctx, raw).cache()
+        scope_keys, weekly_keyed = _weekly_scope_keys(ctx, raw)
+        ctx.scope_table_keys = scope_keys.cache()
     else:
         if ctx.scope_pairs is not None:
             ctx.scope_pairs.unpersist()
@@ -279,7 +313,15 @@ def build_scope(ctx: KPIContext) -> None:
         window_yw = _window_weeks(ctx).select("Year", "Week").distinct()
         ctx.scope_table_keys = pairs.crossJoin(broadcast(window_yw)).select(*ctx.scope_keys).cache()
 
-    print(f"scope time: {cfg['time']} | grain: {cfg['grain']} | keys: {ctx.scope_keys} | count: {ctx.scope_table_keys.count()}")
+    scope_key_count = ctx.scope_table_keys.count()
+    release(weekly_keyed)
+    if scope_key_count == 0:
+        raise ValueError(
+            f"scope (time={cfg['time']}, solution_id={cfg['solution_id']}) has no keys inside the report window "
+            f"{ctx.settings['EFFECTIVE_REPORT_START_DATE']} -> {ctx.settings['REPORT_END_DATE']}; check the scope "
+            "table's weeks, active_only and the window"
+        )
+    print(f"scope time: {cfg['time']} | grain: {cfg['grain']} | keys: {ctx.scope_keys} | count: {scope_key_count}")
 
 
 def read_daily_for_scope(ctx: KPIContext, start_date: datetime.date, end_date: datetime.date) -> DataFrame:
@@ -380,6 +422,7 @@ def build_hybrid_scope(ctx: KPIContext) -> None:
     need_score = use_hybrid or run_scope_diff
 
     ctx.score_only_scope_keys = None
+    daily_all = None
     if need_score:
         daily_all = read_daily_for_scope(ctx, start, end).cache()
         ctx.score_only_scope_keys = (
@@ -387,9 +430,9 @@ def build_hybrid_scope(ctx: KPIContext) -> None:
         )
 
     if not use_hybrid:
-        ctx.hybrid_scope_keys = ctx.scope_table_keys.withColumn("scope_origin", F.lit("scope")).cache()
+        ctx.hybrid_scope_keys = ctx.scope_table_keys.withColumn("scope_origin", F.lit("scope"))
         print("scope mode: scope table only (hybrid disabled)")
-        print("grain:", ctx.scope_keys, "| final_scope:", ctx.hybrid_scope_keys.count())
+        print("grain:", ctx.scope_keys, "| final_scope:", ctx.scope_table_keys.count())
         return
 
     window_weeks = _window_weeks(ctx).select("Year", "Week").distinct()
@@ -405,6 +448,9 @@ def build_hybrid_scope(ctx: KPIContext) -> None:
     print("scope mode: hybrid (scope table + score backfill on missing weeks)")
     print("grain:", ctx.scope_keys)
     print("missing_weeks:", missing_weeks.count(), "| final_scope:", ctx.hybrid_scope_keys.count())
+    # The count above materialized hybrid_scope_keys and read all of score_only_scope_keys, so neither
+    # daily_all nor missing_weeks is read again.
+    release(daily_all, missing_weeks)
 
 
 def _fully_blocked_pairs(ctx: KPIContext) -> DataFrame:
