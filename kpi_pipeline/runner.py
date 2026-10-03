@@ -79,6 +79,7 @@ class KPIRunner:
 
     def __init__(self, spark: SparkSession, settings: Dict[str, Any]):
         self.ctx = KPIContext(spark=spark, settings=settings)
+        self._scopes_ready = False
 
     @property
     def settings(self) -> Dict[str, Any]:
@@ -195,9 +196,9 @@ class KPIRunner:
     def run(self, fund_paste=None, save: bool = True) -> KPIContext:
         if self.settings.get("RUN_MODE", "full") == "html_only":
             return self.run_html_only(fund_paste=fund_paste)
-        self._reset_run_caches()
-        self.build_dimensions()
-        self.build_scopes(fund_paste=fund_paste)
+        if not self._scopes_ready:
+            self.prepare_scopes(fund_paste=fund_paste)
+        self._scopes_ready = False
         self.build_kpis()
         self.build_comparisons()
         self.build_comparable_pairs()
@@ -211,6 +212,14 @@ class KPIRunner:
                     "output save skipped. Pass fund_paste=fund.paste or call save_outputs() separately."
                 )
         return self.ctx
+
+    def prepare_scopes(self, fund_paste=None) -> None:
+        """Reset the run caches, then build the dimensions and scopes. The next run() reuses them (the
+        notebook's Scope debug cell), so they are not built twice; a later run() builds them again."""
+        self._reset_run_caches()
+        self.build_dimensions()
+        self.build_scopes(fund_paste=fund_paste)
+        self._scopes_ready = True
 
     def build_dimensions(self) -> None:
         apply_report_end_mode(self.ctx)

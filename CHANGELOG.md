@@ -28,6 +28,8 @@ Every metric computes exactly as before; the configs resolve to identical settin
   instead of recomputing per link (a middle year twice); the restricted rows are cached once per kind, and
   the pairs present in every year are found in one groupBy pass instead of one scan per year chained with
   `intersect`.
+- **Scope built once**: the notebook's Scope debug cell calls `KPIRunner.prepare_scopes` (reset caches,
+  dimensions, scopes) and the next `run()` reuses that scope instead of building it again.
 - **Early output**: `KPIRunner` displays the latest overall KPIs right after `kpi_long` is built, then the
   overall comparisons and comparable views as each finishes.
 - **Configs**: `config.py` / `tbretail_config.py` regrouped into nine numbered sections with short

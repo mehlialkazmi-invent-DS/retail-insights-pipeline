@@ -344,12 +344,11 @@ Goods in transit has its own roll-up toggle, `goods_in_transit.roll_to_family_ma
 Before Cell 3's full run, the **Scope debug** cell in `main.ipynb` sanity-checks scope size and per-slice coverage — read-only, distinct from `runner.run()`:
 
 ```python
-runner.build_dimensions()
-runner.build_scopes(fund_paste=fund.paste)
+runner.prepare_scopes(fund_paste=fund.paste)
 display(runner.scope_debug_summary())
 ```
 
-`scope_debug_summary()` → `kpi_pipeline.scope_debug.scope_universe_counts(ctx)` returns distinct `product_id`, `store_id`, and pair counts for the **final scope** (after hybrid backfill + adjustments): one `overall` row plus one row per active slice dimension value (`slices`, `derived_dimensions`, enabled `dimension_sources`). It applies the same `value_filters` as the KPI step, so counts match `kpi_long` per slice. Product-week scope (no `store_col`) shows only `distinct_product_count`. NULL slice values show as `"NULL"` here vs blank/None in `kpi_long`. `build_dimensions`/`build_scopes` are idempotent; Cell 3 rebuilds the same scope. Skipped in `html_only` mode (no scope is built).
+`scope_debug_summary()` → `kpi_pipeline.scope_debug.scope_universe_counts(ctx)` returns distinct `product_id`, `store_id`, and pair counts for the **final scope** (after hybrid backfill + adjustments): one `overall` row plus one row per active slice dimension value (`slices`, `derived_dimensions`, enabled `dimension_sources`). It applies the same `value_filters` as the KPI step, so counts match `kpi_long` per slice. Product-week scope (no `store_col`) shows only `distinct_product_count`. NULL slice values show as `"NULL"` here vs blank/None in `kpi_long`. `prepare_scopes` resets the run caches and builds the dimensions and scopes once; Cell 3's `runner.run()` reuses them instead of building them again (a later `run()` rebuilds). Skipped in `html_only` mode (no scope is built).
 
 ### 3.4 Slice dimensions → roots and cuts
 
