@@ -1,12 +1,9 @@
-"""Fiscal calendar and product dimension setup.
+"""Fiscal calendar, reporting-window periods and product dimensions.
 
-When USE_FISCAL_CALENDAR is True, reads one_time_uploads/fiscal_cal.
-Otherwise derives the time grain from noob/daily-data: Year is the CALENDAR year of
-`date`, and Week is the native fiscal week column. The source 'year' column is NOT
-used, because it can carry the ISO week-year (late-December weeks labelled as the next
-year), which would mislabel e.g. December 2025 as Q4 2026. A fiscal week straddling
-Jan 1 is therefore reported as two partial weeks (one per calendar year); quarter,
-month and annual rollups remain correct.
+USE_FISCAL_CALENDAR reads one_time_uploads/fiscal_cal. Otherwise the time grain comes from noob/daily-data:
+Year is the calendar year of `date` and Week the native week column (never the source 'year', which can
+be the ISO week-year and label late-December weeks as the next year). A week straddling Jan 1 is then two
+partial weeks; quarter, month and annual rollups stay correct.
 """
 
 from __future__ import annotations
@@ -29,27 +26,13 @@ def _build_fiscal_week_frame(
     month_col: Optional[str] = None,
     month_name_col: Optional[str] = None,
 ) -> DataFrame:
-    """Aggregate day-level Year/Week rows to one row per (Year, Week).
+    """One row per (Year, Week) of day-level rows: week_start_date / week_end_date, Year_Week, Fiscal_Month,
+    Fiscal_Quarter, Fiscal_Half[, Fiscal_Month_Name].
 
-    Shared by both time-grain paths: the fiscal_cal upload (build_fiscal_cal_and_week_from_upload)
-    and the civil-calendar daily-data fallback (build_time_grain_from_daily_data, which never has
-    quarter_col/month_col/month_name_col to pass). Each of quarter_col/month_col/month_name_col is
-    used when it names a column actually present on daily_grain; otherwise that fiscal attribute is
-    derived instead. This lets every client's fiscal_cal upload -- with or without any of these
-    columns -- and the no-upload fallback both resolve to the same output shape (Fiscal_Quarter,
-    Fiscal_Half, Fiscal_Month[, Fiscal_Month_Name]). See config.py's fiscal_calendar.column_map.
-
-    Derivation fallbacks:
-      * Fiscal_Month: F.month(week_start_date) -- the real calendar month. This IS correct as-is
-        on the civil-calendar path (there is no separate fiscal month there); on a fiscal-calendar
-        upload missing a month column, it's the best available substitute.
-      * Fiscal_Quarter: ceil(Fiscal_Month / 3), computed from Fiscal_Month (whichever source
-        produced it above) rather than from `date` directly, so quarter and month stay internally
-        consistent with each other regardless of which one actually came from the upload.
-      * Fiscal_Half: Fiscal_Quarter 1-2 -> 1, 3-4 -> 2, always derived from Fiscal_Quarter.
-      * Fiscal_Month_Name: no derivation here -- see html_report._build_month_display_labels,
-        which derives a display name from the majority real calendar month across each fiscal
-        month's actual dates when this column is absent.
+    quarter_col / month_col / month_name_col are used when present on ``daily_grain`` (fiscal_calendar.
+    column_map); otherwise Fiscal_Month is the calendar month of week_start_date (exact on the civil
+    calendar), Fiscal_Quarter is ceil(Fiscal_Month / 3), and Fiscal_Month_Name is left to
+    html_report._build_month_display_labels. Fiscal_Half is always 1 for Q1-Q2 and 2 for Q3-Q4.
     """
     has_quarter = bool(quarter_col) and quarter_col in daily_grain.columns
     has_month = bool(month_col) and month_col in daily_grain.columns
@@ -64,9 +47,7 @@ def _build_fiscal_week_frame(
     if has_month:
         agg_exprs.append(F.first(month_col, ignorenulls=True).alias("_raw_month"))
     if has_month_name:
-        # Verbatim display month label from the fiscal_cal upload (e.g. "August") -- trusts the
-        # client's own fiscal calendar instead of deriving one. Consumed by html_report's Monthly
-        # tab when present.
+        # The upload's own month label (e.g. "August"), shown verbatim on the Monthly tab.
         agg_exprs.append(F.first(month_name_col, ignorenulls=True).alias("Fiscal_Month_Name"))
 
     frame = (
@@ -115,14 +96,9 @@ def _read_fiscal_cal_upload(
     report_start_date: Optional[datetime.date] = None,
     report_end_date: Optional[datetime.date] = None,
 ) -> DataFrame:
-    """The fiscal_cal upload projected to date + Year/Week + whichever fiscal attribute columns
-    config names, optionally clipped to the report window.
-
-    Both bounds are optional so the same projection serves two readers: ctx.fiscal_cal (clipped to
-    [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] -- what every downstream consumer reads), and
-    _fiscal_period_bounds's UNCLIPPED read, which needs each quarter's/month's REAL first/last
-    week, including weeks on either side of the window that the clipped calendar deliberately drops.
-    """
+    """The fiscal_cal upload as date, Year, Week and the configured fiscal attribute columns, clipped to
+    [report_start_date, report_end_date] when both are given (ctx.fiscal_cal); unclipped for the readers
+    that need a period's real bounds beyond the window."""
     raw = ctx.spark.read.format("delta").load(path)
     select_cols = ["date", "Year", "Week"]
     for col in _fiscal_upload_column_map(ctx):
@@ -136,34 +112,20 @@ def _read_fiscal_cal_upload(
 
 
 def _compute_available_fiscal_months(ctx: KPIContext) -> List[int]:
-    """Fiscal-month numbers fully elapsed (as of REPORT_END_DATE) for the latest year in the
-    report window, applied identically to every year so YTD stays apples-to-apples once the
-    current year is only partially reported (e.g. months 01-07 closed -> YTD sums 01-07 for
-    every year, not the in-progress month 08).
-
-    Month-grain, not quarter-grain: a quarter in progress can still have already-closed months
-    (e.g. Q3 in progress but its first month done) -- quarter-grain would understate YTD by up to
-    two months every time the current quarter is in progress, which is virtually always
-    (REPORT_END_DATE is a week boundary, essentially never a quarter boundary).
-
-    Delegates to complete_fiscal_periods -- NOT ctx.fiscal_week directly, which is itself clipped
-    to [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] and so would trivially treat every period in
-    the window as complete. This was a live bug (in-progress periods always read as elapsed) fixed
-    alongside comparable.py's analogous _complete_period_years.
-    """
+    """Fiscal-month numbers fully elapsed for the latest window year, applied to every year so YTD stays
+    apples-to-apples. Month grain, not quarter: an in-progress quarter can already have closed months.
+    Uses complete_fiscal_periods, not the window-clipped ctx.fiscal_week, which makes every period look
+    complete."""
     fw = ctx.fiscal_week
     latest_year = fw.agg(F.max("Year")).collect()[0][0]
     complete = complete_fiscal_periods(ctx, "Fiscal_Month").filter(F.col("Year") == latest_year)
     return sorted(int(r["Fiscal_Month"]) for r in complete.select("Fiscal_Month").collect())
 
 
-# Period columns a (Year, period) completeness set is computed for — the fiscal rollups the
-# Quarter/Half/Monthly value-trend tabs group by (see kpi_long._period_frames).
+# Period columns with a (Year, period) completeness set: the Quarter / Half / Monthly tabs' rollups.
 COMPLETE_PERIOD_COLUMNS = ("Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month")
 
-# report_end="latest_day" also keeps only complete years and whole weeks: "Year" is a complete fiscal
-# year (the Annual tab), "Week" a complete (Year, Week) (the Weekly tab). Their key columns are
-# (Year,) and (Year, Week); every other period column's are (Year, period_col).
+# report_end="latest_day" also keeps complete years (Annual tab, key (Year,)) and whole weeks (Weekly tab).
 LATEST_DAY_COMPLETE_PERIOD_COLUMNS = ("Year", "Week")
 
 # Civil-calendar path only: calendar months per period column, to derive period bounds analytically.
@@ -181,37 +143,13 @@ def last_saturday_on_or_before(day: datetime.date) -> datetime.date:
 
 
 def _fiscal_period_bounds(ctx: KPIContext, period_col: str) -> DataFrame:
-    """One row per (Year, ``period_col``) with ``period_start``/``period_end`` — that period's
-    REAL first/last date. ``period_col`` may also be "Year" (one row per fiscal / calendar year) or
-    "Week" (one row per (Year, Week)), the grains report_end="latest_day" keeps complete only.
+    """One row per (Year, ``period_col``) with the period's REAL period_start / period_end; ``period_col``
+    may also be "Year" or "Week".
 
-    Deliberately NOT read from ctx.fiscal_week. ctx.fiscal_week is clipped to
-    [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] (see build_fiscal_cal_and_week_from_upload), so
-    a period truncated at EITHER edge of the window reports a start/end exactly at the window's own
-    boundary and would compare as "fully inside" against any window-boundary-based test:
-
-      * a period still in progress at the window's leading (most recent) edge always shows
-        period_end == REPORT_END_DATE regardless of when it really ends;
-      * a period whose real start predates EFFECTIVE_REPORT_START_DATE (e.g. run_min_date doesn't
-        land on a period boundary) always shows period_start == EFFECTIVE_REPORT_START_DATE
-        regardless of when it really starts.
-
-    Both need the calendar BEYOND the window to detect:
-
-      * fiscal-calendar upload (use_fiscal_calendar=True) — re-read unclipped, so a period still in
-        progress carries its true (future) end date, and one truncated at the window's start
-        carries its true (earlier) start date. This needs the upload to actually cover the weeks
-        before/after the window, with its quarter/month columns populated there: an upload that
-        stops at the window edge (or leaves those columns null past it) makes the truncated period
-        look complete again and nothing is excluded. Only IN-WINDOW weeks are validated for null
-        quarter/month (see build_fiscal_and_products), so extend the upload through the fiscal
-        year on both sides to get this guard.
-      * daily-data time grain (use_fiscal_calendar=False) — no calendar exists beyond the data, but
-        on that path Fiscal_Month IS the real calendar month of the week start and Fiscal_Quarter
-        is ceil(month/3) (see _build_fiscal_week_frame's derivation fallbacks), so the period
-        start/end are the first/last day of that calendar month / of the quarter's or half's first
-        and last month — computable analytically, no calendar lookup needed. A "Year" is Jan 1 to
-        Dec 31 and a "Week" is its first date plus 6 days.
+    Not from ctx.fiscal_week: it is clipped to the window, so a period cut at either window edge would show
+    the window boundary as its bound and look complete. Fiscal calendar: the unclipped upload, which must
+    extend beyond the window (with quarter / month columns filled there) for the edge periods to be caught.
+    Civil calendar: computed (calendar months, Jan 1 - Dec 31 years, 7-day weeks from the first date).
     """
     if ctx.settings["USE_FISCAL_CALENDAR"]:
         quarter_col, month_col, month_name_col = _fiscal_upload_column_map(ctx)
@@ -267,28 +205,10 @@ def _fiscal_period_bounds(ctx: KPIContext, period_col: str) -> DataFrame:
 
 
 def complete_fiscal_periods(ctx: KPIContext, period_col: str) -> DataFrame:
-    """(Year, ``period_col``) pairs that have FULLY ELAPSED **and** are fully contained in the
-    report window: ``period_start >= EFFECTIVE_REPORT_START_DATE`` and
-    ``period_end <= REPORT_END_DATE``.
-
-    Semi-join this onto a metric frame to drop every row belonging to a period that is either
-    still in progress at the window's trailing edge or truncated at its leading edge — what keeps
-    an incomplete quarter/half/month off the Quarter, Half and Monthly value-trend tabs
-    (kpi_long._period_frames). Every pair well inside the window is trivially complete; only the
-    one or two nearest either edge are ever at risk.
-
-    This is a PER-PAIR test ("is THIS year's Q3 fully inside the window?"), distinct from
-    _compute_available_fiscal_months's per-NUMBER test for YTD ("which fiscal MONTH numbers are
-    over for the latest year", then applied to every year so YTD stays apples-to-apples) — that
-    function DOES delegate to this same helper (at Fiscal_Month grain) for its own per-pair check,
-    it just then reduces the result to a plain list of month numbers for the latest year only. The
-    Weekly tab needs no completeness set: REPORT_END_DATE is a Saturday, except with
-    report_end="complete_month" on the civil calendar, where kpi_long._period_frames drops the
-    trailing partial week instead.
-
-    report_end="latest_day" (REPORT_END_DATE is any day) also uses it for the Annual ("Year") and
-    Weekly ("Week") tabs, so the current fiscal year and the trailing partial week are dropped.
-    """
+    """(Year, ``period_col``) keys of the periods fully inside the window (period_start >=
+    EFFECTIVE_REPORT_START_DATE and period_end <= REPORT_END_DATE). Semi-joined onto the metric frames
+    (kpi_long._period_frames) so no in-progress or truncated period shows on the Quarter / Half / Monthly
+    tabs, nor, with report_end="latest_day", on the Annual and Weekly tabs."""
     start = ctx.settings["EFFECTIVE_REPORT_START_DATE"]
     end = ctx.settings["REPORT_END_DATE"]
     return (
@@ -306,31 +226,13 @@ def _civil_month_cut(end: datetime.date) -> datetime.date:
 
 
 def apply_report_end_mode(ctx: KPIContext) -> None:
-    """report_end="complete_month": cut REPORT_END_DATE back to the last day of the most recent
-    fully elapsed month on or before it.
+    """report_end="complete_month": cut REPORT_END_DATE back to the last day of the most recent fully elapsed
+    month (idempotent; must run before anything reads REPORT_END_DATE). "as_of" / "latest_day" change nothing.
 
-    Must run before anything reads REPORT_END_DATE (build_fiscal_and_products, the scopes, the
-    daily in-stock and blocked-days windows, the saved-outputs HTML in html_only mode): they all
-    read the cut date from ctx.settings. Running it again on an already cut date changes nothing.
-
-    Fiscal calendar (use_fiscal_calendar=True): month bounds come from _fiscal_period_bounds, i.e.
-    the UNCLIPPED fiscal_cal upload, so a month still in progress at REPORT_END_DATE reports its
-    real (later) last day and is excluded. The upload must extend past REPORT_END_DATE: an upload
-    ending earlier would make its own last date look like a month end. Fiscal months are whole
-    weeks, so the cut date stays the Saturday that ends a week.
-
-    Civil calendar (use_fiscal_calendar=False): no calendar exists beyond the data, so the cut is
-    the last day of the previous calendar month (or REPORT_END_DATE itself when it is a month end).
-    That is usually not a Saturday: the last week is clipped at the cut, and kpi_long drops the
-    clipped trailing Weekly column. Months are bucketed by each week's start date, so this is a
-    calendar-month cut, not exact calendar-month totals.
-
-    Raises when no month ends inside the window, and when the cut month starts before
-    EFFECTIVE_REPORT_START_DATE (fiscal: the month's period_start; civil: the 1st of the cut month):
-    that month would be reported with its first days missing.
-
-    "as_of" and "latest_day" leave REPORT_END_DATE as materialize resolved it (the last completed
-    Saturday, or as_of_date itself for "latest_day"), so they return without changing anything.
+    Fiscal calendar: month bounds from the unclipped upload (_fiscal_period_bounds), which must extend past
+    REPORT_END_DATE; the cut stays a Saturday. Civil calendar: the last day of the previous calendar month
+    (or REPORT_END_DATE when it is a month end), usually mid-week; kpi_long drops the clipped trailing week.
+    Raises when no month ends inside the window or the cut month starts before the window.
     """
     s = ctx.settings
     if s["REPORT_END_MODE"] in ("as_of", "latest_day"):
@@ -371,21 +273,11 @@ def apply_report_end_mode(ctx: KPIContext) -> None:
 
 
 def build_latest_day_windows(ctx: KPIContext) -> None:
-    """report_end="latest_day": resolve the same-fiscal-day YTD window and the lost-sales YTD weeks.
-
-    K is the day of the fiscal year (1-based: days since that year's first date, plus 1) of
-    REPORT_END_DATE. Fiscal calendar: each year's first date is read from the UNCLIPPED fiscal_cal
-    upload (the window's own calendar is clipped); civil calendar: Jan 1 (day of the calendar year).
-    YTD of every year in ctx.ytd_years is its days 1..K. A year qualifies only when its first date is
-    inside the report window (its days 1..K are all reported); the latest year's day K is
-    REPORT_END_DATE itself.
-
-    Sets ctx.day_calendar (the window's (date, Year, Week) + day_index + last_day_index; the week
-    containing day K splits into the days <= K and the days after, each with its own last_day_index, so
-    the pair-week in-stock frames can be cut at K), ctx.ytd_through_day, ctx.ytd_years and
-    ctx.ytd_lost_sales_last_week. Lost sales only reaches the last Saturday on or before
-    REPORT_END_DATE; its YTD is the whole weeks 1..(fiscal week of that Saturday) for every year, or no
-    week at all when that Saturday falls in the previous fiscal year (day K is in week 1).
+    """report_end="latest_day": set ctx.ytd_through_day (K, the day of the fiscal year of REPORT_END_DATE,
+    from each year's first date in the unclipped upload, or Jan 1 on the civil calendar), ctx.ytd_years
+    (years whose days 1..K are all inside the window), ctx.day_calendar (window dates with day_index and
+    last_day_index; the week containing K is split at K) and ctx.ytd_lost_sales_last_week (fiscal week of
+    the last Saturday on or before REPORT_END_DATE, 0 when that Saturday is in the previous fiscal year).
     """
     s = ctx.settings
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
@@ -441,16 +333,8 @@ def build_latest_day_windows(ctx: KPIContext) -> None:
 
 
 def week_day_counts(ctx: KPIContext) -> DataFrame:
-    """report_end="latest_day": (Year, Week, week_days, ytd_week_days) from ctx.day_calendar -- the days
-    of each fiscal week inside the report window, and how many of them fall on or before the YTD cut
-    day K (ctx.ytd_through_day).
-
-    Every week is 7 days except the week containing K in the latest year, which the report window ends
-    inside, and in the YTD views the week containing K in every year, which stops at day K. metrics.
-    compute_kpis weights WOS's weekly inventory by days / 7 so such a part week is not counted as a full
-    week of inventory against a part week of sales (pipeline._with_week_days attaches week_days;
-    kpi_long._ytd_latest_day_frames swaps in ytd_week_days).
-    """
+    """report_end="latest_day": (Year, Week, week_days, ytd_week_days), the days of each fiscal week inside
+    the window and how many fall on or before day K. WOS weights a part week's inventory by days / 7."""
     return ctx.day_calendar.groupBy("Year", "Week").agg(
         F.count(F.lit(1)).alias("week_days"),
         F.sum((F.col("day_index") <= F.lit(ctx.ytd_through_day)).cast("int")).alias("ytd_week_days"),
@@ -460,12 +344,8 @@ def week_day_counts(ctx: KPIContext) -> DataFrame:
 def require_complete_time_grain(
     ctx: KPIContext, fiscal_cal: DataFrame, start: datetime.date, end: datetime.date, grain_label: str
 ) -> None:
-    """Raise when ``fiscal_cal`` lacks any date between ``start`` and ``end``.
-
-    A missing date silently drops out of every daily metric and shifts the week bounds the
-    in-stock denominator is counted from. On the daily-data path the calendar is only the dates
-    present in daily-data, so a gap there means missing source data.
-    """
+    """Raise when ``fiscal_cal`` lacks a date between ``start`` and ``end``: a missing date would drop out of
+    every daily metric and shift the in-stock week bounds (on the daily-data path it means missing data)."""
     expected = ctx.spark.range(1).select(F.explode(F.sequence(F.lit(start), F.lit(end))).alias("date"))
     missing = [
         r["date"]
@@ -498,15 +378,8 @@ def build_time_grain_from_daily_data(
     report_end_date: datetime.date,
 ) -> Tuple[DataFrame, DataFrame]:
     date_col, week_col = time_cols["date"], time_cols["week"]
-    # Year is the CALENDAR year of `date`, not the source 'year' column: that column can
-    # carry the ISO week-year, which labels late-December weeks as the following year
-    # (e.g. Dec 2025 -> 2026) and mismatches the Quarter/Month derived from `date`.
-    #
-    # Reads via get_daily_data_raw -- the same cached, config-filtered daily_data read every
-    # other consumer uses -- rather than loading PATH_DAILY_DATA directly, so
-    # input_filters.daily_data (e.g. "usable = 1") applies here too. This is the function that
-    # derives Year/Week/Quarter/Month on the civil-calendar path (use_fiscal_calendar=False), so
-    # an unfiltered read here would leak excluded rows into every downstream period label.
+    # Year = calendar year of `date` (not the ISO week-year 'year'). get_daily_data_raw, so
+    # input_filters.daily_data applies to the period labels too.
     daily_time = (
         get_daily_data_raw(ctx)
         .select(date_col, week_col)
@@ -519,14 +392,12 @@ def build_time_grain_from_daily_data(
         )
         .distinct()
     )
-    # No quarter_col/month_col here -- _build_fiscal_week_frame's derivation fallbacks (real
-    # calendar month of week_start_date, quarter = ceil(that month / 3)) are exactly the civil
-    # calendar's Quarter/Month, so there's nothing to source from this path's raw daily-data table.
     return daily_time, _build_fiscal_week_frame(daily_time)
 
 
-def build_fiscal_week_only(ctx: KPIContext) -> None:
-    """Load fiscal_cal and fiscal_week only — used by html_only run mode for weekly column order."""
+def _build_time_grain(ctx: KPIContext) -> str:
+    """Set ctx.fiscal_cal / ctx.fiscal_week for the report window (fiscal_cal upload, or the daily-data
+    year/week on the civil calendar), cached and checked for missing dates. Returns the grain label."""
     s = ctx.settings
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
 
@@ -542,6 +413,12 @@ def build_fiscal_week_only(ctx: KPIContext) -> None:
     ctx.fiscal_cal = fiscal_cal.cache()
     ctx.fiscal_week = fiscal_week.cache()
     require_complete_time_grain(ctx, ctx.fiscal_cal, start, end, grain_label)
+    return grain_label
+
+
+def build_fiscal_week_only(ctx: KPIContext) -> None:
+    """Load fiscal_cal and fiscal_week only — used by html_only run mode for weekly column order."""
+    grain_label = _build_time_grain(ctx)
     print("html_only time grain:", grain_label, "| fiscal weeks:", ctx.fiscal_week.count())
 
 
@@ -551,26 +428,13 @@ def _join_dimension_sources(
     dimension_sources: List[Dict[str, Any]],
     taken_dims: List[str],
 ) -> Tuple[DataFrame, List[str]]:
-    """Left-join optional external dimension sources onto the product attribute table.
+    """Left-join the enabled dimension_sources onto the product attribute table; returns it and the added
+    dimension names.
 
-    Gated feature: only sources with ``enabled=True`` are read — by default this does
-    nothing and slices come from the products master alone. Each enabled source
-    contributes its raw ``columns`` and ``derived`` SQL expressions (evaluated against
-    the *source* table) as new slice dimensions, joined by ``join_key`` (must already be
-    a column on ``products_proj`` — normally ``product_id``). The source is reduced to one
-    row per ``join_key`` before the join so it cannot fan out the product rows.
-
-    Unlike products ``derived_dimensions`` (best-effort, skipped on error), an *enabled*
-    dimension source fails loudly on a bad path, missing column, or unresolved
-    expression — a silently dropped segment would misreport the breakdown it was added
-    to produce.
-
-    ``fillna`` (optional, per source): ``{dim_name: default_value}``. Because the join is
-    a LEFT join, a product with no row in the source table gets ``NULL`` for that source's
-    dimensions — a ``CASE ... ELSE`` in ``derived`` never fires for it, since it has no row
-    to evaluate the expression against. ``fillna`` runs *after* the join and coalesces those
-    NULLs to the given literal, e.g. ``{"is_comp": "yes"}`` treats every product absent from
-    a partial (non-full-universe) source as the complement value.
+    Each source adds its ``columns`` and ``derived`` SQL expressions (evaluated on the source table), one row
+    per ``join_key`` (a column of ``products_proj``). An enabled source fails loudly on a bad path, column or
+    expression. ``fillna`` ({dim: value}) coalesces the NULLs of products absent from the source (a
+    ``derived`` CASE never runs for them), e.g. {"is_comp": "yes"} for a partial source.
     """
     source_dims: List[str] = []
     for src in dimension_sources:
@@ -644,21 +508,9 @@ def _join_dimension_sources(
 def _resolve_root_definitions(
     ctx: KPIContext, products_proj: DataFrame, root_specs: List[Dict[str, Any]]
 ) -> List[Dict[str, str]]:
-    """Resolve config.py's ROOT_SPECS (dim_col + optional explicit root_values) to concrete root
-    definitions: {"root": name, "dim_col": col, "value": raw_value}, one per root population.
-
-    "overall" (no restriction) is implicit everywhere else and never appears in this list. A
-    dim_col missing from products_proj (its source disabled, or nothing actually joined) is
-    skipped rather than erroring -- root_specs already validated dim_col names against each
-    source's own declared columns at config time; a still-missing column just means that source
-    contributed nothing this run.
-
-    root_values present (dict of raw_value -> root name) -> exactly those roots, restricted to
-    the listed values. root_values absent/empty -> AUTO: one root per distinct non-null value
-    actually found in products_proj, named after the raw value itself -- this needs real data,
-    which is why it's resolved here (runtime, Spark available) rather than in config.py
-    (pure-Python, no data access).
-    """
+    """ROOT_SPECS resolved to {"root", "dim_col", "value"} definitions ("overall" is implicit). root_values
+    ({raw value: root name}) gives exactly those roots; without it, one root per distinct non-null value in
+    the data. A dim_col missing from ``products_proj`` (its source contributed nothing) is skipped."""
     definitions: List[Dict[str, str]] = []
     for spec in root_specs:
         dim_col = spec["dim_col"]
@@ -682,20 +534,7 @@ def _resolve_root_definitions(
 def build_fiscal_and_products(ctx: KPIContext) -> None:
     """Populate ctx.fiscal_cal, ctx.fiscal_week, ctx.products_attr, ctx.active_slice_dimensions."""
     s = ctx.settings
-    start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
-
-    if s["USE_FISCAL_CALENDAR"]:
-        fiscal_cal, fiscal_week = build_fiscal_cal_and_week_from_upload(ctx, s["PATH_FISCAL"], start, end)
-        grain_label = "fiscal_cal upload"
-    else:
-        fiscal_cal, fiscal_week = build_time_grain_from_daily_data(
-            ctx, s["DAILY_TIME_COLUMNS"], start, end
-        )
-        grain_label = "daily-data year/week"
-
-    ctx.fiscal_cal = fiscal_cal.cache()
-    ctx.fiscal_week = fiscal_week.cache()
-    require_complete_time_grain(ctx, ctx.fiscal_cal, start, end, grain_label)
+    grain_label = _build_time_grain(ctx)
 
     null_quarter_weeks = ctx.fiscal_week.filter(F.col("Fiscal_Quarter").isNull()).count()
     if null_quarter_weeks > 0:
@@ -722,9 +561,7 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
         ctx.available_fiscal_months = _compute_available_fiscal_months(ctx)
         print("available (fully elapsed) fiscal months for YTD:", ctx.available_fiscal_months)
 
-    # Computed once per run and cached: kpi_long._period_frames semi-joins these onto every metric
-    # frame for the Quarter and Monthly trend tabs, so an in-progress trailing period never renders.
-    # report_end="latest_day" adds the Annual ("Year") and Weekly ("Week") grains.
+    # Cached once per run; kpi_long._period_frames semi-joins them onto every metric frame.
     complete_columns = COMPLETE_PERIOD_COLUMNS + (LATEST_DAY_COMPLETE_PERIOD_COLUMNS if latest_day else ())
     ctx.complete_fiscal_periods = {
         period_col: complete_fiscal_periods(ctx, period_col).cache()
@@ -742,8 +579,7 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
     derived_dims_cfg = s["DERIVED_SLICE_DIMENSIONS"]
     dimension_sources = s.get("DIMENSION_SOURCES", []) or []
 
-    # Dimensions an enabled external source will supply — excluded from the products
-    # "not found" warning below, since they intentionally live outside the products master.
+    # Dimensions an enabled dimension_source supplies: not "missing" from the products master.
     source_provided = [
         c
         for src in dimension_sources
@@ -786,7 +622,6 @@ def build_fiscal_and_products(ctx: KPIContext) -> None:
     )
 
     ctx.active_slice_dimensions = existing_dims + derived_dims + source_dims
-    # Cache the deduplicated projection so repeated downstream joins reuse it without re-scanning Delta.
     products_proj = products_proj.cache()
     ctx.products_attr = broadcast(products_proj)
     ctx.product_dims = broadcast(products_proj.select("product_id", *ctx.active_slice_dimensions))

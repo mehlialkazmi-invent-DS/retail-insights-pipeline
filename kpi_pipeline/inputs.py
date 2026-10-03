@@ -9,15 +9,8 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 def resolve_csv_path(path: str, location: str = "datastore") -> str:
-    """Resolve a CSV path for Spark based on where the file physically lives.
-
-    location:
-      - "datastore" (default): a cloud / DBFS path under the datastore mount
-        (e.g. /mnt/invent-{customer}-datastore/...). Used as-is.
-      - "workspace": a Databricks **workspace** file (e.g. /Workspace/Users/...).
-        Spark reads workspace files through the ``file:`` scheme, so the prefix is
-        added when missing.
-    """
+    """CSV path for Spark: "datastore" (default) paths are used as-is; "workspace" paths (a Databricks
+    /Workspace/... file) get the ``file:`` scheme Spark needs to read them."""
     loc = (location or "datastore").strip().lower()
     if loc not in {"datastore", "workspace"}:
         raise ValueError(f"csv location must be 'datastore' or 'workspace'; got {location!r}")
@@ -32,13 +25,8 @@ def read_csv_source(
     csv_options: Optional[Dict[str, Any]] = None,
     location: str = "datastore",
 ) -> DataFrame:
-    """Read a CSV from either the datastore or a Databricks workspace path.
-
-    ``csv_options`` mirrors Spark CSV reader options. ``header`` (default True) and
-    ``inferSchema`` (default True) are applied as booleans; any other keys are passed
-    through verbatim. Use ``location`` to read workspace-resident CSVs (see
-    :func:`resolve_csv_path`).
-    """
+    """Read a CSV from the datastore or a workspace path (see resolve_csv_path). ``header`` and
+    ``inferSchema`` default to True; other ``csv_options`` pass through to the Spark reader."""
     opts = dict(csv_options or {})
     resolved = resolve_csv_path(path, location)
     reader = spark.read.option("header", str(opts.get("header", True)).lower())
@@ -52,7 +40,7 @@ def read_csv_source(
 
 
 def _input_filters(settings: Dict[str, Any], source: str) -> List[str]:
-    return list(settings.get("INPUT_FILTERS", {}).get(source, []) or [])
+    return list(settings["INPUT_FILTERS"].get(source) or [])
 
 
 def apply_input_filters(df: DataFrame, expressions: List[str], source_name: str, quiet: bool = False) -> DataFrame:
@@ -80,28 +68,15 @@ def read_defined_scope_source(
 
 
 def _print_date_range(df: DataFrame, date_col: str, label: str) -> None:
-    """Always printed (independent of the read's own ``quiet`` logging flag) — the date span
-    actually present in a main input source is worth surfacing on every run, not just verbose ones."""
-    if date_col not in df.columns:
-        return
+    """Print the date span present in a main input source (on every run, whatever ``quiet`` says)."""
     parsed = F.to_date(F.col(date_col))
     bounds = df.agg(F.min(parsed).alias("min"), F.max(parsed).alias("max")).collect()[0]
     print(f"  {label} date range in source ({date_col}): {bounds['min']} to {bounds['max']}")
 
 
 def rename_column_or_fail(df: DataFrame, source_col: str, canonical: str, config_key: str) -> DataFrame:
-    """Rename source_col -> canonical, failing loudly if source_col isn't actually a column.
-
-    Plain ``withColumnRenamed`` silently no-ops when the source column doesn't exist --
-    instead of erroring at the point of misconfiguration, it hides the problem until some
-    later, unrelated operation (e.g. a groupBy several calls downstream) finally references
-    the canonical name and fails with a confusing "column not found" pointing at the wrong
-    line. Every config-driven rename in this pipeline should go through this helper instead.
-
-    Verifies the column exists even when source_col already equals canonical (no rename
-    needed) -- "already correctly named" is still a claim about the source's actual schema,
-    not something to assume without checking.
-    """
+    """Rename source_col -> canonical, failing when source_col is not a column (withColumnRenamed silently
+    no-ops, which surfaces later as a confusing missing column). Checked even when no rename is needed."""
     if source_col not in df.columns:
         raise ValueError(
             f"{config_key}={source_col!r} not found on the source table; "
@@ -111,21 +86,11 @@ def rename_column_or_fail(df: DataFrame, source_col: str, canonical: str, config
 
 
 def _rename_join_keys_to_canonical(df: DataFrame, col_map: Dict[str, Any]) -> DataFrame:
-    """Rename a source's own product/store/week columns to the pipeline's canonical
-    names (product_id, store_id, week_start_date) so every downstream reader can keep
-    assuming those names regardless of what a client's raw table calls them.
+    """Rename a source's product / store / week columns to product_id / store_id / week_start_date.
 
-    product_col and store_col are each optional: a source with no per-store dimension sets
-    store_col to None and the resulting frame simply has no store_id column at all; a source
-    with no native product-id-level column at all sets product_col to None, relying entirely
-    on product_agg_level_col's join (_map_product_agg_level_to_product_id, called before this)
-    to have already produced product_id.
-
-    Configure exactly one of product_col / product_agg_level_col per source, never both: if
-    product_col is set AND actually present on the source, it always takes precedence over
-    product_agg_level_col (see _map_product_agg_level_to_product_id's own no-op check) --
-    leaving both set is misleading, not additive, since the agg-level join would silently
-    never fire.
+    store_col None: the frame has no store_id. product_col None: product_id must already come from
+    product_agg_level_col (_map_product_agg_level_to_product_id). Configure exactly one of product_col /
+    product_agg_level_col: a present product_col always wins, so setting both is misleading.
     """
     product_col = col_map.get("product_col")
     if product_col:
@@ -150,21 +115,9 @@ def _map_product_agg_level_to_product_id(
     settings: Dict[str, Any],
     quiet: bool = False,
 ) -> DataFrame:
-    """Backfill product_id from product_agg_level when a source is keyed by planning/DFU level
-    instead of product_id (e.g. a table where that key is genuinely one-to-many with
-    product_id) -- mirrors kpi-skill-toolkit's own product_agg_level fallback (same
-    product_planning_level table, same planning_level_id rename, same inner join).
-
-    product_col is a precedence flag as much as a rename target: this is a no-op whenever
-    product_col is configured (non-None) AND actually present on the source -- product_col
-    always wins, even if product_agg_level_col also happens to be set. It also no-ops when
-    product_agg_level_col isn't configured at all (nothing to fall back to). It only actually
-    fires -- and does the join -- when product_col is None/absent-from-source AND
-    product_agg_level_col is configured. Configure exactly one of the two per source; if
-    product_agg_level_col IS explicitly configured (in the firing branch), the configured
-    column must actually exist -- unlike "not configured", a wrong explicit value is a real
-    misconfiguration and should fail loudly here rather than silently no-op and surface as a
-    confusing missing-product_id error several calls downstream.
+    """Map a source keyed by planning / DFU level to product_id via product_planning_level (inner join on
+    planning_level_id). No-op when product_col is set and present on the source, or product_agg_level_col
+    is unset; a configured product_agg_level_col missing from the source fails.
     """
     product_col = col_map.get("product_col")
     agg_col = col_map.get("product_agg_level_col")
@@ -205,18 +158,11 @@ def read_lost_sales_source(
 
 
 def read_instock_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
-    """In-stock table of instock.weekly_source (only read when instock.method is "weekly_source").
+    """instock.weekly_source's table as product_id[, store_id], week_start_date, in_stock, total_days.
 
-    Renamed to canonical product_id/[store_id/]week_start_date/in_stock/total_days columns,
-    regardless of what the source calls them (see INSTOCK_SOURCE_COLUMN_MAP).
-
-    fallback_sources (optional): additional column-sets read from the SAME table -- e.g.
-    report_dfu's LY_/LLY_ columns, which carry the same in_stock/total_days formula for the
-    calendar week exactly 52/104 weeks before each row's own TY_ week (see README) -- appended
-    in listed order to fill in weeks the primary column-set doesn't have. A fallback never
-    overrides a (product[, store], week) the primary (or an earlier fallback) already covered;
-    it only fills genuinely missing weeks. Safe because in_stock/total_days is a ratio and both
-    sources compute it the same way for any real week they both happen to cover.
+    fallback_sources: further column sets of the same table (e.g. report_dfu's LY_ / LLY_ columns, the same
+    formula for the week 52 / 104 weeks earlier), appended in order to fill only the (product[, store],
+    week) keys no earlier set has; a covered week is never overridden.
     """
     path = settings["PATH_INSTOCK_SOURCE"]
     col_map = settings["INSTOCK_SOURCE_COLUMN_MAP"]
@@ -247,17 +193,11 @@ def read_instock_source(spark: SparkSession, settings: Dict[str, Any], quiet: bo
 
 
 def read_speed_cluster_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
-    """One row per product_id with its numeric sales-speed cluster.
-
-    Supports two source table shapes via SPEED_CLUSTER_FORMAT:
-      "long" (default) - a long-format attributes table (one row per product_id x
-          attribute_name); filtered to SPEED_CLUSTER_ATTRIBUTE_NAME, attribute_value is
-          the cluster. This is the platform's noob/product-cluster-attributes-snapshot shape.
-      "wide" - the cluster is already its own column (SPEED_CLUSTER_VALUE_COL) on a
-          table with one row per product_id.
-    """
+    """One row per product_id with its integer sales_speed_cluster. SPEED_CLUSTER_FORMAT "long" (default): an
+    attributes table filtered to SPEED_CLUSTER_ATTRIBUTE_NAME (attribute_value is the cluster); "wide": the
+    cluster is the SPEED_CLUSTER_VALUE_COL column."""
     path = settings["PATH_SPEED_CLUSTER"]
-    fmt = settings.get("SPEED_CLUSTER_FORMAT", "long")
+    fmt = settings["SPEED_CLUSTER_FORMAT"]
     raw = spark.read.format("delta").load(path)
     if fmt == "wide":
         value_col = settings["SPEED_CLUSTER_VALUE_COL"]
@@ -291,43 +231,42 @@ def read_daily_data_source(spark: SparkSession, settings: Dict[str, Any], quiet:
 
 
 def get_daily_data_raw(ctx) -> DataFrame:
-    """Cached daily-data read (config filters applied once per run), item-family-rolled to
-    parent product_id when ITEM_FAMILY_ROLLUP["daily_data"] is True (default -- see config.py).
+    """Cached daily-data for the report window: input_filters.daily_data applied, rows dated outside
+    [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] dropped, rolled to the family main when
+    ITEM_FAMILY_ROLLUP["daily_data"] is True, and only the columns its readers use.
 
-    Without this, build_scoped_daily's own join to already-parent-rolled scope_core/
-    ctx.products_attr (pipeline.py) silently DROPS any daily-data row still carrying a
-    child/superseded product_id, since the join has no matching parent-only key for it -- a
-    pre-existing bug this default-on rollup fixes. Applied once here (not at each of this
-    function's call sites) since every consumer (build_scoped_daily, scope.py's
-    read_daily_for_scope, fiscal.py) should see the same parent-rolled id space scope_core
-    itself is already in.
+    Every reader (build_scoped_daily, scope.read_daily_for_scope, scope.apply_scope_adjustments,
+    fiscal.build_time_grain_from_daily_data) keeps only window dates itself, so the window filter and the
+    column selection drop nothing they read; they only keep the cache small.
 
-    Deliberately does NOT re-aggregate after the mapping, unlike
-    pipeline._get_inventory_warehouse_parent_rolled: a child and its parent both having a row on
-    one date is harmless here, since every consumer either sums those rows (sales, inventory
-    totals) or groups by date before averaging (metrics._mean_stock_frame) or uses countDistinct.
-    inventory_warehouse must re-aggregate because build_dc_inst joins it onto a per-pair date grid,
-    where a duplicate key would fan out grid rows and inflate dc_available_days.
+    The roll-up matters because scope_core and products_attr are already in the family-main id space: a
+    child product_id would drop out of build_scoped_daily's joins. A child and its parent on the same date
+    are not re-aggregated here; every reader sums those rows, groups by date first or counts distinct.
     """
     if ctx.daily_data_raw is None:
-        raw = read_daily_data_source(ctx.spark, ctx.settings, quiet=True)
-        if ctx.settings["ITEM_FAMILY_ROLLUP"]["daily_data"]:
+        s = ctx.settings
+        time_cols = s["DAILY_TIME_COLUMNS"]
+        columns = ["product_id", "store_id", time_cols["date"], "sales_revenue", "sales_quantity", "inventory"]
+        if not s["USE_FISCAL_CALENDAR"]:
+            columns.append(time_cols["week"])
+        raw = read_daily_data_source(ctx.spark, s, quiet=True).filter(
+            F.to_date(F.col(time_cols["date"])).between(
+                F.lit(s["EFFECTIVE_REPORT_START_DATE"]), F.lit(s["REPORT_END_DATE"])
+            )
+        )
+        if s["ITEM_FAMILY_ROLLUP"]["daily_data"]:
             from kpi_pipeline.pipeline import _roll_to_item_family_parent
 
             raw = _roll_to_item_family_parent(raw, ctx)
-        ctx.daily_data_raw = raw.cache()
+        ctx.daily_data_raw = raw.select(*columns).cache()
     return ctx.daily_data_raw
 
 
 def get_daily_data_excluded_days(ctx) -> DataFrame:
-    """Cached distinct (product_id, store_id, date) days in the report window on which
-    input_filters.daily_data removes a daily-data row (a row failing, or null on, any filter
-    expression), rolled to the family main like get_daily_data_raw. Empty when daily_data has no filters.
-
-    build_scoped_daily uses it to drop goods-in-transit-only days whose daily row was filtered out
-    (e.g. unusable days, usable = 1) instead of letting them re-enter as zero-sales inventory days.
-    Scope-independent, so it is built once per run and shared by every scope variant. The expressions
-    run on the raw product_id before the roll-up, as in read_daily_data_source.
+    """Cached distinct (product_id, store_id, date) window days whose daily-data row input_filters.daily_data
+    removes (fails, or is null on, a filter), rolled to the family main like get_daily_data_raw; empty
+    without filters. build_scoped_daily drops goods-in-transit-only days on them, so a filtered-out day
+    (e.g. usable = 1) does not re-enter as a zero-sales inventory day. Scope-independent, built once per run.
     """
     if ctx.daily_data_excluded_days is None:
         s = ctx.settings
@@ -356,8 +295,7 @@ def get_daily_data_excluded_days(ctx) -> DataFrame:
 
 
 def read_inventory_warehouse_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
-    """DC/warehouse daily inventory table -- plain product_id/warehouse_id/date/inventory
-    columns, no column-mapping needed (unlike lost_sales_source/instock.weekly_source)."""
+    """DC (warehouse) daily inventory: product_id, warehouse_id, date, inventory."""
     path = settings["PATH_INVENTORY_WAREHOUSE"]
     filters = _input_filters(settings, "inventory_warehouse")
     if not quiet:
@@ -370,17 +308,8 @@ def read_inventory_warehouse_source(spark: SparkSession, settings: Dict[str, Any
     return out
 
 
-def get_inventory_warehouse_raw(ctx) -> DataFrame:
-    """Cached inventory_warehouse read (config filters applied once per run)."""
-    if ctx.inventory_warehouse_raw is None:
-        ctx.inventory_warehouse_raw = read_inventory_warehouse_source(ctx.spark, ctx.settings, quiet=True).cache()
-    return ctx.inventory_warehouse_raw
-
-
 def read_item_family_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
-    """Parent/child item-family map -- rolls superseded child products (is_main=false) onto
-    their parent product_id (see README's "dc_instock" section). Read unconditionally whenever
-    inventory_warehouse is configured; is_main=false filtering happens downstream in pipeline.py."""
+    """Item-family map (product_id, parent_id, is_main): superseded children roll onto their parent."""
     path = settings["PATH_ITEM_FAMILY"]
     col_map = settings["ITEM_FAMILY_COLUMN_MAP"]
     filters = _input_filters(settings, "item_family")
@@ -406,12 +335,9 @@ def get_item_family_raw(ctx) -> DataFrame:
 def read_operation_scope_source(
     spark: SparkSession, settings: Dict[str, Any], run_date, solution_ids: List[int], location_col: str
 ) -> DataFrame:
-    """Platform scope table (operation/scope): one solution's rows for one run_date that are still
-    open on it (end_date null or >= run_date), as (product_id, <location_col>, start_date).
-    location_id is the store for a store solution and the warehouse for a DC solution.
-
-    Fails loudly when the solution has no rows for run_date -- a wrong solution_id or run_date must
-    not silently produce an empty report.
+    """operation/scope rows of the solution(s) for one run_date still open on it (end_date null or >=
+    run_date), as (product_id, <location_col>, start_date); location_id is the store or the warehouse.
+    Fails when there is no row: a wrong solution_id or run_date must not give an empty report.
     """
     path = settings["PATH_SCOPE"]
     print(f"reading operation scope: {path} (solution_id in {solution_ids}, run_date={run_date})")
@@ -438,8 +364,8 @@ def read_active_product_ids(spark: SparkSession, settings: Dict[str, Any]) -> Da
     )
 
 
-# Source key columns of each UI blocked-scope kind. destination_id is the location: the store in
-# blocked_scope, the warehouse in dc_blocked_scope (renamed per caller, see blocked_scope_keys).
+# Source key columns of each UI blocked-scope kind; destination_id is the store (blocked_scope) or the
+# warehouse (dc_blocked_scope).
 BLOCKED_SCOPE_KINDS = {
     "product": ["product_id"],
     "product_destination": ["product_id", "destination_id"],
@@ -455,11 +381,9 @@ def blocked_scope_keys(kind: str, location_col: str) -> List[str]:
 def read_blocked_scope_source(
     spark: SparkSession, folder: str, solution_ids: List[int], kind: str, location_col: str
 ) -> DataFrame:
-    """One kind of a UI blocked-scope snapshot folder ({ui_parameters_path}/blocked_scope or
-    {ui_parameters_path}/dc_blocked_scope, then /{kind}) for one solution, as
-    (blocked_scope_keys(kind, location_col), block_start, block_end). Fails loudly (Spark read error)
-    when the folder is missing.
-    """
+    """{folder}/{kind} of a UI blocked-scope snapshot for the solution(s), as (blocked_scope_keys(kind,
+    location_col), block_start, block_end). A missing folder fails the Spark read; a row without
+    start_date fails here."""
     path = f"{folder}/{kind}"
     print(f"reading blocked scope {kind} (solution_id in {solution_ids}): {path}")
     blocks = (
@@ -487,16 +411,14 @@ def read_goods_in_transit_source(spark: SparkSession, settings: Dict[str, Any]) 
 
 
 def get_instock_daily_raw(ctx) -> DataFrame:
-    """Daily-data read for the daily in-stock metric: product_id, store_id, date, inventory and
-    an is_usable flag (usable == 1, null counts as unusable), limited to history_start..report end.
+    """noob/daily-data for the daily in-stock metric: product_id, store_id, date, inventory and is_usable
+    (usable == 1; null is unusable), from instock.daily.history_start to the report end, filtered on the
+    raw date column so Delta file pruning applies. Not cached here (build_instock_daily caches it after
+    its scope join).
 
-    The range is filtered on the raw date column, before to_date, so Delta file pruning applies.
-    Not cached here: build_instock_daily caches the frame after its scope join.
-
-    Deliberately NOT the input_filters.daily_data read that get_daily_data_raw uses: that filter
-    typically drops unusable days (usable = 1), but the daily in-stock method needs to see them so
-    they can leave the store-day denominator. Not item-family-rolled here either: noob/daily-data is
-    already rolled to the family main upstream, the same id space as the rolled scope pairs.
+    Not get_daily_data_raw: input_filters.daily_data typically drops unusable days, which the daily
+    in-stock method must see to take them out of the store-days. Not rolled to the family main:
+    noob/daily-data is already in the family-main id space.
     """
     s = ctx.settings
     date_col = s["DAILY_TIME_COLUMNS"]["date"]

@@ -33,12 +33,9 @@ def _window_weeks(ctx: KPIContext) -> DataFrame:
 
 
 def _defined_scope_pairs(ctx: KPIContext, raw: DataFrame) -> DataFrame:
-    """Distinct scope universe at the configured grain, without any time column.
-
-    Item-family-rolled to parent product_id when ITEM_FAMILY_ROLLUP["defined_scope"] is True
-    (see config.py) -- OFF by default, since a client's scope source may already be rolled
-    upstream (as tbretail's is); available as an opt-in safety net for a client whose isn't.
-    """
+    """Distinct scope pairs (or products) of the defined_scope table at the configured grain, without a time
+    column; rolled to the family main when ITEM_FAMILY_ROLLUP["defined_scope"] is True (off by default:
+    a client's scope source may already be rolled, as tbretail's is)."""
     config = ctx.settings["DEFINED_SCOPE"]
     sel = [F.col(config["product_col"]).alias("product_id")]
     if "store_id" in ctx.scope_keys:
@@ -61,14 +58,12 @@ def _scope_run_date(ctx: KPIContext) -> datetime.date:
 
 
 def _scope_start_pairs(ctx: KPIContext, solution_ids: List[int], location_col: str) -> DataFrame:
-    """(product_id, <location_col>, scope_start) from one solution's operation/scope run.
+    """Cached (product_id, <location_col>, scope_start, main_eligible) from one solution's operation/scope run.
 
-    roll_to_family_main: every row is rolled to its family main (a product without a main keeps its
-    own product_id), so a location where only a sub-item is in scope gets the main. A pair with
-    several rows (the main's and its sub-items') keeps the EARLIEST start_date as scope_start, and
-    main_eligible says whether the main itself (a row of its own product_id, not only a sub-item's) is
-    in scope there (scope_source.instock_main_eligible_only). active_only: pairs of inactive products
-    are dropped.
+    roll_to_family_main rolls every row to its family main (a product without a main keeps its own id), so a
+    location where only a sub-item is in scope gets the main. A pair keeps the EARLIEST start_date of its
+    rows as scope_start; main_eligible says whether the main itself (not only a sub-item) is in scope there
+    (scope_source.instock_main_eligible_only). active_only drops pairs of inactive products.
     """
     cfg = ctx.settings["SCOPE_SOURCE"]
     rows = read_operation_scope_source(ctx.spark, ctx.settings, _scope_run_date(ctx), solution_ids, location_col)
@@ -83,43 +78,42 @@ def _scope_start_pairs(ctx: KPIContext, solution_ids: List[int], location_col: s
     )
     if cfg["active_only"]:
         pairs = pairs.join(read_active_product_ids(ctx.spark, ctx.settings), on="product_id", how="inner")
+    pairs = pairs.cache()
     if pairs.filter(F.col("scope_start").isNull()).limit(1).count() > 0:
         raise ValueError(f"operation scope rows without start_date (solution_id in {solution_ids})")
     return pairs
 
 
 def _operation_scope_pairs(ctx: KPIContext) -> DataFrame:
-    """Scope universe from the platform scope table (scope_source.mode="operation_scope").
-
-    One run_date of operation/scope for scope_source.solution_id, rows still open on that date,
-    reduced to (product_id, store_id, scope_start) by _scope_start_pairs. The full frame is kept on
-    ctx.operation_scope_pairs for the blocked-scope rule and the daily in-stock count start. Returns
-    the distinct pairs at the configured scope grain, without any time column, like
-    _defined_scope_pairs.
-    """
-    pairs = _scope_start_pairs(ctx, ctx.settings["SCOPE_SOURCE"]["solution_id"], "store_id")
+    """Scope universe of scope_source.mode="operation_scope": the distinct pairs of _scope_start_pairs at the
+    configured grain, without a time column. The full frame stays on ctx.operation_scope_pairs for the
+    blocked-scope rule and the daily in-stock count start."""
     if ctx.operation_scope_pairs is not None:
         ctx.operation_scope_pairs.unpersist()
-    ctx.operation_scope_pairs = pairs.cache()
+    ctx.operation_scope_pairs = _scope_start_pairs(ctx, ctx.settings["SCOPE_SOURCE"]["solution_id"], "store_id")
     print(f"operation scope pairs: {ctx.operation_scope_pairs.count():,}")
     return ctx.operation_scope_pairs.select(
         *[c for c in ("product_id", "store_id") if c in ctx.scope_keys]
     ).distinct()
 
 
-def _applied_block_days(
+def _applied_block_intervals(
     ctx: KPIContext, pairs: DataFrame, location_col: str, folder: str, solution_ids: List[int], kinds: List[str]
 ) -> DataFrame:
-    """(product_id, <location_col>, date) days covered by one UI blocked-scope snapshot folder.
+    """(product_id, <location_col>, first_day, last_day): the days one UI blocked-scope snapshot folder blocks,
+    as disjoint per-pair date intervals inside the report window.
 
-    ``kinds`` are the folder's kinds to read (blocked_scope.kinds / dc_kinds) -- product,
-    product_destination (product x location), destination (location) -- each with start_date / end_date (null = open-ended). A block is matched to `pairs`
-    (with scope_start) on the main's own product_id: block product_ids are NOT rolled to the family
-    main, so a block on a sub-item code blocks nothing. With blocked_scope.rule "after_scope_start" a
-    block applies to a pair only when block.start_date >= the pair's scope_start (same day: the block
-    applies); an earlier block was superseded by the pair being set up again and is ignored. Rule
-    "all" applies every matched block. An applied block covers block start_date .. end_date, clipped
-    to the report window.
+    ``kinds`` are the folder's kinds to read (product, product_destination, destination), each with
+    start_date / end_date (null = open-ended). Blocks match `pairs` (with scope_start) on the main's own
+    product_id: block product_ids are NOT rolled to the family main. Rule "after_scope_start" applies a block
+    only when block.start_date >= the pair's scope_start (same day applies; an earlier block was superseded by
+    the pair being set up again); "all" applies every matched block. An applied block covers start_date ..
+    end_date, clipped to the report window.
+
+    Overlapping or adjacent blocks of a pair are merged (gaps and islands), so every blocked day lies in
+    exactly one interval: a range join on (pair, first_day <= date <= last_day) matches a day at most once,
+    and the intervals hold exactly the days an explode of every block would give, without materializing
+    one row per pair-day.
     """
     rule = ctx.settings["BLOCKED_SCOPE"]["rule"]
     start, end = ctx.settings["EFFECTIVE_REPORT_START_DATE"], ctx.settings["REPORT_END_DATE"]
@@ -135,24 +129,41 @@ def _applied_block_days(
         ],
     )
     applies = (F.col("block_start") >= F.col("scope_start")) if rule == "after_scope_start" else F.lit(True)
-    return (
+    clipped = (
         matched.filter(applies)
-        .withColumn("first_day", F.greatest(F.col("block_start"), F.lit(start)))
-        .withColumn("last_day", F.least(F.coalesce(F.col("block_end"), F.lit(end)), F.lit(end)))
+        .select(
+            "product_id",
+            location_col,
+            F.greatest(F.col("block_start"), F.lit(start)).alias("first_day"),
+            F.least(F.coalesce(F.col("block_end"), F.lit(end)), F.lit(end)).alias("last_day"),
+        )
         .filter(F.col("first_day") <= F.col("last_day"))
-        .select("product_id", location_col, F.explode(F.sequence("first_day", "last_day")).alias("date"))
-        .distinct()
+    )
+    # An interval starts a new island when it begins after every earlier interval of the pair has ended (a
+    # gap of at least one day); otherwise it extends the current island.
+    order = Window.partitionBy("product_id", location_col).orderBy("first_day", "last_day")
+    reached = F.max("last_day").over(order.rowsBetween(Window.unboundedPreceding, -1))
+    return (
+        clipped.withColumn("_starts", (reached.isNull() | (F.col("first_day") > F.date_add(reached, 1))).cast("int"))
+        .withColumn("_island", F.sum("_starts").over(order.rowsBetween(Window.unboundedPreceding, Window.currentRow)))
+        .groupBy("product_id", location_col, "_island")
+        .agg(F.min("first_day").alias("first_day"), F.max("last_day").alias("last_day"))
+        .drop("_island")
     )
 
 
-def build_blocked_days(ctx: KPIContext) -> None:
-    """Build ctx.blocked_days: the (product_id, store_id, date) days a UI block covers, once per run
-    (None when blocked_scope.ui_parameters_path is None). The metrics named in blocked_scope.metrics
-    drop them; the frames only flag them (pipeline._flag_blocked_days).
+def _blocked_pair_days(intervals: DataFrame) -> int:
+    """Number of blocked pair-days in disjoint block intervals."""
+    days = F.datediff(F.col("last_day"), F.col("first_day")) + 1
+    return intervals.agg(F.coalesce(F.sum(days), F.lit(0))).first()[0]
 
-    Blocks of {ui_parameters_path}/blocked_scope for scope_source.solution_id, matched to the
-    operation-scope pairs by _applied_block_days. Pairs added by scope_adjustments are not
-    operation-scope pairs, so no block reaches them.
+
+def build_blocked_days(ctx: KPIContext) -> None:
+    """Build ctx.blocked_days, the cached (product_id, store_id, first_day, last_day) block intervals of
+    {ui_parameters_path}/blocked_scope for scope_source.solution_id, matched to the operation-scope pairs
+    (None when blocked_scope.ui_parameters_path is None). Pairs added by scope_adjustments are not
+    operation-scope pairs, so no block reaches them. The metrics named in blocked_scope.metrics drop the
+    blocked days; the daily frames only flag them (pipeline._flag_blocked_days).
     """
     if ctx.blocked_days is not None:
         ctx.blocked_days.unpersist()
@@ -160,38 +171,32 @@ def build_blocked_days(ctx: KPIContext) -> None:
     cfg = ctx.settings["BLOCKED_SCOPE"]
     if cfg["path"] is None:
         return
-    ctx.blocked_days = _applied_block_days(
+    ctx.blocked_days = _applied_block_intervals(
         ctx, ctx.operation_scope_pairs, "store_id", cfg["path"], cfg["solution_id"], cfg["kinds"]
     ).cache()
-    print(f"blocked scope rule={cfg['rule']} | blocked pair-days in window: {ctx.blocked_days.count():,}")
+    print(f"blocked scope rule={cfg['rule']} | blocked pair-days in window: {_blocked_pair_days(ctx.blocked_days):,}")
 
 
 def build_dc_scope(ctx: KPIContext) -> None:
-    """Build ctx.dc_scope_pairs: the DC (network) scope's (product_id, warehouse_id) pairs from
-    operation/scope of scope_source.dc_solution_id, with the store scope's run_date, roll-up to the family
-    main, earliest start and active filter (None when dc_solution_id is None). The store scope leads: every
-    DC metric reads only these pairs whose product is in the store scope (pipeline.build_dc_daily /
-    build_dc_inst), and the DC blocked days take their start dates from them."""
+    """Build ctx.dc_scope_pairs: the DC (network) scope's (product_id, warehouse_id) pairs from operation/scope
+    of scope_source.dc_solution_id, built like the store scope (None when dc_solution_id is None). The store
+    scope leads: every DC metric reads only these pairs whose product is in the store scope, and the DC
+    blocked days take their start dates from them."""
     if ctx.dc_scope_pairs is not None:
         ctx.dc_scope_pairs.unpersist()
     ctx.dc_scope_pairs = None
     solution_ids = ctx.settings["SCOPE_SOURCE"]["dc_solution_id"]
     if solution_ids is None:
         return
-    ctx.dc_scope_pairs = _scope_start_pairs(ctx, solution_ids, "warehouse_id").cache()
+    ctx.dc_scope_pairs = _scope_start_pairs(ctx, solution_ids, "warehouse_id")
     print(f"DC scope pairs (solution_id in {solution_ids}): {ctx.dc_scope_pairs.count():,}")
 
 
 def build_dc_blocked_days(ctx: KPIContext) -> None:
-    """Build ctx.dc_blocked_days: the (product_id, warehouse_id, date) days a DC block covers, dropped by the
-    DC metrics named in blocked_scope.metrics (dc_mean_stock, WOS_DC, the DC part of WOS_TOTAL /
-    total_mean_stock, dc_in_stock_rate), like the store blocks on the store metrics (None unless
-    scope_source.dc_solution_id and blocked_scope.ui_parameters_path are set).
-
-    The DC solution's operation/scope run (same run_date, roll-up, active filter and earliest
-    scope_start as the store scope, location = warehouse) gives each DC pair its scope_start; blocks of
-    {ui_parameters_path}/dc_blocked_scope for that solution are applied by blocked_scope.rule
-    (_applied_block_days). DC pairs outside that scope receive no blocks.
+    """Build ctx.dc_blocked_days, the cached (product_id, warehouse_id, first_day, last_day) DC block intervals
+    of {ui_parameters_path}/dc_blocked_scope for blocked_scope.dc_solution_id, matched to ctx.dc_scope_pairs by
+    blocked_scope.rule (None unless scope_source.dc_solution_id, blocked_scope.ui_parameters_path and
+    blocked_scope.dc_solution_id are set). The DC metrics named in blocked_scope.metrics drop those days.
     """
     if ctx.dc_blocked_days is not None:
         ctx.dc_blocked_days.unpersist()
@@ -200,43 +205,28 @@ def build_dc_blocked_days(ctx: KPIContext) -> None:
     if ctx.dc_scope_pairs is None or s["BLOCKED_SCOPE"]["path"] is None or s["BLOCKED_SCOPE"]["dc_solution_id"] is None:
         return
     solution_ids = s["BLOCKED_SCOPE"]["dc_solution_id"]
-    ctx.dc_blocked_days = _applied_block_days(
+    ctx.dc_blocked_days = _applied_block_intervals(
         ctx, ctx.dc_scope_pairs, "warehouse_id", s["BLOCKED_SCOPE"]["dc_path"], solution_ids, s["BLOCKED_SCOPE"]["dc_kinds"]
     ).cache()
     print(
         f"DC blocked scope rule={s['BLOCKED_SCOPE']['rule']} | blocked DC pair-days in window: "
-        f"{ctx.dc_blocked_days.count():,}"
+        f"{_blocked_pair_days(ctx.dc_blocked_days):,}"
     )
 
 
 def _defined_scope_weekly(ctx: KPIContext, raw: DataFrame) -> DataFrame:
-    """Honour the scope table's own (product, store, Year, Week) rows, window-filtered, with an
-    optional leading-gap backfill applied on top.
+    """The scope table's own (product, store, Year, Week) rows inside the report window, for the
+    ``product_store_week`` grain, with an optional leading-gap backfill.
 
-    Used for the ``product_store_week`` grain. Weeks are resolved from ``date_col`` via
-    fiscal_cal, or from native ``year_col``/``week_col`` -- the NATIVE path is only valid when
-    USE_FISCAL_CALENDAR=False (civil calendar mode), matching every other source's own
-    date-vs-native gating (build_scoped_daily, read_lost_sales_weekly in pipeline.py): in fiscal
-    mode, Year/Week must always come from fiscal_cal/fiscal_week, or a scope source using a
-    different week-numbering convention (e.g. ISO week-year) would silently mismatch every other
-    frame's Year/Week keys. Fails loudly instead if fiscal mode is on and date_col is unset --
-    there is no way to correctly resolve fiscal Year/Week without a date to join against
-    fiscal_cal. Item-family-rolled to parent product_id when ITEM_FAMILY_ROLLUP["defined_scope"]
-    is True (see config.py and _defined_scope_pairs above -- same toggle and reasoning).
+    Weeks come from ``date_col`` via fiscal_cal, or from native ``year_col``/``week_col`` on the civil
+    calendar only: with USE_FISCAL_CALENDAR a native week numbering (e.g. ISO week-year) could mismatch
+    every other frame's Year/Week, so date_col is required there. Rolled to the family main when
+    ITEM_FAMILY_ROLLUP["defined_scope"] is True.
 
-    Leading-gap backfill (defined_scope.backfill_leading_gap, default True): if the scope
-    source's own earliest available week (across every pair) starts later than the report
-    window's start, that gap is a data-availability limit of the source itself -- so only the
-    pairs tied to that earliest week are assumed in scope back to the window's own start (never
-    a hardcoded floor date), same "min date in window" principle build_dc_inst's per-pair grid
-    uses (pipeline.py). A pair whose own first-seen week is later still -- later than the
-    source's earliest week, not merely later than the window start -- is left untouched: that
-    later start is a real signal (a new store, a new product), not a leading-gap artifact, and
-    must not be backfilled. Only the LEADING gap is filled: any real weeks the source provides (a
-    later start with no gap, a mid-window gap, an end date) are honoured exactly as recorded.
-    product/product_store grains are unaffected -- they already apply every scoped pair to the
-    whole window. Set False for a deployment with existing product_store_week history saved
-    before this option existed (see config.py's comment).
+    backfill_leading_gap (default True): when the source's earliest week (across every pair) starts after
+    the window start, the pairs whose first week IS that earliest week are assumed in scope back to the
+    window start -- the gap is the feed's own availability limit. A pair first seen later is a real new
+    pair and keeps its own start. Only the leading gap is filled; every other week is used as recorded.
     """
     config = ctx.settings["DEFINED_SCOPE"]
     sel = [
@@ -286,9 +276,6 @@ def _defined_scope_weekly(ctx: KPIContext, raw: DataFrame) -> DataFrame:
         .groupBy("product_id", "store_id")
         .agg(F.min("week_start_date").alias("first_scope_week_start"))
     )
-    # Only the pairs tied to the SOURCE's own earliest available week qualify -- a pair whose own
-    # first-seen week is later than that (even if still later than window_start) is a real pair
-    # start (new store/product), not a leading-gap artifact of the feed, and stays untouched.
     scope_earliest_start = pair_first_week.agg(F.min("first_scope_week_start")).collect()[0][0]
     pairs_with_gap = pair_first_week.filter(
         (F.col("first_scope_week_start") == F.lit(scope_earliest_start))
@@ -304,19 +291,12 @@ def _defined_scope_weekly(ctx: KPIContext, raw: DataFrame) -> DataFrame:
 
 
 def build_defined_scope(ctx: KPIContext) -> None:
-    """Read the scope table into defined_scope_keys at the configured grain.
+    """Read the scope table into ctx.defined_scope_keys, (product[, store], Year, Week) keys at
+    ``defined_scope.grain``: "product" and "product_store" pairs apply to EVERY window week;
+    "product_store_week" keeps the table's own weeks (not supported with operation_scope).
 
-    The table is ``defined_scope`` (scope_source.mode="defined_scope") or the platform
-    ``operation/scope`` (mode="operation_scope", see _operation_scope_pairs; product_store_week is
-    not supported there). ``defined_scope.grain`` controls how the scope table defines membership:
-      * ``"product"``            -> distinct product_id; store- and week-agnostic.
-      * ``"product_store"``      -> distinct (product_id, store_id); week-agnostic.
-      * ``"product_store_week"`` -> the scope table's own (product, store, week) rows, honoured.
-
-    For the week-agnostic grains (product, product_store) the pairs are applied to EVERY week
-    in the report window, so a pair scoped in any period counts for the whole window. For
-    product_store_week the scope table's own weeks are honoured.
-    Downstream always consumes (product[, store], Year, Week) keys.
+    The table is ``defined_scope`` (scope_source.mode="defined_scope") or the platform operation/scope
+    (mode="operation_scope", _operation_scope_pairs).
     """
     config = ctx.settings["DEFINED_SCOPE"]
     grain = config["grain"]
@@ -335,21 +315,16 @@ def build_defined_scope(ctx: KPIContext) -> None:
             pairs = _operation_scope_pairs(ctx)
         else:
             pairs = _defined_scope_pairs(ctx, read_defined_scope_source(ctx.spark, ctx.settings, quiet=True))
+        # Distinct pairs x distinct weeks: already distinct, no distinct() pass needed.
         window_yw = _window_weeks(ctx).select("Year", "Week").distinct()
-        ctx.defined_scope_keys = (
-            pairs.crossJoin(broadcast(window_yw)).select(*ctx.scope_keys).distinct().cache()
-        )
+        ctx.defined_scope_keys = pairs.crossJoin(broadcast(window_yw)).select(*ctx.scope_keys).cache()
 
     print(f"defined scope grain: {grain} | keys: {ctx.scope_keys} | count: {ctx.defined_scope_keys.count()}")
 
 
 def read_daily_for_scope(ctx: KPIContext, start_date: datetime.date, end_date: datetime.date) -> DataFrame:
-    """Daily sales/inventory for scope building (score scope and adjustment pair expansion).
-
-    Includes ALL stores — scope membership is store-agnostic so that total sales/revenue/
-    inventory cover every store. Any store you want excluded from specific metrics should be
-    filtered via input_filters.daily_data (see config.py) rather than baked in here.
-    """
+    """Daily sales / inventory per (product_id, store_id, date) for score scope, every store included
+    (exclude a store with input_filters.daily_data)."""
     time_cols = ctx.settings["DAILY_TIME_COLUMNS"]
     date_col = time_cols["date"]
     daily = (
@@ -377,12 +352,9 @@ def build_weekly_scope(
     min_percentile: float,
     min_weeks_for_filter: int,
 ) -> DataFrame:
-    """Flag in-scope weeks per pair using percentile thresholds on sales and weekly inventory.
-
-    weekly_inventory uses the last available daily snapshot in the fiscal week
-    (max_by on date), not Saturday-only — avoids false zero when week_end_date is missing.
-    """
-    # Equi-join on date via fiscal_cal (point lookup) — avoids the range join on week bounds.
+    """Flag each pair-week in scope ("yes") when its sales and weekly inventory both reach the pair's
+    ``min_percentile``, or when the pair has at most ``min_weeks_for_filter`` weeks. Weekly inventory is
+    the week's last available daily snapshot (max_by on date), not Saturday's only."""
     weekly = (
         daily.join(
             broadcast(fiscal_cal.select("date", "Year", "Week")),
@@ -401,7 +373,6 @@ def build_weekly_scope(
         )
         .fillna(0.0, subset=["weekly_sales", "weekly_inventory"])
     )
-    # Window functions compute per-pair thresholds in one pass — no separate groupBy + join.
     w = Window.partitionBy("product_id", "store_id")
     weekly = (
         weekly
@@ -437,16 +408,10 @@ def build_score_scope_keys(ctx: KPIContext, daily_in: DataFrame) -> DataFrame:
 
 
 def build_hybrid_scope(ctx: KPIContext) -> None:
-    """Finalise scope keys, optionally backfilling weeks the defined scope does not cover.
-
-    Not hybrid (default): final scope = ``defined_scope_keys`` as built at the configured grain.
-
-    Hybrid: window weeks the defined scope does NOT cover (missing weeks) are backfilled from
-    score scope (per-(product, store) sales/inventory activity percentile, computed once over the
-    full window). For the week-agnostic grains (product, product_store) the defined scope already
-    covers every window week, so there are no missing weeks and the backfill is a no-op; it is
-    meaningful for the product_store_week grain, whose covered weeks are only those present in the
-    scope table.
+    """Set ctx.hybrid_scope_keys (with scope_origin): defined_scope_keys, plus with use_hybrid_scope the
+    score-scope keys of the window weeks the defined scope does not cover. Only product_store_week can
+    leave weeks uncovered; the week-agnostic grains cover every week, so the backfill adds nothing there.
+    Score scope is computed only for hybrid or run_scope_diff.
     """
     s = ctx.settings
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
@@ -506,11 +471,7 @@ def _adjustment_source(adj_cfg: Dict[str, Any], path: str) -> str:
 
 
 def _read_adjustment_raw(ctx: KPIContext, adj_cfg: Dict[str, Any], path: str) -> DataFrame:
-    """Load an adjustment table from Delta or CSV.
-
-    CSV files may live in the datastore (default) or a Databricks workspace path —
-    set ``"location": "workspace"`` on the adjustment to read a /Workspace/... CSV.
-    """
+    """Load an adjustment table from Delta or CSV (``"location": "workspace"`` reads a /Workspace/... CSV)."""
     source = _adjustment_source(adj_cfg, path)
     if source == "csv":
         print(f"scope adjustment source: csv ({path})")
@@ -580,11 +541,8 @@ def _read_adjustment_keys(
     path: str,
     scope_pairs: Optional[DataFrame] = None,
 ) -> DataFrame:
-    """Resolve an adjustment table to scope_keys grain for the current report window.
-
-    scope_pairs is a cached distinct (product_id, store_id) frame used for single-key
-    expansions — computed once in apply_scope_adjustments and reused across all steps.
-    """
+    """An adjustment table's keys at the scope_keys grain for the report window. ``scope_pairs`` (distinct
+    daily-data pairs) expands a single-key adjustment to the other key."""
     join_keys = adj_cfg["join_keys"]
     raw = _read_adjustment_raw(ctx, adj_cfg, path)
     window_weeks = _window_weeks(ctx).select("Year", "Week", "week_start_date", "week_end_date")
@@ -624,19 +582,9 @@ def _read_adjustment_keys(
 
 
 def _anti_join_by_keys(scope: DataFrame, removal_keys: DataFrame, join_keys: List[str]) -> DataFrame:
-    """Anti-join ``scope`` against ``removal_keys`` on the adjustment's own ``join_keys``,
-    restricted to whichever of those columns the resolved scope grain actually carries, plus
-    Year/Week (present on both once resolved). ``_read_adjustment_keys`` has already
-    cascaded/collapsed ``removal_keys`` to the scope's own grain -- e.g. a product-only removal
-    (``join_keys=["product_id"]``) under a product_store-grain scope deliberately drops the
-    store_id that removal_keys picked up while cascading via scope_pairs, so the anti-join matches
-    (and removes) every store of that product, not just the ones with recorded daily activity in
-    scope_pairs (see apply_scope_adjustments's scope_pairs comment for the addition-side analog).
-
-    A join_keys column the scope grain lacks entirely (e.g. store_id under
-    defined_scope.grain="product") has no sound anti-join translation here -- silently falling
-    back to a Year/Week-only match would strike every row in those weeks regardless of
-    product/store. Fails loudly instead.
+    """Anti-join ``scope`` against ``removal_keys`` on the adjustment's ``join_keys`` the scope grain carries,
+    plus Year/Week. A product-only removal under a product_store scope therefore removes every store of the
+    product. Fails when no non-time join key is left (a Year/Week-only match would strike whole weeks).
     """
     key_cols = set(scope.columns) & set(removal_keys.columns)
     join_on = [k for k in join_keys if k in key_cols and k not in ("Year", "Week")]
@@ -651,7 +599,11 @@ def _anti_join_by_keys(scope: DataFrame, removal_keys: DataFrame, join_keys: Lis
 
 
 def apply_scope_adjustments(ctx: KPIContext, fund_paste: Optional[Callable[..., str]] = None) -> None:
-    """Apply configured manual scope additions and removals to the final scope."""
+    """Apply the enabled scope_adjustments additions and removals, in order, to ctx.hybrid_scope_keys.
+
+    Each step's scope is cached, so its row counts, its summary and the next step read it once instead of
+    recomputing every earlier step.
+    """
     cfg = ctx.settings.get("SCOPE_ADJUSTMENTS", {})
     enabled = _enabled_adjustments(cfg)
 
@@ -666,10 +618,8 @@ def apply_scope_adjustments(ctx: KPIContext, fund_paste: Optional[Callable[..., 
     ctx.scope_before_adjustments = scope.cache()
     ctx.scope_adjustments_applied = True
 
-    # Compute the distinct active pairs once; reused by any single-key adjustment expansions.
-    # read_daily_for_scope includes ALL stores, so join_keys=["product_id"] additions expand to
-    # every store selling the product -- every metric uses all scoped stores (see config.py),
-    # so there's no separate downstream exclusion for these pairs to fall under.
+    # Distinct (product, store) pairs with daily data in the window, for single-key adjustments: a
+    # join_keys=["product_id"] addition expands to every store selling the product.
     needs_pairs = any(
         ("store_id" in ctx.scope_keys and "store_id" not in adj["join_keys"] and "product_id" in adj["join_keys"])
         or ("product_id" in ctx.scope_keys and "product_id" not in adj["join_keys"] and "store_id" in adj["join_keys"])
@@ -677,36 +627,40 @@ def apply_scope_adjustments(ctx: KPIContext, fund_paste: Optional[Callable[..., 
     )
     scope_pairs: Optional[DataFrame] = None
     if needs_pairs:
-        start, end = ctx.settings["EFFECTIVE_REPORT_START_DATE"], ctx.settings["REPORT_END_DATE"]
-        scope_pairs = read_daily_for_scope(ctx, start, end).select("product_id", "store_id").distinct().cache()
+        scope_pairs = get_daily_data_raw(ctx).select("product_id", "store_id").distinct().cache()
 
     print("=" * 72)
     print("SCOPE ADJUSTMENTS — scope BEFORE additions/removals")
     print_scope_summary("Base scope (hybrid or defined-only)", ctx.scope_before_adjustments, ctx.scope_keys)
 
+    # Counted on scope_keys only (not scope_origin): a key already in scope must not read as new coverage
+    # because a later step claims it under another origin.
+    before_count = scope.select(*ctx.scope_keys).distinct().count()
     for adj in enabled:
         path = _resolve_adjustment_path(ctx, adj, fund_paste)
         source = _adjustment_source(adj, path)
         action = adj["action"]
-        # Counted on scope_keys only (not the full row incl. scope_origin) — a key already in
-        # scope under one origin must not read as "new coverage" just because a later step
-        # claims it under a different origin label.
-        before_count = scope.select(*ctx.scope_keys).distinct().count()
+        previous = scope
 
         if action == "addition":
             label = adj.get("label", "manual_add")
             add_keys = _read_adjustment_keys(ctx, adj, path, scope_pairs).withColumn("scope_origin", F.lit(label))
-            # Keep the FIRST origin a key was claimed under — anti-join out keys already in
-            # scope before unioning, so a key present under e.g. "defined" doesn't also get a
-            # second physical row under this addition's label (scope.distinct() dedupes whole
-            # rows, so two different scope_origin values for the same key would otherwise both
-            # survive, double-counting that key in scope_summary_by_origin and in rows_delta).
+            # A key keeps the FIRST origin it was claimed under: keys already in scope are anti-joined out
+            # before the union, or the key would get a second row under this label.
             new_keys = add_keys.join(scope.select(*ctx.scope_keys).distinct(), on=ctx.scope_keys, how="left_anti")
-            scope = scope.unionByName(new_keys.select(*scope.columns)).distinct()
-            after_count = scope.select(*ctx.scope_keys).distinct().count()
-            step = {
-                "action": action,
-                "label": label,
+            scope = scope.unionByName(new_keys.select(*scope.columns)).distinct().cache()
+        else:
+            removal_keys = _read_adjustment_keys(ctx, adj, path, scope_pairs)
+            scope = _anti_join_by_keys(scope, removal_keys, adj["join_keys"]).distinct().cache()
+        after_count = scope.select(*ctx.scope_keys).distinct().count()
+        if previous is not ctx.scope_before_adjustments:
+            previous.unpersist()
+
+        step = {"action": action}
+        if action == "addition":
+            step["label"] = label
+        step.update(
+            {
                 "source": source,
                 "path": path,
                 "join_keys": adj["join_keys"],
@@ -714,30 +668,23 @@ def apply_scope_adjustments(ctx: KPIContext, fund_paste: Optional[Callable[..., 
                 "rows_after": after_count,
                 "rows_delta": after_count - before_count,
             }
-            print("-" * 72)
+        )
+        print("-" * 72)
+        if action == "addition":
             print(f"ADDITION '{label}' from {source}: {path}")
             print(f"  join_keys: {adj['join_keys']} | rows added (net): {step['rows_delta']:,}")
         else:
-            removal_keys = _read_adjustment_keys(ctx, adj, path, scope_pairs)
-            scope = _anti_join_by_keys(scope, removal_keys, adj["join_keys"]).distinct()
-            after_count = scope.select(*ctx.scope_keys).distinct().count()
-            step = {
-                "action": action,
-                "source": source,
-                "path": path,
-                "join_keys": adj["join_keys"],
-                "rows_before": before_count,
-                "rows_after": after_count,
-                "rows_delta": after_count - before_count,
-            }
-            print("-" * 72)
             print(f"REMOVAL from {source}: {path}")
             print(f"  join_keys: {adj['join_keys']} | rows removed: {before_count - after_count:,}")
 
         ctx.scope_adjustment_steps.append(step)
         print_scope_summary(f"Scope AFTER {action}", scope, ctx.scope_keys)
+        before_count = after_count
 
-    ctx.hybrid_scope_keys = scope.distinct().cache()
+    if scope_pairs is not None:
+        scope_pairs.unpersist()
+    # Every step ends with distinct(), so the last step's cached frame is the final scope as is.
+    ctx.hybrid_scope_keys = scope
     print("=" * 72)
     print("SCOPE ADJUSTMENTS — FINAL scope used for KPIs")
     print_scope_summary("Final scope", ctx.hybrid_scope_keys, ctx.scope_keys)

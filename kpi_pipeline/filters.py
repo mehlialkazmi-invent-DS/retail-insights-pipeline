@@ -1,8 +1,4 @@
-"""Shared value-filter mechanics: slice-dimension filtering (kpi_long.py) and per-metric
-population overrides (metrics.py) both restrict a frame to rows matching a dimension's values,
-using the exact same include/exclude/keep_null shape -- kept in one place so neither module
-reimplements it.
-"""
+"""Value filters shared by the slice cuts (kpi_long) and the per-metric population filters (metrics)."""
 
 from __future__ import annotations
 
@@ -13,31 +9,11 @@ from pyspark.sql import functions as F
 
 
 def normalize_value_filter(spec) -> Dict[str, Any]:
-    """Normalise one ``value_filters``-shaped entry into a canonical include/exclude/keep_null form.
+    """One value filter entry as ``{"include": Optional[list], "exclude": list, "keep_null": bool}``.
 
-    Accepts two shapes:
-
-    LIST form (include-only)::
-
-        []           -> keep all NON-NULL values (drop the NULL bucket)
-        ["A", "B"]   -> keep ONLY 'A' and 'B' (NULL and anything else dropped)
-
-    DICT form (include and/or exclude, NULL-aware)::
-
-        {"include": ["A", "B"]}              -> keep ONLY 'A' and 'B'          (NULL dropped)
-        {"exclude": ["X", "Y"]}              -> keep EVERYTHING EXCEPT 'X'/'Y' (NULL KEPT)
-        {"include": [...], "exclude": [...]} -> keep the include set, then remove the excludes
-        {..., "keep_null": True/False}       -> optional override of the NULL bucket
-
-    Default NULL handling (when ``keep_null`` is not given):
-
-      * ``include`` present -> NULL is DROPPED (you asked for a specific set of values)
-      * ``include`` absent  -> NULL is KEPT   (``exclude`` keeps the whole complement)
-
-    :param spec: the raw list-or-dict value filter spec.
-    :return: ``{"include": Optional[list], "exclude": list, "keep_null": bool}``.
-    :rtype: Dict[str, Any]
-    :raises ValueError: on an unrecognised shape or an unknown dict key.
+    List form (include-only): ``[]`` keeps every non-null value; ``["A", "B"]`` keeps only A and B.
+    Dict form: ``include`` and / or ``exclude`` lists, and optional ``keep_null``. NULL is dropped by
+    default when ``include`` is given and kept when it is not. Raises on another shape or an unknown key.
     """
     if isinstance(spec, (list, tuple, set)):
         values = list(spec)
@@ -56,7 +32,6 @@ def normalize_value_filter(spec) -> Dict[str, Any]:
         include = spec.get("include")
         include = None if include is None else list(include)
         exclude = list(spec.get("exclude", []) or [])
-        # include present -> default drop NULL; include absent -> default keep NULL.
         keep_null = bool(spec.get("keep_null", include is None))
         return {"include": include, "exclude": exclude, "keep_null": keep_null}
 
@@ -67,22 +42,8 @@ def normalize_value_filter(spec) -> Dict[str, Any]:
 
 
 def apply_value_filter(df: DataFrame, dim: str, spec) -> DataFrame:
-    """Filter ``df`` on one dimension column per a normalised value-filter spec.
-
-    A row is kept when EITHER
-
-      * its value is NON-NULL and satisfies the include/exclude rules, OR
-      * its value is NULL and ``keep_null`` is True.
-
-    Spark ``isin`` / ``NOT isin`` both evaluate to NULL for a NULL cell, so the NULL
-    bucket is handled explicitly here rather than left to SQL three-valued logic.
-
-    :param df: frame carrying the ``dim`` column.
-    :param dim: dimension column name.
-    :param spec: raw list-or-dict value filter spec.
-    :return: the filtered frame.
-    :rtype: DataFrame
-    """
+    """``df`` filtered on column ``dim`` by a value filter: a non-null value must pass include / exclude, a
+    NULL is kept only with keep_null (handled explicitly: ``isin`` / ``NOT isin`` are NULL on NULL)."""
     norm = normalize_value_filter(spec)
     col = F.col(dim)
 
@@ -98,10 +59,8 @@ def apply_value_filter(df: DataFrame, dim: str, spec) -> DataFrame:
     return df.filter(keep)
 
 
-# Metric columns that share ONE aggregation pass in metrics.py's compute_kpis/build_kpi_table --
-# a metrics.population_filters entry on any one of a group's columns applies to the WHOLE group,
-# since splitting them into independently-filtered passes would mean recomputing the same
-# aggregation multiple times over. Keep in sync with metrics.py's actual grouping.
+# Metric columns computed in one aggregation in metrics.compute_kpis: a metrics.population_filters entry
+# on any column applies to its whole group. Keep in sync with compute_kpis.
 METRIC_FILTER_GROUPS: Dict[str, Tuple[str, ...]] = {
     "sales": (
         "total_sales_quantity", "total_sales_revenue", "total_inventory", "AUR", "AUC",
@@ -120,12 +79,8 @@ METRIC_FILTER_GROUPS: Dict[str, Tuple[str, ...]] = {
 
 
 def resolve_group_population_filter(group: str, settings: Dict[str, Any]) -> Dict[str, Any]:
-    """Union metrics.population_filters entries across one METRIC_FILTER_GROUPS group.
-
-    The group's columns share a single aggregation pass, so they can only be filtered together --
-    fails loudly if two columns in the same group configure different specs for the same dim_col,
-    since silently picking one would look like the other column's setting was silently ignored.
-    """
+    """The metrics.population_filters entries of one METRIC_FILTER_GROUPS group, merged; fails when two of
+    its columns set different specs for the same dimension."""
     cols = METRIC_FILTER_GROUPS[group]
     all_filters = settings.get("METRIC_POPULATION_FILTERS") or {}
     merged: Dict[str, Any] = {}
@@ -147,11 +102,7 @@ def resolve_group_population_filter(group: str, settings: Dict[str, Any]) -> Dic
 
 
 def apply_group_population_filter(df: DataFrame, group: str, settings: Dict[str, Any]) -> DataFrame:
-    """Restrict df to one METRIC_FILTER_GROUPS group's configured population override.
-
-    No-op when nothing in the group has a metrics.population_filters entry -- callers can apply
-    this unconditionally without changing behaviour for configs that don't use the feature.
-    """
+    """``df`` restricted to one METRIC_FILTER_GROUPS group's population (unchanged without an entry)."""
     for dim_col, spec in resolve_group_population_filter(group, settings).items():
         df = apply_value_filter(df, dim_col, spec)
     return df

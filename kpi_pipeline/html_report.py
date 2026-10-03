@@ -1,22 +1,12 @@
-"""Render a standalone HTML KPI report from KPIContext.
+"""Standalone offline HTML KPI report from a KPIContext (render_kpi_html).
 
-Entry point
------------
-    render_kpi_html(ctx, output_path, ...)
-
-Produces a self-contained, offline HTML file with:
-  * Executive-style header (client, reporting window, scope, slices)
-  * CSS-only major tabs: Annual / YTD / Quarter / Half / Monthly / Weekly / Metric Details
-  * Within each period tab: dimension tabs (Overall + every slice column in data)
-  * Within each slice dimension: vertical value tabs (one KPI panel per value)
-  * Quarter/Half/Monthly/Weekly tabs are value trends only, limited to the most recent N periods
-    (configurable, default 5) — no comparison table on these tabs
-  * KPI tables with category row coloring (revenue / service / inventory / scale)
-  * Comparison section on the Annual (YoY) and YTD panels only
-  * Metric Details tab: definition, store scope, and formula for every active metric
-
-Slice dimensions and values are inferred from ``kpi_long`` — no hard-coded brand logic.
+Executive header; period tabs (Annual / YTD / Quarter / Half / Monthly / Weekly) and Metric Details; inside
+each period tab, dimension tabs (Overall + each cut found in kpi_long) and vertical value tabs. KPI tables
+are colored by metric category. Annual and YTD panels add the YoY / YTD comparison; Quarter / Half /
+Monthly / Weekly show the most recent N periods' values only. An outer root tab level appears with more
+than one root.
 """
+
 from __future__ import annotations
 
 import calendar
@@ -27,6 +17,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+
+from kpi_pipeline.fiscal import last_saturday_on_or_before
 
 
 # ---------------------------------------------------------------------------
@@ -278,10 +270,6 @@ _GIT_METRIC_NOTES: Dict[str, str] = {
 }
 
 
-def _last_saturday(day: datetime.date) -> datetime.date:
-    return day - datetime.timedelta(days=(day.weekday() + 2) % 7)
-
-
 def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
     """Definition overrides that depend on the run's settings: the daily in-stock method
     (instock.method "daily"), the blocked-days note on the metrics named in blocked_scope.metrics, the
@@ -315,7 +303,7 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
             + f" Inventory counts {_GIT_METRIC_NOTES[metric]} goods in transit on top of on-hand.",
         }
     if settings["REPORT_END_MODE"] == "latest_day":
-        last_saturday = _last_saturday(settings["REPORT_END_DATE"])
+        last_saturday = last_saturday_on_or_before(settings["REPORT_END_DATE"])
         base = out.get("lost_sales_pct", DEFAULT_METRIC_DEFINITIONS["lost_sales_pct"])
         out["lost_sales_pct"] = {
             **base,
@@ -852,10 +840,8 @@ def _tab_visibility_css(
     return "\n".join(lines)
 
 
-# "Metric Details" is root-independent (just metric definitions), so it's always a peer of
-# whichever tab level is OUTERMOST -- period tabs when there's only one root (today's exact
-# behavior), or the root tabs themselves when there's more than one -- never nested inside a
-# specific root's panel, and never duplicated per root. Emitted once regardless of root count.
+# "Metric Details" is root-independent: one tab, a peer of the outermost tab level (the period tabs with
+# one root, the root tabs with several).
 _DETAILS_TAB_CSS = (
     "  #kpi-tab-details:checked ~ .top-panels .top-panel-details { display: block; }\n"
     "  #kpi-tab-details:checked ~ .top-tab-bar label[for='kpi-tab-details'] "
@@ -930,32 +916,16 @@ def _sort_period_labels(
     return sorted(periods)
 
 
-def _display_period_labels(
-    periods: List[str],
-    period_type: str,
-    week_start_by_period: Optional[Dict[str, Any]] = None,
-) -> List[str]:
-    """Return sorted period labels for HTML display (trim already applied to kpi_long at data level)."""
-    return _sort_period_labels(periods, period_type, week_start_by_period)
-
-
 def _month_labels_from_fiscal_cal(ctx: Any) -> Dict[str, str]:
-    """Read the display month label straight off the fiscal_cal upload, verbatim, when available.
-
-    Only produces entries for (Year, Fiscal_Month) periods where the client's fiscal_cal actually
-    carries a usable month-name column (config.py's fiscal_calendar.month_name_col -- e.g.
-    "month_name") -- trusts that source rather than re-deriving one. Whatever periods it doesn't
-    cover (column absent, or null for some weeks) are filled in by the derived fallback in
-    _build_month_display_labels below.
-    """
+    """{"YYYY-MM": label} from the fiscal_cal upload's month-name column (fiscal_calendar.month_name_col),
+    verbatim, for the periods where it is filled; _derive_month_display_labels covers the rest."""
     fw = ctx.fiscal_week
     if "Fiscal_Month_Name" not in fw.columns:
         return {}
     fw_pd = fw.select("Year", "Fiscal_Month", "Fiscal_Month_Name").dropna(subset=["Fiscal_Month_Name"]).distinct().toPandas()
     if fw_pd.empty:
         return {}
-    # A (Year, Fiscal_Month) should carry one consistent name across its weeks; if the upload is
-    # inconsistent, keep the first (alphabetically-arbitrary but deterministic) rather than error.
+    # One name per (Year, Fiscal_Month), even if the upload is inconsistent across its weeks.
     fw_pd = fw_pd.drop_duplicates(subset=["Year", "Fiscal_Month"])
     out: Dict[str, str] = {}
     for row in fw_pd.itertuples(index=False):
@@ -965,22 +935,9 @@ def _month_labels_from_fiscal_cal(ctx: Any) -> Dict[str, str]:
 
 
 def _derive_month_display_labels(ctx: Any) -> Dict[str, str]:
-    """Map each "YYYY-MM" fiscal-month period key to a derived real-calendar-month display label.
-
-    Fallback used only for periods _month_labels_from_fiscal_cal didn't cover. The fiscal month
-    NUMBER (Fiscal_Month, from fiscal_cal) does not necessarily line up with the real calendar
-    month on a fiscal calendar -- e.g. tbretail's fiscal month 07 has been observed spanning
-    8/2-8/29 (real August), and a 5-week fiscal month can span parts of three real calendar
-    months. So the display name is the majority (by day count) real calendar month across each
-    fiscal month's actual dates, not a lookup on the fiscal month number itself. On the
-    civil-calendar path (USE_FISCAL_CALENDAR=False) Fiscal_Month already IS the real calendar
-    month, so this reduces to a no-op there.
-
-    ctx.fiscal_cal is date-grain (date, Year, Week[, Month]); ctx.fiscal_week carries the
-    resolved Fiscal_Month per (Year, Week). Both are already-cached small reference frames
-    (one row per date / per week for the report window), so pulling them to pandas here is
-    the same pattern already used for week_start_by_period above.
-    """
+    """{"YYYY-MM": label} naming each fiscal month after the real calendar month holding most of its days:
+    a fiscal month number need not match the calendar month (tbretail's fiscal month 07 spanned 8/2-8/29,
+    real August). On the civil calendar Fiscal_Month already is the calendar month."""
     fw_pd = ctx.fiscal_week.select("Year", "Week", "Fiscal_Month").distinct().toPandas()
     fc_pd = ctx.fiscal_cal.select("Year", "Week", "date").toPandas()
     fc_pd["calendar_month"] = pd.to_datetime(fc_pd["date"]).dt.month
@@ -1001,14 +958,7 @@ def _derive_month_display_labels(ctx: Any) -> Dict[str, str]:
 
 
 def _build_month_display_labels(ctx: Any) -> Dict[str, str]:
-    """Map each "YYYY-MM" fiscal-month period key to its Monthly-tab display label.
-
-    Prefers the fiscal_cal upload's own month-name column, verbatim, when the client's fiscal_cal
-    has one (see _month_labels_from_fiscal_cal / config.py's fiscal_calendar.month_name_col);
-    derives the rest from actual dates (_derive_month_display_labels). Each client's fiscal_cal
-    may or may not carry a usable month-name column -- both paths are always attempted so a
-    partial upload (some periods labelled, some not) still resolves every period.
-    """
+    """{"YYYY-MM": Monthly-tab label}: the upload's own month name where present, else the derived one."""
     from_source = _month_labels_from_fiscal_cal(ctx)
     derived = _derive_month_display_labels(ctx)
     return {**derived, **from_source}
@@ -1019,23 +969,9 @@ def _period_th_label(
     period_type: Optional[str],
     month_display_by_period: Optional[Dict[str, str]] = None,
 ) -> str:
-    """Column-header text for one period value.
-
-    Display-only: the underlying `period` string (e.g. "2026-08" for monthly) stays as-is
-    everywhere else -- kpi_long storage, incremental-save merge keys, and both the trimming
-    sort in kpi_long.trim_periods_to_recent and _sort_period_labels above depend on it being
-    lexically sortable ("YYYY-MM"), which a month name is not. Only this header text swaps to
-    a real calendar-month name.
-
-    "2026-08" is the FISCAL month key (Year + Fiscal_Month from fiscal_cal), which does NOT
-    line up with calendar month numbers on tbretail's (and possibly other clients') fiscal
-    calendar -- e.g. fiscal month 07 has been observed spanning 8/2-8/29 (real August), and a
-    5-week fiscal month can span parts of three real calendar months. So the display name is
-    looked up in month_display_by_period (built from the actual dates in fiscal_cal/fiscal_week
-    -- see render_kpi_html), never derived by feeding the fiscal month NUMBER into a month-name
-    table. If a period is missing from that map (should not normally happen), the raw fiscal
-    key is shown rather than guessing a name.
-    """
+    """Column-header text of one period. Display only: ``period`` stays the sortable "YYYY-MM" fiscal key
+    everywhere else. A monthly header comes from month_display_by_period (actual dates), never from the
+    fiscal month number; an unmapped period shows its raw key."""
     if period_type == "monthly":
         mapped = (month_display_by_period or {}).get(str(period))
         if mapped:
@@ -1058,7 +994,7 @@ def _pivot_single_value(
     ].copy()
     if sub.empty:
         return pd.DataFrame(), []
-    periods = _display_period_labels(
+    periods = _sort_period_labels(
         sub["period"].unique().tolist(),
         period_type,
         week_start_by_period,
@@ -1121,19 +1057,8 @@ def _comparison_wide_html(
     period_type: Optional[str] = None,
     month_display_by_period: Optional[Dict[str, str]] = None,
 ) -> str:
-    """One consolidated YoY/YTD table: the same value columns _kpi_table_html renders (one per
-    period present in kpi_long, e.g. 2024/2025/2026 -- passed in pre-pivoted as ``value_sub``/
-    ``periods`` since _value_panel_content already computes them for the plain table) plus one
-    delta column per consecutive-period link present in ``comp_df`` (e.g. Delta 2025,
-    Delta 2026) -- same value+delta layout _comparable_wide_html established for the
-    comparable-pairs path. Previously this table carried delta columns only, with the value
-    trend shown separately in the plain _kpi_table_html panel directly above it -- a delta with
-    no value next to it isn't useful on its own, so the two are now one table whenever a
-    comparison exists for this period_type (comp_df is only ever populated for annual/ytd; see
-    _value_panel_content's fallback to the plain value-only table otherwise). Replaces the old
-    per-link stacked mini-tables (one 4-column Metric/prior/current/Change table per link) with
-    this single table.
-    """
+    """One YoY / YTD table: the panel's value columns (``value_sub`` / ``periods``, already pivoted) plus one
+    delta column per consecutive-period link in ``comp_df``; "" without a comparison for this value."""
     if comp_df is None or comp_df.empty or value_sub.empty or not periods:
         return ""
     comp_sub = comp_df[
@@ -1203,17 +1128,9 @@ def _comparable_wide_html(
     month_display_by_period: Optional[Dict[str, str]] = None,
     title: Optional[str] = None,
 ) -> str:
-    """One consolidated comparable-pairs (like-for-like) YTD table: N value columns (one per
-    year in the report window, from comparable_kpi_long -- reuses _pivot_single_value, the same
-    wide-value pattern _kpi_table_html renders) plus N-1 delta columns (one per consecutive-year
-    link, from comparable_comparison_ytd's own per-link change_display) laid out side by side in
-    ONE table, instead of N-1 separate 2-column stacked tables. Same value+delta layout as
-    _comparison_wide_html's regular-comparison table, just sourced from comparable_kpi_long (a
-    separate restricted population) instead of the panel's own already-pivoted value table.
-
-    ``title`` replaces the default "<comp_label> Comparison" caption with a heading (used for the
-    per-quarter / per-half blocks, see _comparable_numbered_section_html).
-    """
+    """One comparable-pairs (like-for-like) table: a value column per year from ``comparable_kpi_long`` (its
+    own restricted population) plus a delta column per consecutive-year link. ``title`` replaces the
+    default "<comp_label> Comparison" caption (the per-quarter / per-half blocks)."""
     if comparable_comp_df is None or comparable_comp_df.empty:
         return ""
     comp_sub = comparable_comp_df[
@@ -1231,9 +1148,7 @@ def _comparable_wide_html(
         return '<p style="color:#64748b;font-size:.875rem">No data for this selection.</p>'
     value_grp = value_sub.set_index("period")
 
-    # One delta column per consecutive-year link present for this dimension/value, ascending by
-    # the link's current (later) year -- same grouping _comparison_wide_html uses below, just
-    # alongside the value columns here instead of on its own.
+    # One delta column per consecutive-year link, ascending by the link's current year.
     links = comp_sub[["prior_period", "current_period"]].drop_duplicates().sort_values("current_period")
     link_pairs = list(zip(links["prior_period"], links["current_period"]))
 
@@ -1297,14 +1212,8 @@ def _comparable_numbered_section_html(
     period_type: str,
     month_display_by_period: Optional[Dict[str, str]] = None,
 ) -> str:
-    """One narrow value+delta block PER quarter / half number (Q1, Q2, ... / H1, H2) via
-    _comparable_wide_html, instead of a single table mixing every period's columns and links
-    together -- each number has its own independent same-pairs population and year-set (see
-    comparable.py's build_comparable_pairs), and a combined table would grow a value column per
-    period-year and a delta column per link, quickly becoming unreadable. Each block carries a
-    "Q1 · Like-for-like" heading and is separated from the next by a rule (.cmp-period-block).
-    A number with no qualifying data (fewer than 2 years having it, or 0 common pairs) simply
-    contributes no block."""
+    """One value + delta block per quarter / half number (each has its own pair universe and years); a
+    number without qualifying data adds no block."""
     prefix = _NUMBERED_PERIOD_PREFIX[period_type]
     tag_col = f"{period_type}_number"
     if (
@@ -1352,9 +1261,7 @@ def _value_panel_content(
         kpi_long, period_type, dimension, dimension_value, metric_cols,
         week_start_by_period,
     )
-    # A comparison only ever exists for annual/ytd (comp_df is None otherwise -- see
-    # render_kpi_html's comp_map). When it does, show ONE value+delta table instead of the plain
-    # value table followed by a delta-only table: a delta with no value next to it isn't useful.
+    # annual / ytd with a comparison: one value + delta table; otherwise the plain value table.
     table = _comparison_wide_html(
         sub, periods, comp_df, dimension, dimension_value, metric_cols, labels, comp_label,
         period_type, month_display_by_period,
@@ -1515,11 +1422,8 @@ def _build_root_period_tabs(
     *,
     dimension_labels: Dict[str, str],
 ) -> Tuple[str, str]:
-    """Build (css, body_html) for one root's Annual/Quarter/Half/Month/YTD/Weekly tab group, already
-    filtered to that root's rows. `extra_tab` (id, label, panel_html) -- used for "Metric Details"
-    when there's only one root (see render_kpi_html) -- is appended into the SAME radio group so
-    it sits as a peer of the period tabs, exactly matching the pre-roots layout; with more than
-    one root, Details instead becomes a peer of the root tabs themselves (extra_tab=None here)."""
+    """(css, body_html) of one root's period tab group, from that root's rows. ``extra_tab`` (id, label,
+    panel_html), Metric Details with a single root, joins the same radio group as a peer of the period tabs."""
     dims_by_period = {pt: dims for pt in period_types}
     values_by_dim: Dict[str, List[str]] = {}
     for pt in period_types:
@@ -1611,7 +1515,7 @@ def _report_info_html(
     if settings["REPORT_END_MODE"] == "latest_day":
         period_basis = (
             f"YTD to {report_end} (same fiscal day every year); other tabs: complete periods only; "
-            f"lost sales through {_last_saturday(settings['REPORT_END_DATE'])}"
+            f"lost sales through {last_saturday_on_or_before(settings['REPORT_END_DATE'])}"
         )
         period_basis_card = f"""
       <div class="meta-card">
@@ -1701,14 +1605,9 @@ def render_kpi_html(
     report_title: Optional[str] = None,
     metric_definitions: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> str:
-    """
-    Render a standalone, offline HTML KPI report from a completed KPIContext.
-
-    Slice dimensions and values are inferred from ``ctx.kpi_long`` automatically.
-    """
-    # Prefer the trimmed-for-display copy (see KPIContext.kpi_long_display); ctx.kpi_long
-    # itself stays full so it always reflects exactly what was saved to Delta. Falls back to
-    # ctx.kpi_long for callers that build a KPIContext directly without going through KPIRunner.
+    """Write the standalone HTML report of a completed KPIContext to ``output_path``; slice dimensions and
+    values come from kpi_long."""
+    # The display copy trimmed to recent periods; ctx.kpi_long for a KPIContext built without KPIRunner.
     kpi_long = ctx.kpi_long_display if ctx.kpi_long_display is not None else ctx.kpi_long
     settings = ctx.settings
 
@@ -1732,9 +1631,7 @@ def render_kpi_html(
     ]
     labels: Dict[str, str] = settings.get("METRIC_LABELS") or {}
 
-    # Root-defining dimension_source columns are NOT cuts (they're what "root" partitions on) --
-    # use cut_dimensions, not active_slice_dimensions, so e.g. IS_NVROUT doesn't also render as
-    # its own flat dimension tab now that it drives the root tabs instead.
+    # cut_dimensions, not active_slice_dimensions: a root column (e.g. IS_NVROUT) is not a dimension tab.
     configured_slices = list(settings.get("SLICE_DIMENSIONS") or [])
     active_dims = list(getattr(ctx, "cut_dimensions", None) or [])
     slice_source = active_dims or configured_slices
@@ -1746,8 +1643,7 @@ def render_kpi_html(
     if not period_types:
         raise ValueError("kpi_long contains no recognised period_types (annual/quarter/half/monthly/weekly).")
 
-    # Quarter/Half/Monthly/Weekly tabs show the raw value trend only (no comparison table) — the
-    # display-trimmed period tabs already cover "recent quarters/months/weeks" reporting.
+    # Quarter / Half / Monthly / Weekly tabs show values only, no comparison table.
     comp_map: Dict[str, Optional[pd.DataFrame]] = {
         "annual": ctx.comparison_yoy,
         "ytd": getattr(ctx, "comparison_ytd", None),
@@ -1757,9 +1653,7 @@ def render_kpi_html(
         "weekly": None,
     }
 
-    # Gated comparable (like-for-like) tables, one per comparable_pairs.kinds entry (config.py) --
-    # comparable_kpi_long is a SHARED table tagged by comparison_type, split per kind here so each
-    # tab only sees its own rows. No-ops on an empty/None frame when disabled or no data.
+    # comparable_kpi_long holds every kind (comparison_type); each tab gets its own kind's rows.
     _full_comparable_kpi_long = getattr(ctx, "comparable_kpi_long", None)
 
     def _comparable_kpi_long_for(comparison_type: str) -> Optional[pd.DataFrame]:
@@ -1795,13 +1689,8 @@ def render_kpi_html(
     if "monthly" in period_types and getattr(ctx, "fiscal_cal", None) is not None and getattr(ctx, "fiscal_week", None) is not None:
         month_display_by_period = _build_month_display_labels(ctx)
 
-    # Roots: "overall" plus one per ctx.root_definitions (e.g. "nvrout", "comp" -- see
-    # fiscal._resolve_root_definitions), restricted to whatever actually has rows in this
-    # kpi_long (defensive; should normally be all of them). A single root (the common case for a
-    # client with no root-producing dimension_sources configured) renders exactly as before --
-    # no extra tab layer. More than one root gets its own outer tab, each containing its own
-    # complete Annual/YTD/Quarter/Half/Monthly/Weekly tab set, mirroring kpi-skill-toolkit's NVROUT/COMP
-    # major tabs (see kpi_pipeline/kpi_long.build_kpi_long for how these rows were produced).
+    # Roots with rows in kpi_long: one root renders without a root tab level; several get an outer tab each,
+    # holding a complete period tab set.
     root_display_labels: Dict[str, str] = settings["HTML_REPORT_ROOT_LABELS"]
     dimension_labels: Dict[str, str] = settings["HTML_REPORT_DIMENSION_LABELS"]
     present_roots = set(kpi_long["root"].unique()) if "root" in kpi_long.columns else {"overall"}
@@ -1809,11 +1698,8 @@ def render_kpi_html(
     if not roots:
         roots = ["overall"]
 
-    # Raw table markup, no top-panel wrapper of its own -- each call site below wraps it exactly
-    # once with whatever class its own CSS actually makes visible (see the multi-root bug this
-    # replaced: wrapping it here AND at the multi-root call site nested two .top-panel elements,
-    # and only the outer one's class had a display:block override, so the inner one's
-    # display:none from the base .top-panel rule was never lifted -- the tab looked empty).
+    # Unwrapped: each call site wraps it once in the panel class its CSS shows (a nested .top-panel stays
+    # hidden).
     metric_details_html = _metric_details_html(metric_cols, labels, defs)
 
     if len(roots) == 1:

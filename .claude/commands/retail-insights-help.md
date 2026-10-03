@@ -262,7 +262,7 @@ Inventory for the score filter is the **last available daily snapshot in the fis
 ```
 
 **Block solutions** (`blocked_scope.solution_id`, `blocked_scope.dc_solution_id`): the blocked-scope snapshot is filtered to these solutions, independently of the solutions `scope_source` reads. Adding e.g. allocation (51) to `scope_source.solution_id` widens the scope but does not pull in its blocks unless 51 is also listed here. DC blocks need `scope_source.dc_solution_id` (the DC pairs they match). tbretail: 21 and 22.
-Reads `{ui_parameters_path}/blocked_scope/{product,product_destination,destination}` (parquet; `destination_id` = store) for `scope_source.solution_id`; requires `scope_source.mode="operation_scope"`. Rule `after_scope_start`: a block applies to a pair only if `block.start_date >= scope_start` (same day applies; an earlier block is ignored — the pair was set up again after it); `all` applies every matched block. An applied block covers the pair's days from `start_date` to `end_date` (null = open-ended), clipped to the report window (`ctx.blocked_days`, `scope.build_blocked_days`). Block `product_id`s are NOT rolled to the family main: only blocks on the main's own `product_id` apply, as in the client reference script (`scope._applied_block_days`, shared with the DC blocks — see §6.1b). A missing `blocked_scope/<kind>` folder fails the run. Pairs added by `scope_adjustments` are never blocked. Always set `ui_parameters_path` explicitly (the newest snapshot may hold no blocks for the solution).
+Reads `{ui_parameters_path}/blocked_scope/{product,product_destination,destination}` (parquet; `destination_id` = store) for `scope_source.solution_id`; requires `scope_source.mode="operation_scope"`. Rule `after_scope_start`: a block applies to a pair only if `block.start_date >= scope_start` (same day applies; an earlier block is ignored — the pair was set up again after it); `all` applies every matched block. An applied block covers the pair's days from `start_date` to `end_date` (null = open-ended), clipped to the report window (`ctx.blocked_days`, `scope.build_blocked_days`). Block `product_id`s are NOT rolled to the family main: only blocks on the main's own `product_id` apply, as in the client reference script (`scope._applied_block_intervals`, shared with the DC blocks — see §6.1b). A missing `blocked_scope/<kind>` folder fails the run. Pairs added by `scope_adjustments` are never blocked. Always set `ui_parameters_path` explicitly (the newest snapshot may hold no blocks for the solution).
 `dc_solution_id` (None = no DC blocks) does the same for `{ui_parameters_path}/dc_blocked_scope/<kind>` of that solution (`destination_id` = warehouse); each DC pair's `scope_start` comes from `operation/scope` of that solution (same `run_date`, family roll-up, earliest start and `active_only` as `scope_source`); DC pairs outside it get no blocks (`ctx.dc_blocked_days`, `scope.build_dc_blocked_days`). Requires `ui_parameters_path`.
 
 **`metrics` is the per-metric gate** (indexed directly; unknown name raises; `settings["BLOCKED_SCOPE"]["metrics"]` is the resolved list in `METRICS_ALL` order). Blocked days are FLAGGED, not removed: `build_scoped_daily` / `build_dc_daily` add `is_blocked` by one left join of the blocked days. A metric NAMED in `metrics` reads only unblocked rows; a metric not named reads blocked and unblocked rows alike. `"all"` (generic default) = exactly the old behaviour of turning blocked scope on. Per family:
@@ -807,7 +807,7 @@ For a genuinely new source table (not just a new column off an existing frame) t
 4. **`pipeline.py`**: add a `build_my_frame(ctx, scope_core, ...)` function that restricts the raw read to the SAME in-scope population as everything else for that scope/root (left-semi against `scope_core` or a projection of it — never an independently-scoped universe), joins `ctx.fiscal_cal`/`ctx.fiscal_week` for time-grain columns and `ctx.product_dims`/`ctx.products_attr` for slice dimensions. Call it from `build_pipeline_frames` and add the result to the returned dict under a new key.
 
    **If the source has no store dimension (like `inventory_warehouse`), don't collapse the semi-join key to `product_id` alone.** `scope_core` always carries `Year`/`Week` (`ctx.scope_keys` includes them for every grain), and under `product_store_week` grain, scope membership genuinely varies by week — a product can be in scope for some weeks and not others. Attach `Year`/`Week` to your new frame's rows (via the fiscal calendar join) **before** the scope semi-join, and restrict on `(product_id, Year, Week)`, not `product_id` alone — otherwise the new frame's data leaks into weeks the product was already out of scope. This exact bug existed in `build_dc_daily` (fixed 2026-09-16) — see §12.19.
-5. **`kpi_long.py`**: add the new key to `_period_frames`'s branches (quarter/half/monthly/ytd, and `_PERIOD_METRIC_FRAMES` for the complete-period and weekly-drop filters) and to `_VALUE_FILTERED_FRAMES` so root/cut/slice filtering reaches it too.
+5. **`kpi_long.py`**: add the new key to `_METRIC_FRAMES`: `_period_frames` (quarter/half/monthly/ytd keys, complete-period and weekly-drop filters) and root/cut/slice filtering (`_filter_frames_for_dimension`) all loop over it.
 6. **`metrics.py`**: `compute_kpis`/`build_kpi_table` pass frames as explicit positional args (not a generic passthrough) — add a new explicit parameter to `compute_kpis` and thread `frames["my_frame"]` through `build_kpi_table`'s call to it.
 
 ---
@@ -869,7 +869,7 @@ Do not confuse scope grain (product×store×week) with WOS computation grain (pr
 4. `wos_dc = avg_daily_dc_inventory / weekly_sales_units`; `wos_total = (avg_daily_total_inventory + avg_daily_dc_inventory) / weekly_sales_units` — same `F.when(weekly_sales_units > 0, ...).otherwise(None)` null guard as `wos_units`.
 5. Period rollup: `Σ(wos_dc × weekly_sales_units) ÷ Σ(weekly_sales_units)` and the same shape for `wos_total` — sales-weighted, never a direct period-level division.
 
-`dc_mean_stock`/`total_mean_stock` are NOT WOS ratios — they mirror `mean_stock`'s plain per-day-average shape instead (see `_mean_stock_frame`), just built from `dc_daily` (+ store daily inventory, for the total variant).
+`dc_mean_stock`/`total_mean_stock` are NOT WOS ratios — they mirror `mean_stock`'s plain per-day-average shape instead (see `_store_day_stock`), just built from `dc_daily` (+ store daily inventory, for the total variant).
 
 ### 6.1b DC In-Stock Rate (`dc_in_stock_rate`)
 
@@ -924,7 +924,7 @@ lost_sales_source (cached as lost_sales_weekly_base) — prints its source date 
      model matches the product's cluster
   └─ scoped to hybrid_scope_keys → lost_sales_weekly → inst_data, lost_base
 
-inventory_warehouse_raw (cached Delta) — prints its source date range on read
+inventory_warehouse (Delta, read once per run) — prints its source date range on read
   └─ item_family_raw (cached Delta, read UNCONDITIONALLY whenever inventory_warehouse is
      configured -- NOT gated by dc_instock.enabled) → _roll_to_item_family_parent maps
      product_id -> coalesce(parent_id, product_id), then re-aggregated to
@@ -1066,8 +1066,8 @@ and YTD = days 1..K; lost_base keeps weeks up to the last Saturday (§3.1b).
 | `cut_dimensions` | `active_slice_dimensions` minus root-defining columns — what `kpi_long`/comparisons/HTML actually iterate as cuts within every root (§3.4c) |
 | `root_definitions` | resolved roots (excluding the implicit `"overall"`): `[{"root": name, "dim_col": ..., "value": ...}, ...]`, from `fiscal._resolve_root_definitions`. In `html_only` mode, `dim_col`/`value` are `None` (re-inferred from a loaded `kpi_long`'s own `root` column — only the name is needed to render) |
 | `operation_scope_pairs` | operation-scope mode only: cached `(product_id, store_id, scope_start)` after the family roll-up (earliest start) / active filter |
-| `dc_blocked_days` | `scope_source.dc_solution_id` set only: cached `(product_id, warehouse_id, date)` blocked days, flagged `is_blocked` on `dc_daily` and removed from the DC metrics named in `blocked_scope.metrics` (DC in-stock grid included); `None` otherwise |
-| `blocked_days` | blocked_scope on only: cached `(product_id, store_id, date)` blocked days, flagged `is_blocked` on `scoped_daily` and removed from the metrics named in `blocked_scope.metrics` (daily in-stock included); `None` when off |
+| `dc_blocked_days` | `scope_source.dc_solution_id` set only: cached `(product_id, warehouse_id, first_day, last_day)` disjoint block intervals (range-joined on the day), flagged `is_blocked` on `dc_daily` and removed from the DC metrics named in `blocked_scope.metrics` (DC in-stock grid included); `None` otherwise |
+| `blocked_days` | blocked_scope on only: cached `(product_id, store_id, first_day, last_day)` disjoint block intervals (range-joined on the day), flagged `is_blocked` on `scoped_daily` and removed from the metrics named in `blocked_scope.metrics` (daily in-stock included); `None` when off |
 | `defined_scope_keys` | product×[store×]Year×Week keys from defined scope |
 | `hybrid_scope_keys` | final scope (defined + adjustments + score backfill) |
 | `score_only_scope_keys` | score-filter scope (set when `use_hybrid_scope=True` or `run_scope_diff=True`) |

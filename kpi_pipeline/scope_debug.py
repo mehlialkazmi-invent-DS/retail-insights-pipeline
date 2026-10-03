@@ -1,9 +1,4 @@
-"""Pre-flight scope debug: distinct product/store counts overall and per slice.
-
-Lightweight sanity check to run after build_scopes and before the expensive
-build_kpis. Reuses the kpi_long value filter so per-slice counts match what the
-KPI step reports for the same slice.
-"""
+"""Pre-flight scope check: distinct product / store counts, overall and per slice."""
 
 from __future__ import annotations
 
@@ -15,24 +10,9 @@ from kpi_pipeline.kpi_long import _apply_value_filter
 
 
 def scope_universe_counts(ctx: KPIContext) -> pd.DataFrame:
-    """Distinct product/store/pair counts for the final scope, overall and per slice.
-
-    Counts are taken from ``ctx.hybrid_scope_keys`` (the final scope after hybrid
-    backfill and manual adjustments). Per-slice rows join the distinct scope pairs
-    to ``ctx.product_dims`` and apply the same ``SLICE_VALUE_FILTERS`` the KPI step
-    applies, so the debug counts match what ``build_kpi_long`` reports for that slice.
-
-    NULL slice values are shown as the string ``"NULL"`` for readability; the same
-    rows carry an empty/None ``dimension_value`` in ``kpi_long``.
-
-    :param ctx: pipeline context with ``hybrid_scope_keys`` (from build_scopes) and
-        ``product_dims`` (from build_dimensions) populated.
-    :return: one ``overall`` row plus one row per (active slice dimension, value),
-        sorted with ``overall`` first then by dimension and value. Columns:
-        ``dimension``, ``dimension_value``, ``distinct_product_count`` and — only when
-        the scope has store grain — ``distinct_store_count``, ``distinct_pair_count``.
-    :rtype: pandas.DataFrame
-    :raises RuntimeError: if scope or product dimensions have not been built yet.
+    """Distinct product, store and pair counts of ctx.hybrid_scope_keys: one "overall" row, then one row per
+    (active slice dimension, value) with SLICE_VALUE_FILTERS applied as in kpi_long. NULL values show as
+    "NULL". Store and pair counts only with a store grain. Raises before build_scopes / build_dimensions.
     """
     if ctx.hybrid_scope_keys is None:
         raise RuntimeError(

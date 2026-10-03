@@ -1,28 +1,43 @@
-# Generic reference config for the retail-insights-pipeline: a template for a NEW customer, not any
-# customer's deployed values. Copy it, replace the placeholders; README.md documents every key.
-# Usage (Databricks, next to main.ipynb): %run ./config
-#                                          settings = materialize(fund.paste)
+# Retail-insights-pipeline config: the generic TEMPLATE for a new customer, not any customer's deployed values.
+# Copy it and replace the placeholders. README.md documents every key in depth.
+#
+# How to use (Databricks, next to main.ipynb):
+#     %run ./config
+#     settings = materialize(fund.paste)
+#
+# Layout: reference lists -> CONFIG (the only part you edit) -> helpers -> materialize(). materialize() checks
+# CONFIG, applies any KPI_* environment overrides (README: Environment variable overrides) and returns the flat
+# settings dict the pipeline reads. Every section and key stays in the file; unused ones are switched off.
 #
 # First edits: customer, path_segments (defined_scope, daily_data, products, lost_sales at minimum),
-# defined_scope column names, reporting_window.as_of_date.
-# Every section and key stays in the file, switched off when unused. Off in this template:
-# scope_adjustments, dimension_sources, lost_sales_ensemble, comparable_pairs, dc_instock,
-# blocked_scope, goods_in_transit, and instock.method "daily" / "weekly_source".
-# To keep a store out of every metric, filter it in input_filters.daily_data and, for the daily in-stock, in
-# instock.daily.input_filters (README: input_filters).
+# defined_scope column names, reporting_window.as_of_date. Before each run: reporting_window.as_of_date.
+#
+# What this config turns on:
+#   Scope       the defined_scope table at product_store grain; scope_adjustments OFF
+#   Window      report_end "as_of": YTD from the week of Jan 1 to the last complete Sun-Sat week; Half tab OFF
+#   In-stock    instock.method "lost_sales_source" (read from the lost-sales table)
+#   Lost sales  noob lost-sales table through lost_sales_source; lost_sales_ensemble OFF
+#   Blocked     blocked_scope OFF
+#   GIT         goods_in_transit OFF
+#   Comparable  YoY and YTD comparisons; like-for-like comparable_pairs OFF
+#   Dimensions  brand plus one example derived slice; dimension_sources OFF
+#   Report      KPI Report with every metric of METRICS_ALL; dc_in_stock_rate needs dc_instock (OFF)
 
 import copy
 import datetime
 import os
 from typing import Any, Callable, Dict, List, Optional
 
-# Period-over-period comparison kinds, in canonical order.
+# =============================================================================
+# REFERENCE LISTS -- the allowed values some CONFIG keys pick from
+# =============================================================================
+# Period-over-period comparison kinds, in canonical order: comparisons.enabled.
 COMPARISON_KINDS_ALL = ("yoy", "ytd")
 
-# Comparable-pairs (like-for-like) kinds, in canonical order (README: Comparable pairs).
+# Like-for-like kinds, in canonical order: comparable_pairs.kinds (README: Comparable pairs).
 COMPARABLE_KINDS_ALL = ("ytd", "yoy", "quarter", "half")
 
-# Every metric the pipeline reports, in canonical order. metrics.metric_cols, scope_diff_metrics and
+# Every metric the pipeline reports, in canonical order: metrics.metric_cols, metrics.scope_diff_metrics and
 # blocked_scope.metrics pick from this list.
 METRICS_ALL = (
     "total_sales_quantity", "total_sales_revenue", "AUR", "AUC", "total_inventory",
@@ -43,22 +58,19 @@ INSTOCK_METHODS = ("daily", "weekly_source", "lost_sales_source")
 
 CONFIG: Dict[str, Any] = {
     # =============================================================================
-    # IDENTITY & RUN WINDOW
+    # 1. RUN & DATES -- whose data, which days, which calendar
     # =============================================================================
     "customer": "your_customer",  # datastore bucket: /mnt/invent-{customer}-datastore
     "run": {
         "mode": "full",  # "full" computes from the source tables; "html_only" renders saved outputs
     },
     "reporting_window": {  # README: Reporting window
-        "as_of_date": "2026-09-01",  # update before each run
+        "as_of_date": "2026-09-01",  # last day of data to report; update before each run
         "run_min_date": None,  # None = YTD from Jan 1; "2024-01-01" for multi-year
         "report_end": "as_of",  # "as_of" | "complete_month" | "latest_day" ("latest_day" needs instock.method "daily")
     },
-    # =============================================================================
-    # CALENDAR
-    # =============================================================================
-    "fiscal_calendar": {
-        "use_fiscal_calendar": True,
+    "fiscal_calendar": {  # README: Fiscal calendar vs native time grain
+        "use_fiscal_calendar": True,  # True = periods from the fiscal_cal upload; False = from daily-data dates
         "half_periods": False,  # True adds the Half tab and the "half" comparable kind
         "column_map": {  # fiscal_cal upload columns; set month_name_col when the fiscal year is offset
             "quarter_col": "Quarter",
@@ -71,17 +83,58 @@ CONFIG: Dict[str, Any] = {
         },
     },
     # =============================================================================
-    # SCOPE & POPULATION
+    # 2. SOURCE TABLES -- where each input lives and how it is read
     # =============================================================================
-    "score_scope": {  # used by use_hybrid_scope and run_scope_diff (README: Scope modes)
-        "min_percentile": 0.2,
-        "min_weeks_for_filter": 2,
+    "path_segments": {  # folders under the datastore bucket
+        "fiscal": ["one_time_uploads", "fiscal_cal"],  # fiscal calendar upload
+        "daily_data": ["noob", "daily-data"],  # store x product daily sales and inventory
+        "inventory_warehouse": ["operation", "inventory_warehouse"],  # DC daily inventory
+        "item_family": ["operation", "item_family"],  # parent / child product map
+        "scope": ["operation", "scope"],  # platform scope table (scope_source.mode "operation_scope")
+        "goods_in_transit": ["operation", "goods_in_transit"],  # destination_type 0 = store, 1 = warehouse
+        "products": ["master-data", "products"],  # product attributes: slice dimensions, active flag
+        "lost_sales": ["noob", "lost-sales"],  # add a model_id=... segment if partitioned by model
+        "defined_scope": ["analysis", "instock_rate", "instock_rate_scope"],  # scope_source.mode "defined_scope"
+        "product_planning_level": ["operation", "product_planning_level"],  # product_agg_level -> product_id map
     },
-    "scope": {
-        "use_hybrid_scope": False,  # True also backfills the weeks the defined scope leaves uncovered
-        "run_scope_diff": False,
+    # Spark SQL expressions applied when reading each source (README: input_filters). To keep a store out of
+    # every metric, filter it in daily_data here and, for the daily in-stock, in instock.daily.input_filters.
+    "input_filters": {
+        "defined_scope": [],
+        "lost_sales": [],  # also applied to lost_sales_ensemble.slow_path_segments
+        "daily_data": ["usable = 1"],
+        "inventory_warehouse": [],
+        "item_family": [],
     },
-    "defined_scope": {  # README: defined_scope
+    "item_family_source": {  # column names of path_segments.item_family (README: item_family)
+        "product_col": "product_id",
+        "parent_col": "parent_id",
+        "is_main_col": "is_main",
+    },
+    "item_family_rollup": {  # roll child / superseded products onto their family main, per source
+        "daily_data": True,
+        "lost_sales": False,  # opt-in safety net
+        "inventory_warehouse": True,
+        "defined_scope": False,  # opt-in safety net
+    },
+    # =============================================================================
+    # 3. SCOPE -- which product x store pairs count, and on which days
+    # =============================================================================
+    "scope_source": {  # which table defines the scope universe (README: scope_source)
+        "mode": "defined_scope",  # "defined_scope" | "operation_scope"
+        "solution_id": 21,  # store scope solution(s), int or list (blocks: blocked_scope.solution_id)
+        "dc_solution_id": None,  # DC (network) scope: DC metrics' warehouse pairs, among the store scope's products; DC blocks
+        "run_date": None,  # "YYYY-MM-DD" Sunday; None = latest Sunday on or before today
+        "roll_to_family_main": True,  # roll each scope row onto its family main
+        "active_only": True,  # drop pairs of inactive products
+        # In-stock only at stores where the main item itself is eligible (sub-only stores stay in every
+        # other metric). Needs roll_to_family_main and instock.method "daily".
+        "instock_main_eligible_only": False,
+        # In-stock leaves out sizes not in a supersession whose class color is (likely NGF); they stay
+        # in every other metric. Needs instock.method "daily".
+        "instock_exclude_unsuperseded_sizes": False,
+    },
+    "defined_scope": {  # column mapping of path_segments.defined_scope (README: defined_scope)
         "grain": "product_store",  # "product" | "product_store" | "product_store_week"
         "product_col": "product_id",
         "store_col": "store_id",  # required for the store grains
@@ -90,14 +143,22 @@ CONFIG: Dict[str, Any] = {
         "week_col": None,
         "backfill_leading_gap": True,  # product_store_week only
     },
+    "scope": {  # README: Scope modes
+        "use_hybrid_scope": False,  # True also backfills the weeks the defined scope leaves uncovered
+        "run_scope_diff": False,  # True adds the defined-vs-score scope comparison
+    },
+    "score_scope": {  # activity-based scope, used only by use_hybrid_scope and run_scope_diff
+        "min_percentile": 0.2,  # a pair-week counts when sales and inventory reach this percentile (20 = 0.2)
+        "min_weeks_for_filter": 2,  # pairs with this many weeks or fewer skip the filter
+    },
     "scope_adjustments": {  # manual product additions / removals (README: Manual scope adjustments)
         "additions": [
             {
                 "enabled": False,  # flip on once path points at a real table / CSV
-                "label": "example_addition",
-                "source": "csv",
+                "label": "example_addition",  # name shown in logs
+                "source": "csv",  # "csv" | "delta"
                 "path": "/Workspace/Shared/your_project/data/addition_product_ids.csv",
-                "location": "workspace",
+                "location": "workspace",  # "workspace" file or "datastore" (under the bucket)
                 "csv_options": {"header": True, "inferSchema": True},
                 "join_keys": ["product_id"],
                 "product_col": "product_id",
@@ -124,49 +185,24 @@ CONFIG: Dict[str, Any] = {
             },
         ],
     },
+    # UI blocked days, dropped from the metrics named here (README: blocked_scope).
+    # Needs scope_source.mode "operation_scope".
+    "blocked_scope": {
+        "ui_parameters_path": None,  # path under the datastore root; None = blocked scope off
+        "rule": "after_scope_start",  # or "all"
+        "solution_id": 21,  # store blocks of these solution(s) only (int or list), whatever scope_source reads
+        "dc_solution_id": None,  # DC blocks of these solution(s); None = no DC blocks (also needs scope_source.dc_solution_id)
+        "kinds": ["product", "product_destination", "destination"],  # store block folders read
+        "dc_kinds": ["product", "product_destination"],  # DC block folders read (no destination folder)
+        "metrics": "all",  # metrics that drop blocked days: "all" or a list from METRICS_ALL
+    },
     # =============================================================================
-    # DATA SOURCES
+    # 4. IN-STOCK & INVENTORY
     # =============================================================================
-    "path_segments": {
-        "fiscal": ["one_time_uploads", "fiscal_cal"],
-        "daily_data": ["noob", "daily-data"],
-        "inventory_warehouse": ["operation", "inventory_warehouse"],  # DC daily inventory
-        "item_family": ["operation", "item_family"],  # parent / child product map
-        "scope": ["operation", "scope"],  # platform scope table (scope_source.mode "operation_scope")
-        "goods_in_transit": ["operation", "goods_in_transit"],  # destination_type 0 = store, 1 = warehouse
-        "products": ["master-data", "products"],
-        "lost_sales": ["noob", "lost-sales"],  # add a model_id=... segment if partitioned by model
-        "defined_scope": ["analysis", "instock_rate", "instock_rate_scope"],
-        "product_planning_level": ["operation", "product_planning_level"],  # product_agg_level -> product_id map
-    },
-    "input_filters": {  # Spark SQL expressions applied when reading each source (README: input_filters)
-        "defined_scope": [],
-        "lost_sales": [],  # also applied to lost_sales_ensemble.slow_path_segments
-        "daily_data": ["usable = 1"],
-        "inventory_warehouse": [],
-        "item_family": [],
-    },
-    # ---------------------------------------------------------------------------
-    # LOST SALES SOURCE -- column mapping of the lost-sales table (README: lost_sales_source)
-    # ---------------------------------------------------------------------------
-    # Configure exactly one of product_col / product_agg_level_col.
-    "lost_sales_source": {
-        "week_col": "week_start_date",
-        "product_col": "product_id",
-        "store_col": "store_id",
-        "lost_sales_col": "lost_sales",
-        "in_stock_col": "in_stock",  # read only when instock.method is "lost_sales_source"
-        "total_days_col": "details.total_days",  # a dotted nested-struct path works
-        "product_agg_level_col": None,
-        "sales_filter": [],  # Spark SQL narrowing the daily-data sales in lost_sales_pct's denominator
-    },
-    # ---------------------------------------------------------------------------
-    # IN-STOCK -- where in_stock_rate comes from (README: instock)
-    # ---------------------------------------------------------------------------
-    #   method "daily"             built from daily-data over the scope pairs (store-level scope grain)
-    #   method "weekly_source"     read from a separate weekly table (weekly_source below)
-    #   method "lost_sales_source" read from lost_sales_source's in_stock_col / total_days_col
-    # Both sub-sections stay in the file; only the one the method names is used.
+    # Where in_stock_rate comes from (README: instock). Both sub-sections stay; only the method's one is used.
+    #   "daily"              built from daily-data over the scope pairs (store-level scope grain)
+    #   "weekly_source"      read from a separate weekly table (weekly_source below)
+    #   "lost_sales_source"  read from lost_sales_source's in_stock_col / total_days_col
     "instock": {
         "method": "lost_sales_source",
         "daily": {
@@ -187,86 +223,48 @@ CONFIG: Dict[str, Any] = {
             "fallback_sources": [],  # extra column-sets of the same table filling weeks the main set lacks
         },
     },
-    # ---------------------------------------------------------------------------
-    # ITEM FAMILY -- parent / child product roll-up (README: item_family)
-    # ---------------------------------------------------------------------------
-    "item_family_source": {  # column names of path_segments.item_family
-        "product_col": "product_id",
-        "parent_col": "parent_id",
-        "is_main_col": "is_main",
-    },
-    "item_family_rollup": {  # roll child / superseded products onto their family main, per source
-        "daily_data": True,
-        "lost_sales": False,  # opt-in safety net
-        "inventory_warehouse": True,
-        "defined_scope": False,  # opt-in safety net
-    },
-    # ---------------------------------------------------------------------------
-    # DC IN-STOCK -- dc_in_stock_rate from an expanded inventory_warehouse grid (README: dc_instock)
-    # ---------------------------------------------------------------------------
-    # DC metrics (dc_mean_stock, WOS_DC, WOS_TOTAL's DC part, dc_in_stock_rate) read
-    # path_segments.inventory_warehouse for the store scope's products: the store scope leads.
-    # With scope_source.dc_solution_id set, only the DC scope's product x warehouse pairs among them count;
-    # with None, every warehouse. The DC scope also gives the DC blocked days their start dates.
+    # dc_in_stock_rate from an expanded inventory_warehouse grid (README: dc_instock). DC metrics read
+    # path_segments.inventory_warehouse for the store scope's products; with scope_source.dc_solution_id set,
+    # only the DC scope's product x warehouse pairs among them count (None = every warehouse).
     "dc_instock": {
         "enabled": False,
         "stock_threshold": 0,  # a day is stocked when inventory > stock_threshold
     },
-    # ---------------------------------------------------------------------------
-    # SCOPE SOURCE -- which table defines the scope universe (README: scope_source)
-    # ---------------------------------------------------------------------------
-    "scope_source": {
-        "mode": "defined_scope",  # "defined_scope" | "operation_scope"
-        "solution_id": 21,  # store scope solution(s), int or list (blocks: blocked_scope.solution_id)
-        "dc_solution_id": None,  # DC (network) scope: DC metrics' warehouse pairs, among the store scope's products; DC blocks
-        "run_date": None,  # "YYYY-MM-DD" Sunday; None = latest Sunday on or before today
-        "roll_to_family_main": True,
-        "active_only": True,
-        # In-stock only at stores where the main item itself is eligible (sub-only stores stay in every
-        # other metric). Needs roll_to_family_main and instock.method "daily".
-        "instock_main_eligible_only": False,
-        # In-stock leaves out sizes not in a supersession whose class color is (likely NGF); they stay
-        # in every other metric. Needs instock.method "daily".
-        "instock_exclude_unsuperseded_sizes": False,
-    },
-    # ---------------------------------------------------------------------------
-    # BLOCKED SCOPE -- UI blocked days (README: blocked_scope). Needs scope_source "operation_scope".
-    # ---------------------------------------------------------------------------
-    "blocked_scope": {
-        "ui_parameters_path": None,  # path under the datastore root; None = blocked scope off
-        "rule": "after_scope_start",  # or "all"
-        "solution_id": 21,  # store blocks of these solution(s) only (int or list), whatever scope_source reads
-        "dc_solution_id": None,  # DC blocks of these solution(s); None = no DC blocks (also needs scope_source.dc_solution_id)
-        "kinds": ["product", "product_destination", "destination"],  # store block folders read
-        "dc_kinds": ["product", "product_destination"],  # DC block folders read (no destination folder)
-        "metrics": "all",  # metrics that drop blocked days: "all" or a list from METRICS_ALL
-    },
-    # ---------------------------------------------------------------------------
-    # GOODS IN TRANSIT (GIT) -- (README: goods_in_transit)
-    # ---------------------------------------------------------------------------
-    "goods_in_transit": {
+    "goods_in_transit": {  # add goods in transit (GIT) to on-hand (README: goods_in_transit)
         "date_shift_days": None,  # None = GIT off everywhere; -1 = snapshot dated D+1 is the end of day D
-        "roll_to_family_main": True,
+        "roll_to_family_main": True,  # roll every GIT read onto the family main
         "store_instock": False,  # a daily in-stock day also counts store GIT (needs instock.method "daily")
         "dc_instock": False,  # a DC in-stock day also counts DC GIT
         "inventory_metrics": [],  # INVENTORY_GIT_METRICS_ALL names that add GIT to on-hand
     },
-    # ---------------------------------------------------------------------------
-    # LOST SALES ENSEMBLE -- blend a fast and a slow lost-sales model (README: lost_sales_ensemble)
-    # ---------------------------------------------------------------------------
-    "lost_sales_ensemble": {
+    # =============================================================================
+    # 5. LOST SALES
+    # =============================================================================
+    # Column mapping of path_segments.lost_sales (README: lost_sales_source).
+    # Configure exactly one of product_col / product_agg_level_col.
+    "lost_sales_source": {
+        "week_col": "week_start_date",
+        "product_col": "product_id",
+        "store_col": "store_id",
+        "lost_sales_col": "lost_sales",
+        "in_stock_col": "in_stock",  # read only when instock.method is "lost_sales_source"
+        "total_days_col": "details.total_days",  # a dotted nested-struct path works
+        "product_agg_level_col": None,
+        "sales_filter": [],  # Spark SQL narrowing the daily-data sales in lost_sales_pct's denominator
+    },
+    "lost_sales_ensemble": {  # blend a fast and a slow lost-sales model (README: lost_sales_ensemble)
         "enabled": False,
         "slow_path_segments": ["noob", "lost-sales"],  # e.g. a longer-lookback model variant
         "speed_cluster_path_segments": ["noob", "product-cluster-attributes-snapshot"],
         "speed_cluster_format": "long",  # "long" = one row per product x attribute; "wide" = own column
-        "speed_cluster_attribute_name": "sales_speed",
+        "speed_cluster_attribute_name": "sales_speed",  # "long" format only
         "speed_cluster_value_col": "product_speed_cluster",  # "wide" format only
         "fast_mover_clusters": [1, 2, 3],  # these clusters take the fast model, everyone else the slow one
     },
     # =============================================================================
-    # CUTS & DIMENSIONS
+    # 6. BREAKDOWNS -- slice dimensions and root tabs
     # =============================================================================
-    "slices": {  # breakdown dimensions from the products table
+    "slices": {  # breakdown dimensions from the products table (README: Roots and cuts)
         "dimensions": ["brand"],
         "derived_dimensions": {"example_derived": "CASE WHEN brand = 'A' THEN 'Group A' ELSE 'Other' END"},
         "value_filters": {},  # per-dimension include / exclude of values (README: Value filters)
@@ -278,67 +276,30 @@ CONFIG: Dict[str, Any] = {
             "source": "delta",
             "path_segments": ["operation", "some_attribute_table"],
             "join_key": "product_id",
-            "columns": [],
+            "columns": [],  # source columns taken as they are
             "derived": {"IS_EXAMPLE_FLAG": "CASE WHEN some_column = 'X' THEN 'yes' ELSE 'no' END"},
             "fillna": {"IS_EXAMPLE_FLAG": "no"},  # products absent from the source get NULL, not the ELSE branch
             "root_values": {"IS_EXAMPLE_FLAG": {"yes": "example_root"}},  # root "example_root" = flag "yes"
         },
     ],
     # =============================================================================
-    # COMPARISONS
-    # =============================================================================
-    "comparisons": {
-        "enabled": ["yoy", "ytd"],  # any of COMPARISON_KINDS_ALL
-    },
-    "comparable_pairs": {  # like-for-like; needs run_min_date spanning 2+ years (README: Comparable pairs)
-        "enabled": False,
-        "kinds": ["ytd"],  # any of COMPARABLE_KINDS_ALL
-        "grain": "product_store",  # or "product"
-        "pair_days": "unblocked",  # pairs present on "unblocked" days in every year, or on "all" (incl. blocked)
-    },
-    # =============================================================================
-    # METRICS
+    # 7. METRICS
     # =============================================================================
     "metrics": {
-        "metric_cols": [
-            "total_sales_quantity",
-            "total_sales_revenue",
-            "AUR",
-            "AUC",
-            "total_inventory",
-            "distinct_product_count",
-            "distinct_store_count",
-            "distinct_pair_count",
-            "mean_stock",
-            "mean_stock_retail",
-            "mean_stock_cost",
-            "dc_mean_stock",
-            "total_mean_stock",
-            "WOS",
-            "wos_revenue",
-            "wos_cost",
-            "WOS_DC",
-            "WOS_TOTAL",
-            "inventory_turnover_rate",
-            "in_stock_rate",
-            "weighted_instock_rate",
-            "dc_in_stock_rate",
-            "lost_sales_pct",
+        "metric_cols": [  # metrics reported, from METRICS_ALL
+            "total_sales_quantity", "total_sales_revenue", "AUR", "AUC", "total_inventory",
+            "distinct_product_count", "distinct_store_count", "distinct_pair_count",
+            "mean_stock", "mean_stock_retail", "mean_stock_cost", "dc_mean_stock", "total_mean_stock",
+            "WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL", "inventory_turnover_rate",
+            "in_stock_rate", "weighted_instock_rate", "dc_in_stock_rate", "lost_sales_pct",
         ],
-        "scope_diff_metrics": [
-            "total_sales_quantity",
-            "total_sales_revenue",
-            "total_inventory",
-            "distinct_product_count",
-            "distinct_pair_count",
-            "WOS",
-            "WOS_DC",
-            "WOS_TOTAL",
-            "in_stock_rate",
-            "dc_in_stock_rate",
-            "lost_sales_pct",
+        "scope_diff_metrics": [  # metrics in the scope diff (scope.run_scope_diff), from metric_cols
+            "total_sales_quantity", "total_sales_revenue", "total_inventory",
+            "distinct_product_count", "distinct_pair_count",
+            "WOS", "WOS_DC", "WOS_TOTAL",
+            "in_stock_rate", "dc_in_stock_rate", "lost_sales_pct",
         ],
-        "labels": {
+        "labels": {  # display name per metric
             "total_sales_revenue": "Sales Revenue",
             "total_sales_quantity": "Sales Units",
             "AUR": "AUR",
@@ -363,26 +324,39 @@ CONFIG: Dict[str, Any] = {
             "distinct_store_count": "Distinct stores",
             "distinct_pair_count": "Distinct pairs",
         },
+        # Rate metrics whose change is shown in percentage points, not percent.
         "pp_change_metrics": ["in_stock_rate", "weighted_instock_rate", "dc_in_stock_rate", "lost_sales_pct"],
         "population_filters": {},  # {metric: {dim_col: value filter}} narrows one metric (README: Population filters)
     },
     # =============================================================================
-    # OUTPUT & REPORTING
+    # 8. COMPARISONS
     # =============================================================================
-    "output": {
-        "save_outputs": True,
-        "path_segments": ["analysis", "kpi_reports", "outputs"],
-        "run_date": None,
-        "save_mode": "initial",  # "initial" | "incremental" | "full_refresh"
-        "allow_overwrite_existing": True,
-        "recompute_comparisons_from_history": True,
+    "comparisons": {  # README: Selecting which comparisons to run
+        "enabled": ["yoy", "ytd"],  # any of COMPARISON_KINDS_ALL
     },
-    "html_report": {
+    "comparable_pairs": {  # like-for-like; needs run_min_date spanning 2+ years (README: Comparable pairs)
+        "enabled": False,
+        "kinds": ["ytd"],  # any of COMPARABLE_KINDS_ALL
+        "grain": "product_store",  # or "product"
+        "pair_days": "unblocked",  # pairs present on "unblocked" days in every year, or on "all" (incl. blocked)
+    },
+    # =============================================================================
+    # 9. OUTPUT & HTML REPORT
+    # =============================================================================
+    "output": {  # Delta saves (README: Output saves)
+        "save_outputs": True,
+        "path_segments": ["analysis", "kpi_reports", "outputs"],  # output folder under the bucket
+        "run_date": None,  # run_date partition written; None = as_of_date
+        "save_mode": "initial",  # "initial" | "incremental" | "full_refresh"
+        "allow_overwrite_existing": True,  # incremental: replace periods already saved
+        "recompute_comparisons_from_history": True,  # incremental: rebuild comparisons from the merged history
+    },
+    "html_report": {  # README: HTML report
         "enabled": True,
-        "filename": "kpi_report_{customer}_{report_end}.html",
+        "filename": "kpi_report_{customer}_{report_end}.html",  # placeholders {customer} and {report_end} only
         "report_title": "KPI Report",
-        "output_path_segments": None,
-        "metric_definitions": {},
+        "output_path_segments": None,  # None = local only; else a datastore folder to save to as well
+        "metric_definitions": {},  # overrides of the Metric Details tab text
         "weekly_display_weeks": 5,  # periods shown per tab; None = all
         "monthly_display_months": 5,
         "quarterly_display_quarters": 5,
@@ -394,6 +368,107 @@ CONFIG: Dict[str, Any] = {
 }
 
 
+# =============================================================================
+# HELPERS -- parsing and validation used by materialize()
+# =============================================================================
+def _parse_bool(raw: str) -> bool:
+    return raw.strip().lower() in ("1", "true", "yes")
+
+
+def _as_fraction(value):
+    """A percentile written as a percentage (20) becomes a fraction (0.2)."""
+    return value / 100.0 if value > 1 else value
+
+
+def _strip_lower(raw: str) -> str:
+    return raw.strip().lower()
+
+
+def _strip_or_none(raw: str) -> Optional[str]:
+    return raw.strip() or None
+
+
+def _comma_list(raw: str) -> List[str]:
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+def _optional_int(raw: str) -> Optional[int]:
+    raw = raw.strip()
+    return int(raw) if raw else None
+
+
+# Optional KPI_* environment overrides (README: Environment variable overrides):
+# (variable, CONFIG key path, how the text is parsed).
+_ENV_OVERRIDES = (
+    ("KPI_CUSTOMER", ("customer",), str),
+    ("KPI_RUN_MODE", ("run", "mode"), _strip_lower),
+    ("KPI_AS_OF_DATE", ("reporting_window", "as_of_date"), str),
+    ("KPI_RUN_MIN_DATE", ("reporting_window", "run_min_date"), _strip_or_none),
+    ("KPI_REPORT_END", ("reporting_window", "report_end"), _strip_lower),
+    ("KPI_USE_FISCAL_CALENDAR", ("fiscal_calendar", "use_fiscal_calendar"), _parse_bool),
+    ("KPI_HALF_PERIODS", ("fiscal_calendar", "half_periods"), _parse_bool),
+    ("KPI_SCOPE_MIN_PERCENTILE", ("score_scope", "min_percentile"), lambda raw: _as_fraction(float(raw))),
+    ("KPI_SCOPE_MIN_WEEKS_FOR_FILTER", ("score_scope", "min_weeks_for_filter"), int),
+    ("KPI_USE_HYBRID_SCOPE", ("scope", "use_hybrid_scope"), _parse_bool),
+    ("KPI_RUN_SCOPE_DIFF", ("scope", "run_scope_diff"), _parse_bool),
+    ("KPI_COMPARABLE_PAIRS", ("comparable_pairs", "enabled"), _parse_bool),
+    ("KPI_COMPARISONS", ("comparisons", "enabled"), lambda raw: [c.lower() for c in _comma_list(raw)]),
+    ("KPI_LOST_SALES_ENSEMBLE", ("lost_sales_ensemble", "enabled"), _parse_bool),
+    ("KPI_LOST_SALES_SLOW_PATH", ("lost_sales_ensemble", "slow_path_segments"), _comma_list),
+    ("KPI_SPEED_CLUSTER_PATH", ("lost_sales_ensemble", "speed_cluster_path_segments"), _comma_list),
+    ("KPI_SPEED_CLUSTER_FORMAT", ("lost_sales_ensemble", "speed_cluster_format"), _strip_lower),
+    ("KPI_SPEED_CLUSTER_ATTRIBUTE", ("lost_sales_ensemble", "speed_cluster_attribute_name"), str.strip),
+    ("KPI_SPEED_CLUSTER_VALUE_COL", ("lost_sales_ensemble", "speed_cluster_value_col"), str.strip),
+    ("KPI_FAST_MOVER_CLUSTERS", ("lost_sales_ensemble", "fast_mover_clusters"),
+     lambda raw: [int(c) for c in _comma_list(raw)]),
+    ("KPI_LOST_SALES_WEEK_COL", ("lost_sales_source", "week_col"), str.strip),
+    ("KPI_LOST_SALES_PRODUCT_COL", ("lost_sales_source", "product_col"), str.strip),
+    ("KPI_LOST_SALES_STORE_COL", ("lost_sales_source", "store_col"), str.strip),
+    ("KPI_LOST_SALES_COL", ("lost_sales_source", "lost_sales_col"), str.strip),
+    ("KPI_LOST_SALES_IN_STOCK_COL", ("lost_sales_source", "in_stock_col"), str.strip),
+    ("KPI_LOST_SALES_TOTAL_DAYS_COL", ("lost_sales_source", "total_days_col"), str.strip),
+    ("KPI_INSTOCK_METHOD", ("instock", "method"), _strip_lower),
+    ("KPI_INSTOCK_SOURCE_PATH", ("instock", "weekly_source", "path_segments"), _comma_list),
+    ("KPI_INSTOCK_WEEK_COL", ("instock", "weekly_source", "week_col"), str.strip),
+    ("KPI_INSTOCK_PRODUCT_COL", ("instock", "weekly_source", "product_col"), str.strip),
+    ("KPI_INSTOCK_STORE_COL", ("instock", "weekly_source", "store_col"), str.strip),
+    ("KPI_INSTOCK_IN_STOCK_COL", ("instock", "weekly_source", "in_stock_col"), str.strip),
+    ("KPI_INSTOCK_TOTAL_DAYS_COL", ("instock", "weekly_source", "total_days_col"), str.strip),
+    ("KPI_ITEM_FAMILY_ROLLUP_DAILY_DATA", ("item_family_rollup", "daily_data"), _parse_bool),
+    ("KPI_ITEM_FAMILY_ROLLUP_LOST_SALES", ("item_family_rollup", "lost_sales"), _parse_bool),
+    ("KPI_ITEM_FAMILY_ROLLUP_INVENTORY_WAREHOUSE", ("item_family_rollup", "inventory_warehouse"), _parse_bool),
+    ("KPI_ITEM_FAMILY_ROLLUP_DEFINED_SCOPE", ("item_family_rollup", "defined_scope"), _parse_bool),
+    ("KPI_SAVE_OUTPUTS", ("output", "save_outputs"), _parse_bool),
+    ("KPI_OUTPUT_PATH", ("output", "path_segments"), _comma_list),
+    ("KPI_OUTPUT_RUN_DATE", ("output", "run_date"), _strip_or_none),
+    ("KPI_OUTPUT_SAVE_MODE", ("output", "save_mode"), _strip_lower),
+    ("KPI_ALLOW_OVERWRITE_EXISTING", ("output", "allow_overwrite_existing"), _parse_bool),
+    ("KPI_RECOMPUTE_COMPARISONS", ("output", "recompute_comparisons_from_history"), _parse_bool),
+    ("KPI_SLICE_DIMENSIONS", ("slices", "dimensions"), _comma_list),
+    ("KPI_HTML_ENABLED", ("html_report", "enabled"), _parse_bool),
+    ("KPI_HTML_FILENAME", ("html_report", "filename"), str.strip),
+    ("KPI_HTML_TITLE", ("html_report", "report_title"), str.strip),
+    ("KPI_HTML_OUTPUT_PATH", ("html_report", "output_path_segments"), _comma_list),
+    ("KPI_HTML_WEEKLY_WEEKS", ("html_report", "weekly_display_weeks"), _optional_int),
+    ("KPI_HTML_MONTHLY_MONTHS", ("html_report", "monthly_display_months"), _optional_int),
+    ("KPI_HTML_QUARTERLY_QUARTERS", ("html_report", "quarterly_display_quarters"), _optional_int),
+    ("KPI_HTML_HALF_HALVES", ("html_report", "half_display_halves"), _optional_int),
+    ("KPI_HTML_YEARLY_YEARS", ("html_report", "yearly_display_years"), _optional_int),
+)
+
+
+def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """A copy of cfg with every set KPI_* variable of _ENV_OVERRIDES applied (missing sections are added)."""
+    out = copy.deepcopy(cfg)
+    for env_var, key_path, parse in _ENV_OVERRIDES:
+        section = out
+        for key in key_path[:-1]:
+            section = section.setdefault(key, {})
+        if env_var in os.environ:
+            section[key_path[-1]] = parse(os.environ[env_var])
+    return out
+
+
 def _solution_ids(raw: Any, key: str) -> List[int]:
     """One solution id or a non-empty list of them, as a list of ints (bool rejected)."""
     ids = list(raw) if isinstance(raw, (list, tuple)) else [raw]
@@ -402,16 +477,21 @@ def _solution_ids(raw: Any, key: str) -> List[int]:
     return ids
 
 
-def _parse_bool(raw: str) -> bool:
-    return raw.strip().lower() in ("1", "true", "yes")
+def _optional_solution_ids(raw: Any, key: str) -> Optional[List[int]]:
+    return _solution_ids(raw, key) if raw is not None else None
+
+
+def _kinds_in_canonical_order(requested: Any, allowed: tuple, key: str) -> List[str]:
+    """The requested kinds (case / space insensitive) in the order of allowed; unknown kinds raise."""
+    requested_set = {str(k).strip().lower() for k in requested}
+    invalid = sorted(requested_set - set(allowed))
+    if invalid:
+        raise ValueError(f"{key} has invalid kinds {invalid}; allowed: {list(allowed)}")
+    return [k for k in allowed if k in requested_set]
 
 
 def _validate_value_filters(value_filters: Dict[str, Any]) -> None:
-    """Fail loudly on a malformed value_filters entry.
-
-    Each entry is either a LIST (include-only) or a DICT with any of the keys
-    ``include`` / ``exclude`` / ``keep_null``. Anything else is a config error.
-    """
+    """Each entry is a list (include only) or a dict with any of include / exclude / keep_null."""
     allowed_keys = {"include", "exclude", "keep_null"}
     for dim, spec in value_filters.items():
         if isinstance(spec, (list, tuple)):
@@ -436,12 +516,7 @@ def _validate_value_filters(value_filters: Dict[str, Any]) -> None:
 
 
 def _validate_population_filters(population_filters: Dict[str, Any], metric_cols: list) -> None:
-    """Fail loudly on a malformed metrics.population_filters entry.
-
-    Each key must be a real metric_col; each value must be a dict of {dim_col: value_filter_spec},
-    where value_filter_spec has the same shape _validate_value_filters already accepts (a list or
-    a dict with include/exclude/keep_null).
-    """
+    """Each key is a metric_col; each value a {dim_col: value filter} dict shaped like slices.value_filters."""
     known = set(metric_cols)
     for metric_col, dim_spec in population_filters.items():
         if metric_col not in known:
@@ -458,12 +533,7 @@ def _validate_population_filters(population_filters: Dict[str, Any], metric_cols
 
 
 def _validate_scope_diff_metrics(scope_diff_metrics: list, metric_cols: list) -> None:
-    """Fail loudly if metrics.scope_diff_metrics names anything outside metrics.metric_cols.
-
-    Unlike population_filters, nothing else validates this list -- build_scope_diff indexes
-    a DataFrame with it directly (kpi_pipeline/comparisons.py), so a stale/typo'd name here
-    would otherwise surface as a raw KeyError deep inside a scope.run_scope_diff=True run.
-    """
+    """Every scope_diff_metrics name must be in metric_cols (the scope diff indexes a frame by it)."""
     known = set(metric_cols)
     unknown = [m for m in scope_diff_metrics if m not in known]
     if unknown:
@@ -474,13 +544,7 @@ def _validate_scope_diff_metrics(scope_diff_metrics: list, metric_cols: list) ->
 
 
 def _validate_scope_adjustments(scope_adjustments_cfg: Dict[str, Any]) -> None:
-    """Fail loudly on an enabled scope_adjustments entry missing required fields.
-
-    Every other field on an addition/removal entry (product_col, store_col, date_col, ...)
-    is read via .get() with a default; join_keys and a source location are not -- they're
-    indexed directly in kpi_pipeline/scope.py, so a copy-pasted entry that forgot one of them
-    would otherwise KeyError deep inside scope building instead of failing at config load.
-    """
+    """An enabled addition / removal needs join_keys and a path or path_segments (scope.py indexes them)."""
     for section in ("additions", "removals"):
         for entry in scope_adjustments_cfg.get(section, []) or []:
             if not entry.get("enabled"):
@@ -497,171 +561,6 @@ def _validate_scope_adjustments(scope_adjustments_cfg: Dict[str, Any]) -> None:
                     f"scope_adjustments.{section} entry {label!r} is enabled but has neither "
                     f"'path' nor 'path_segments' set."
                 )
-
-
-def _parse_percentile(raw: str) -> float:
-    value = float(raw)
-    return value / 100.0 if value > 1 else value
-
-
-def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Apply optional KPI_* environment variables over CONFIG (see README)."""
-    out = copy.deepcopy(cfg)
-
-    if "KPI_CUSTOMER" in os.environ:
-        out["customer"] = os.environ["KPI_CUSTOMER"]
-
-    rn = out.setdefault("run", {})
-    if "KPI_RUN_MODE" in os.environ:
-        rn["mode"] = os.environ["KPI_RUN_MODE"].strip().lower()
-
-    rw = out.setdefault("reporting_window", {})
-    if "KPI_AS_OF_DATE" in os.environ:
-        rw["as_of_date"] = os.environ["KPI_AS_OF_DATE"]
-    if "KPI_RUN_MIN_DATE" in os.environ:
-        rw["run_min_date"] = os.environ["KPI_RUN_MIN_DATE"].strip() or None
-    if "KPI_REPORT_END" in os.environ:
-        rw["report_end"] = os.environ["KPI_REPORT_END"].strip().lower()
-
-    fc = out.setdefault("fiscal_calendar", {})
-    if "KPI_USE_FISCAL_CALENDAR" in os.environ:
-        fc["use_fiscal_calendar"] = _parse_bool(os.environ["KPI_USE_FISCAL_CALENDAR"])
-    if "KPI_HALF_PERIODS" in os.environ:
-        fc["half_periods"] = _parse_bool(os.environ["KPI_HALF_PERIODS"])
-
-    ss = out.setdefault("score_scope", {})
-    if "KPI_SCOPE_MIN_PERCENTILE" in os.environ:
-        ss["min_percentile"] = _parse_percentile(os.environ["KPI_SCOPE_MIN_PERCENTILE"])
-    if "KPI_SCOPE_MIN_WEEKS_FOR_FILTER" in os.environ:
-        ss["min_weeks_for_filter"] = int(os.environ["KPI_SCOPE_MIN_WEEKS_FOR_FILTER"])
-
-    sc = out.setdefault("scope", {})
-    if "KPI_USE_HYBRID_SCOPE" in os.environ:
-        sc["use_hybrid_scope"] = _parse_bool(os.environ["KPI_USE_HYBRID_SCOPE"])
-    if "KPI_RUN_SCOPE_DIFF" in os.environ:
-        sc["run_scope_diff"] = _parse_bool(os.environ["KPI_RUN_SCOPE_DIFF"])
-
-    cp = out.setdefault("comparable_pairs", {})
-    if "KPI_COMPARABLE_PAIRS" in os.environ:
-        cp["enabled"] = _parse_bool(os.environ["KPI_COMPARABLE_PAIRS"])
-
-    cmp_cfg = out.setdefault("comparisons", {})
-    if "KPI_COMPARISONS" in os.environ:
-        cmp_cfg["enabled"] = [
-            c.strip().lower() for c in os.environ["KPI_COMPARISONS"].split(",") if c.strip()
-        ]
-
-    lse = out.setdefault("lost_sales_ensemble", {})
-    if "KPI_LOST_SALES_ENSEMBLE" in os.environ:
-        lse["enabled"] = _parse_bool(os.environ["KPI_LOST_SALES_ENSEMBLE"])
-    if "KPI_LOST_SALES_SLOW_PATH" in os.environ:
-        lse["slow_path_segments"] = [
-            s.strip() for s in os.environ["KPI_LOST_SALES_SLOW_PATH"].split(",") if s.strip()
-        ]
-    if "KPI_SPEED_CLUSTER_PATH" in os.environ:
-        lse["speed_cluster_path_segments"] = [
-            s.strip() for s in os.environ["KPI_SPEED_CLUSTER_PATH"].split(",") if s.strip()
-        ]
-    if "KPI_SPEED_CLUSTER_FORMAT" in os.environ:
-        lse["speed_cluster_format"] = os.environ["KPI_SPEED_CLUSTER_FORMAT"].strip().lower()
-    if "KPI_SPEED_CLUSTER_ATTRIBUTE" in os.environ:
-        lse["speed_cluster_attribute_name"] = os.environ["KPI_SPEED_CLUSTER_ATTRIBUTE"].strip()
-    if "KPI_SPEED_CLUSTER_VALUE_COL" in os.environ:
-        lse["speed_cluster_value_col"] = os.environ["KPI_SPEED_CLUSTER_VALUE_COL"].strip()
-    if "KPI_FAST_MOVER_CLUSTERS" in os.environ:
-        lse["fast_mover_clusters"] = [
-            int(c.strip()) for c in os.environ["KPI_FAST_MOVER_CLUSTERS"].split(",") if c.strip()
-        ]
-
-    lss = out.setdefault("lost_sales_source", {})
-    if "KPI_LOST_SALES_WEEK_COL" in os.environ:
-        lss["week_col"] = os.environ["KPI_LOST_SALES_WEEK_COL"].strip()
-    if "KPI_LOST_SALES_PRODUCT_COL" in os.environ:
-        lss["product_col"] = os.environ["KPI_LOST_SALES_PRODUCT_COL"].strip()
-    if "KPI_LOST_SALES_STORE_COL" in os.environ:
-        lss["store_col"] = os.environ["KPI_LOST_SALES_STORE_COL"].strip()
-    if "KPI_LOST_SALES_COL" in os.environ:
-        lss["lost_sales_col"] = os.environ["KPI_LOST_SALES_COL"].strip()
-    if "KPI_LOST_SALES_IN_STOCK_COL" in os.environ:
-        lss["in_stock_col"] = os.environ["KPI_LOST_SALES_IN_STOCK_COL"].strip()
-    if "KPI_LOST_SALES_TOTAL_DAYS_COL" in os.environ:
-        lss["total_days_col"] = os.environ["KPI_LOST_SALES_TOTAL_DAYS_COL"].strip()
-
-    ins_cfg = out.setdefault("instock", {})
-    if "KPI_INSTOCK_METHOD" in os.environ:
-        ins_cfg["method"] = os.environ["KPI_INSTOCK_METHOD"].strip().lower()
-    ins = ins_cfg.setdefault("weekly_source", {})
-    if "KPI_INSTOCK_SOURCE_PATH" in os.environ:
-        ins["path_segments"] = [
-            s.strip() for s in os.environ["KPI_INSTOCK_SOURCE_PATH"].split(",") if s.strip()
-        ]
-    if "KPI_INSTOCK_WEEK_COL" in os.environ:
-        ins["week_col"] = os.environ["KPI_INSTOCK_WEEK_COL"].strip()
-    if "KPI_INSTOCK_PRODUCT_COL" in os.environ:
-        ins["product_col"] = os.environ["KPI_INSTOCK_PRODUCT_COL"].strip()
-    if "KPI_INSTOCK_STORE_COL" in os.environ:
-        ins["store_col"] = os.environ["KPI_INSTOCK_STORE_COL"].strip()
-    if "KPI_INSTOCK_IN_STOCK_COL" in os.environ:
-        ins["in_stock_col"] = os.environ["KPI_INSTOCK_IN_STOCK_COL"].strip()
-    if "KPI_INSTOCK_TOTAL_DAYS_COL" in os.environ:
-        ins["total_days_col"] = os.environ["KPI_INSTOCK_TOTAL_DAYS_COL"].strip()
-
-    ifr = out.setdefault("item_family_rollup", {})
-    if "KPI_ITEM_FAMILY_ROLLUP_DAILY_DATA" in os.environ:
-        ifr["daily_data"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_DAILY_DATA"])
-    if "KPI_ITEM_FAMILY_ROLLUP_LOST_SALES" in os.environ:
-        ifr["lost_sales"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_LOST_SALES"])
-    if "KPI_ITEM_FAMILY_ROLLUP_INVENTORY_WAREHOUSE" in os.environ:
-        ifr["inventory_warehouse"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_INVENTORY_WAREHOUSE"])
-    if "KPI_ITEM_FAMILY_ROLLUP_DEFINED_SCOPE" in os.environ:
-        ifr["defined_scope"] = _parse_bool(os.environ["KPI_ITEM_FAMILY_ROLLUP_DEFINED_SCOPE"])
-
-    op = out.setdefault("output", {})
-    if "KPI_SAVE_OUTPUTS" in os.environ:
-        op["save_outputs"] = _parse_bool(os.environ["KPI_SAVE_OUTPUTS"])
-    if "KPI_OUTPUT_PATH" in os.environ:
-        op["path_segments"] = [s.strip() for s in os.environ["KPI_OUTPUT_PATH"].split(",") if s.strip()]
-    if "KPI_OUTPUT_RUN_DATE" in os.environ:
-        op["run_date"] = os.environ["KPI_OUTPUT_RUN_DATE"].strip() or None
-    if "KPI_OUTPUT_SAVE_MODE" in os.environ:
-        op["save_mode"] = os.environ["KPI_OUTPUT_SAVE_MODE"].strip().lower()
-    if "KPI_ALLOW_OVERWRITE_EXISTING" in os.environ:
-        op["allow_overwrite_existing"] = _parse_bool(os.environ["KPI_ALLOW_OVERWRITE_EXISTING"])
-    if "KPI_RECOMPUTE_COMPARISONS" in os.environ:
-        op["recompute_comparisons_from_history"] = _parse_bool(os.environ["KPI_RECOMPUTE_COMPARISONS"])
-
-    sl = out.setdefault("slices", {})
-    if "KPI_SLICE_DIMENSIONS" in os.environ:
-        sl["dimensions"] = [c.strip() for c in os.environ["KPI_SLICE_DIMENSIONS"].split(",") if c.strip()]
-
-    hr = out.setdefault("html_report", {})
-    if "KPI_HTML_ENABLED" in os.environ:
-        hr["enabled"] = _parse_bool(os.environ["KPI_HTML_ENABLED"])
-    if "KPI_HTML_FILENAME" in os.environ:
-        hr["filename"] = os.environ["KPI_HTML_FILENAME"].strip()
-    if "KPI_HTML_TITLE" in os.environ:
-        hr["report_title"] = os.environ["KPI_HTML_TITLE"].strip()
-    if "KPI_HTML_OUTPUT_PATH" in os.environ:
-        hr["output_path_segments"] = [
-            s.strip() for s in os.environ["KPI_HTML_OUTPUT_PATH"].split(",") if s.strip()
-        ]
-    if "KPI_HTML_WEEKLY_WEEKS" in os.environ:
-        raw = os.environ["KPI_HTML_WEEKLY_WEEKS"].strip()
-        hr["weekly_display_weeks"] = int(raw) if raw else None
-    if "KPI_HTML_MONTHLY_MONTHS" in os.environ:
-        raw = os.environ["KPI_HTML_MONTHLY_MONTHS"].strip()
-        hr["monthly_display_months"] = int(raw) if raw else None
-    if "KPI_HTML_QUARTERLY_QUARTERS" in os.environ:
-        raw = os.environ["KPI_HTML_QUARTERLY_QUARTERS"].strip()
-        hr["quarterly_display_quarters"] = int(raw) if raw else None
-    if "KPI_HTML_HALF_HALVES" in os.environ:
-        raw = os.environ["KPI_HTML_HALF_HALVES"].strip()
-        hr["half_display_halves"] = int(raw) if raw else None
-    if "KPI_HTML_YEARLY_YEARS" in os.environ:
-        raw = os.environ["KPI_HTML_YEARLY_YEARS"].strip()
-        hr["yearly_display_years"] = int(raw) if raw else None
-
-    return out
 
 
 def _sunday_of_week(d: datetime.date) -> datetime.date:
@@ -712,6 +611,9 @@ def _resolve_report_window(
     }
 
 
+# =============================================================================
+# MATERIALIZE -- CONFIG -> validated flat settings dict
+# =============================================================================
 def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Resolve CONFIG into flat settings dict for KPIRunner (paths, dates, metrics, slices)."""
     cfg = _apply_env_overrides(cfg or CONFIG)
@@ -721,6 +623,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     run_min_raw = rw.get("run_min_date")
     run_min = run_min_raw.strip() if isinstance(run_min_raw, str) and run_min_raw.strip() else None
 
+    # --- Source paths -----------------------------------------------------------
     bucket = os.environ.get("KPI_BUCKET", f"/mnt/invent-{customer}-datastore")
     path_segments = cfg["path_segments"]
     paths = {
@@ -738,6 +641,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "PATH_GOODS_IN_TRANSIT": fund_paste(bucket, *path_segments["goods_in_transit"]),
     }
 
+    # --- Column maps: lost sales, weekly in-stock source, item family -------------
     lost_sales_source_cfg = cfg.get("lost_sales_source", {}) or {}
     lost_sales_column_map = {
         "week_col": lost_sales_source_cfg.get("week_col", "week_start_date"),
@@ -800,6 +704,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     dc_instock_enabled = bool(dc_instock_cfg["enabled"])
     dc_instock_stock_threshold = dc_instock_cfg["stock_threshold"]
 
+    # --- Reporting window ---------------------------------------------------------
     report_end_mode = rw["report_end"]
     if report_end_mode not in ("as_of", "complete_month", "latest_day"):
         raise ValueError(
@@ -811,6 +716,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         report_end_mode,
     )
 
+    # --- Defined scope ------------------------------------------------------------
     defined_scope = {**cfg["defined_scope"], "path": paths["PATH_DEFINED_SCOPE"]}
 
     grain = defined_scope.get("grain", "product_store")
@@ -827,6 +733,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         )
     defined_scope["grain"] = grain
 
+    # --- Lost sales ensemble ------------------------------------------------------
     lse = cfg["lost_sales_ensemble"]
     if lse.get("enabled") and instock_source_enabled:
         raise ValueError(
@@ -859,6 +766,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
                 "speed_cluster_format='wide' and enabled=True"
             )
 
+    # --- Scope source -------------------------------------------------------------
     scope_source_cfg = cfg["scope_source"]
     scope_source_run_date = scope_source_cfg["run_date"]
     scope_source = {
@@ -871,11 +779,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "active_only": bool(scope_source_cfg["active_only"]),
         "instock_main_eligible_only": bool(scope_source_cfg["instock_main_eligible_only"]),
         "instock_exclude_unsuperseded_sizes": bool(scope_source_cfg["instock_exclude_unsuperseded_sizes"]),
-        "dc_solution_id": (
-            _solution_ids(scope_source_cfg["dc_solution_id"], "scope_source.dc_solution_id")
-            if scope_source_cfg["dc_solution_id"] is not None
-            else None
-        ),
+        "dc_solution_id": _optional_solution_ids(scope_source_cfg["dc_solution_id"], "scope_source.dc_solution_id"),
     }
     if scope_source["mode"] not in ("defined_scope", "operation_scope"):
         raise ValueError(
@@ -889,21 +793,15 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     if operation_scope_mode and grain == "product_store_week":
         raise ValueError("scope_source.mode='operation_scope' does not support defined_scope.grain='product_store_week'")
 
+    # --- Blocked scope ------------------------------------------------------------
     blocked_scope_cfg = cfg["blocked_scope"]
     ui_parameters_path = blocked_scope_cfg["ui_parameters_path"]
+    ui_segments = ui_parameters_path.strip("/").split("/") if ui_parameters_path is not None else None
     blocked_scope = {
         "rule": blocked_scope_cfg["rule"],
-        "path": (
-            fund_paste(bucket, *ui_parameters_path.strip("/").split("/"), "blocked_scope")
-            if ui_parameters_path is not None
-            else None
-        ),
+        "path": fund_paste(bucket, *ui_segments, "blocked_scope") if ui_segments is not None else None,
         # DC blocks of the same snapshot, read only when scope_source.dc_solution_id is set.
-        "dc_path": (
-            fund_paste(bucket, *ui_parameters_path.strip("/").split("/"), "dc_blocked_scope")
-            if ui_parameters_path is not None
-            else None
-        ),
+        "dc_path": fund_paste(bucket, *ui_segments, "dc_blocked_scope") if ui_segments is not None else None,
     }
     if blocked_scope["rule"] not in ("after_scope_start", "all"):
         raise ValueError(f"blocked_scope.rule must be 'after_scope_start' or 'all'; got {blocked_scope['rule']!r}")
@@ -931,14 +829,13 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             )
         blocked_scope[key] = kinds
     blocked_scope["solution_id"] = _solution_ids(blocked_scope_cfg["solution_id"], "blocked_scope.solution_id")
-    blocked_scope["dc_solution_id"] = (
-        _solution_ids(blocked_scope_cfg["dc_solution_id"], "blocked_scope.dc_solution_id")
-        if blocked_scope_cfg["dc_solution_id"] is not None
-        else None
+    blocked_scope["dc_solution_id"] = _optional_solution_ids(
+        blocked_scope_cfg["dc_solution_id"], "blocked_scope.dc_solution_id"
     )
     if blocked_scope["dc_solution_id"] is not None and scope_source["dc_solution_id"] is None:
         raise ValueError("blocked_scope.dc_solution_id needs scope_source.dc_solution_id (the DC pairs the blocks match)")
 
+    # --- Daily in-stock -----------------------------------------------------------
     instock_daily_cfg = instock_cfg["daily"]
     history_start_raw = instock_daily_cfg["history_start"]
     daily_instock = {
@@ -961,7 +858,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     if instock_method == "daily":
         if grain == "product":
             raise ValueError("instock.method='daily' requires a store-level defined_scope.grain (product_store)")
-        if cfg["lost_sales_ensemble"].get("enabled"):
+        if lse.get("enabled"):
             raise ValueError("instock.method='daily' and lost_sales_ensemble.enabled cannot both be True")
         if daily_instock["count_start"] != "first_daily_row" and not operation_scope_mode:
             raise ValueError(
@@ -985,6 +882,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             "latest day splits the daily in-stock frame's fiscal week, which weekly in-stock sources cannot do"
         )
 
+    # --- Goods in transit ---------------------------------------------------------
     git_cfg = cfg["goods_in_transit"]
     git_shift_days = git_cfg["date_shift_days"]
     if git_shift_days is not None and type(git_shift_days) is not int:
@@ -1015,6 +913,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     if goods_in_transit["inventory_metrics"] and not cfg["fiscal_calendar"]["use_fiscal_calendar"]:
         raise ValueError("goods_in_transit.inventory_metrics requires fiscal_calendar.use_fiscal_calendar=True")
 
+    # --- Dimension sources, roots and slice value filters -------------------------
     dimension_sources = []
     for src in cfg.get("dimension_sources", []) or []:
         resolved = dict(src)
@@ -1022,16 +921,10 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             resolved["path"] = fund_paste(bucket, *resolved["path_segments"])
         dimension_sources.append(resolved)
 
-    # Root specs: EVERY column an enabled dimension_source contributes (columns + derived) is
-    # root-defining -- never a cut (see README's "Dimension sources -> roots" section: "every one
-    # of its columns becomes a root ... not a flat cut", and the mutual-exclusivity design
-    # constraint). root_values supplies an explicit value->root-name mapping for a given dim_col;
-    # a dim_col with no entry in root_values (or a source with root_values omitted entirely)
-    # auto-discovers one root per distinct value instead (fiscal._resolve_root_definitions, since
-    # that needs real data). Resolved here (not left for fiscal.py to re-derive) so root_values
-    # stays the single place a root-defining column is declared, and so a root_values key that
-    # doesn't match any of the source's own columns/derived fails loudly now instead of silently
-    # never applying (that dim_col would otherwise fall through and become an ordinary cut).
+    # Every column an enabled dimension source contributes (columns + derived) defines roots, never a cut
+    # (README: Dimension sources). root_values maps values to root names; a column without an entry gets one
+    # root per distinct value (fiscal._resolve_root_definitions). A root_values key that is not one of the
+    # source's own columns raises here instead of silently never applying.
     root_specs = []
     for src in dimension_sources:
         if not src.get("enabled"):
@@ -1050,56 +943,39 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         for dim_col in contributed:
             root_specs.append({"dim_col": dim_col, "root_values": root_values_cfg.get(dim_col) or {}})
 
-    # Per-dimension value filters, from slices only. Applied to a slice's own breakdown
-    # (see kpi_pipeline/kpi_long._filter_frames_for_dimension).
+    # Applied to a slice's own breakdown (kpi_pipeline/kpi_long._filter_frames_for_dimension).
     slice_value_filters = dict(cfg["slices"].get("value_filters", {}) or {})
     _validate_value_filters(slice_value_filters)
 
-    # Selected comparison kinds — validated and normalised to canonical order.
+    # --- Comparisons and comparable pairs -----------------------------------------
     comparisons_cfg = cfg.get("comparisons", {}) or {}
     requested_kinds = comparisons_cfg.get("enabled")
     if requested_kinds is None:
         requested_kinds = list(COMPARISON_KINDS_ALL)
-    requested_set = {str(k).strip().lower() for k in requested_kinds}
-    invalid_kinds = sorted(requested_set - set(COMPARISON_KINDS_ALL))
-    if invalid_kinds:
-        raise ValueError(
-            f"comparisons.enabled has invalid kinds {invalid_kinds}; "
-            f"allowed: {list(COMPARISON_KINDS_ALL)}"
-        )
-    comparison_kinds = [k for k in COMPARISON_KINDS_ALL if k in requested_set]
+    comparison_kinds = _kinds_in_canonical_order(requested_kinds, COMPARISON_KINDS_ALL, "comparisons.enabled")
     if not comparison_kinds:
         raise ValueError(
             "comparisons.enabled resolved to an empty list; "
             f"choose at least one of {list(COMPARISON_KINDS_ALL)}"
         )
 
-    # Selected comparable-pairs kinds — validated and normalised to canonical order. Only
-    # meaningful when comparable_pairs.enabled=True; resolves to an empty list when disabled (no
-    # need to force a non-empty kinds list on an off feature).
+    # Kinds are validated always but resolve to an empty list while comparable_pairs is disabled.
     comparable_pairs_cfg = cfg.get("comparable_pairs", {}) or {}
     comparable_pairs_enabled = bool(comparable_pairs_cfg.get("enabled", False))
     requested_comparable_kinds = comparable_pairs_cfg.get("kinds")
     if requested_comparable_kinds is None:
         requested_comparable_kinds = ["ytd"]
-    comparable_requested_set = {str(k).strip().lower() for k in requested_comparable_kinds}
-    invalid_comparable_kinds = sorted(comparable_requested_set - set(COMPARABLE_KINDS_ALL))
-    if invalid_comparable_kinds:
-        raise ValueError(
-            f"comparable_pairs.kinds has invalid kinds {invalid_comparable_kinds}; "
-            f"allowed: {list(COMPARABLE_KINDS_ALL)}"
-        )
-    comparable_kinds = (
-        [k for k in COMPARABLE_KINDS_ALL if k in comparable_requested_set] if comparable_pairs_enabled else []
+    comparable_kinds_ordered = _kinds_in_canonical_order(
+        requested_comparable_kinds, COMPARABLE_KINDS_ALL, "comparable_pairs.kinds"
     )
+    comparable_kinds = comparable_kinds_ordered if comparable_pairs_enabled else []
     if comparable_pairs_enabled and not comparable_kinds:
         raise ValueError(
             "comparable_pairs.kinds resolved to an empty list while comparable_pairs.enabled=True; "
             f"choose at least one of {list(COMPARABLE_KINDS_ALL)}"
         )
 
-    # Grain of the comparable same-pairs population itself (NOT defined_scope.grain -- see the
-    # comparable_pairs config block). Validated the same way defined_scope.grain is, above.
+    # Grain of the like-for-like pair population itself, not defined_scope.grain.
     comparable_pairs_grain = comparable_pairs_cfg.get("grain", "product_store")
     comparable_pairs_pair_days = comparable_pairs_cfg["pair_days"]
     if comparable_pairs_pair_days not in ("unblocked", "all"):
@@ -1115,6 +991,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     if "half" in comparable_kinds and not half_periods:
         raise ValueError("comparable_pairs.kinds 'half' needs fiscal_calendar.half_periods=True")
 
+    # --- Output, metrics, scope adjustments, score scope, HTML report, run mode -------
     output_cfg = cfg["output"]
     output_root = fund_paste(bucket, *output_cfg["path_segments"])
     run_date_raw = output_cfg.get("run_date")
@@ -1138,9 +1015,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     _validate_scope_adjustments(cfg.get("scope_adjustments", {}) or {})
 
     score_scope = cfg["score_scope"]
-    min_pct = score_scope["min_percentile"]
-    if min_pct > 1:
-        min_pct = min_pct / 100.0
+    min_pct = _as_fraction(score_scope["min_percentile"])
 
     html_cfg = cfg["html_report"]
     # The filename stays a template ({customer}, {report_end}): the report end is only final once
@@ -1165,6 +1040,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     if run_mode not in {"full", "html_only"}:
         raise ValueError("run.mode must be one of: full, html_only")
 
+    column_map = cfg["fiscal_calendar"].get("column_map", {})
     return {
         "CONFIG": cfg,
         "CUSTOMER": customer,
@@ -1174,9 +1050,9 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "REPORT_END_MODE": report_end_mode,
         "USE_FISCAL_CALENDAR": cfg["fiscal_calendar"]["use_fiscal_calendar"],
         "HALF_PERIODS": half_periods,
-        "FISCAL_QUARTER_COL": cfg["fiscal_calendar"].get("column_map", {}).get("quarter_col"),
-        "FISCAL_MONTH_COL": cfg["fiscal_calendar"].get("column_map", {}).get("month_col"),
-        "FISCAL_MONTH_NAME_COL": cfg["fiscal_calendar"].get("column_map", {}).get("month_name_col"),
+        "FISCAL_QUARTER_COL": column_map.get("quarter_col"),
+        "FISCAL_MONTH_COL": column_map.get("month_col"),
+        "FISCAL_MONTH_NAME_COL": column_map.get("month_name_col"),
         "DAILY_TIME_COLUMNS": cfg["fiscal_calendar"]["daily_time_columns"],
         "SCOPE_MIN_PERCENTILE": min_pct,
         "SCOPE_MIN_WEEKS_FOR_FILTER": score_scope["min_weeks_for_filter"],
@@ -1188,11 +1064,8 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "COMPARABLE_PAIRS_PAIR_DAYS": comparable_pairs_pair_days,
         "COMPARISON_KINDS": comparison_kinds,
         "SCOPE_ADJUSTMENTS": cfg.get("scope_adjustments", {}),
-        # .get() throughout, matching what the validators above actually require: they only
-        # demand fast_mover_clusters when enabled=True, and speed_cluster_attribute_name when
-        # format="long". Indexing these directly raised KeyError on configs the validators had
-        # deliberately just accepted -- e.g. any format="wide" config omitting the unused
-        # attribute-name key.
+        # .get() here: the checks above require fast_mover_clusters only when enabled and
+        # speed_cluster_attribute_name only for the "long" format.
         "LOST_SALES_ENSEMBLE_ENABLED": lse.get("enabled", False),
         "FAST_MOVER_CLUSTERS": list(lse.get("fast_mover_clusters") or [1, 2, 3]),
         "SPEED_CLUSTER_FORMAT": lse.get("speed_cluster_format", "long"),
@@ -1229,7 +1102,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "RECOMPUTE_COMPARISONS_FROM_HISTORY": output_cfg.get("recompute_comparisons_from_history", True),
         "PATH_OUTPUT_ROOT": output_root,
         "OUTPUT_RUN_DATE": output_run_date,
-        # HTML report
         "HTML_REPORT_ENABLED": html_cfg.get("enabled", True),
         "HTML_REPORT_FILENAME_TEMPLATE": html_filename_template,
         "HTML_REPORT_TITLE": html_cfg.get("report_title") or None,

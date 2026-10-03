@@ -13,6 +13,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `instock.method` + `instock.daily` / `instock.weekly_source`, and "blocked days removed" as flagged and
 > removed per `blocked_scope.metrics` (see "Config simplification" and "Per-metric blocked scope gate").
 
+#### Faster runs, results shown as they finish, simpler configs (no metric changes)
+
+Every metric computes exactly as before; the configs resolve to identical settings.
+- **Blocked days as date intervals**: `scope._applied_block_intervals` merges each pair's blocks into
+  disjoint `(first_day, last_day)` intervals instead of one row per pair-day; `scoped_daily`, `dc_daily`,
+  the DC in-stock grid and daily in-stock flag or drop blocked days by a range join on the pair.
+- **Smaller caches, fewer passes**: the cached daily-data keeps only the report window and the columns its
+  readers use; scope-adjustment steps are cached; mean_stock / total_mean_stock / turnover share one
+  day-level groupBy when their populations match; redundant `distinct()`s and the full-history
+  `inventory_warehouse` cache removed.
+- **Early output**: `KPIRunner` displays the latest overall KPIs right after `kpi_long` is built, then the
+  overall comparisons and comparable views as each finishes.
+- **Configs**: `config.py` / `tbretail_config.py` regrouped into nine numbered sections with short
+  comments; env overrides are one `_ENV_OVERRIDES` table. Keys and values unchanged.
+- **Cleanup**: duplicated kpi_long / comparable row building, time-grain setup, change formatting and
+  saved-table lists merged; dead guards and unused parameters removed; README and docstrings trimmed.
+
 #### Block solutions separate from scope solutions: `blocked_scope.solution_id` / `dc_solution_id`
 
 The store and DC blocked-scope snapshots are filtered to their own solution lists (tbretail 21 / 22),

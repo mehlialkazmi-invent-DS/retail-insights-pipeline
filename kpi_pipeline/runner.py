@@ -6,14 +6,16 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pandas as pd
+from IPython.display import display
 from pyspark.sql import SparkSession
 
+from kpi_pipeline.comparable import _KIND_CTX_ATTRS as COMPARABLE_KIND_ATTRS
 from kpi_pipeline.comparable import build_comparable_pairs
-from kpi_pipeline.comparisons import build_comparisons, build_scope_diff
+from kpi_pipeline.comparisons import _KIND_CTX_ATTRS as COMPARISON_KIND_ATTRS
+from kpi_pipeline.comparisons import _selected_comparison_kinds, build_comparisons, build_scope_diff
 from kpi_pipeline.context import KPIContext
-from kpi_pipeline.fiscal import apply_report_end_mode, build_fiscal_and_products
+from kpi_pipeline.fiscal import apply_report_end_mode, build_fiscal_and_products, build_fiscal_week_only
 from kpi_pipeline.html_report import render_kpi_html
-from kpi_pipeline.fiscal import build_fiscal_week_only
 from kpi_pipeline.io import build_save_plan, load_saved_outputs, save_outputs
 from kpi_pipeline.kpi_long import build_kpi_long, trim_periods_to_recent
 from kpi_pipeline.pipeline import build_pipeline_frames
@@ -63,6 +65,15 @@ def _write_text_to_datastore(spark: SparkSession, path: str, content: str) -> No
     raise OSError(f"could not save HTML to datastore path {path!r}") from last_exc
 
 
+def _show(title: str, table: Optional[pd.DataFrame]) -> None:
+    """Print ``title`` and display ``table`` inline (Databricks renders it mid-cell), or note it is empty."""
+    print(f"=== {title} ===")
+    if table is None or table.empty:
+        print("(no rows)")
+    else:
+        display(table)
+
+
 class KPIRunner:
     """Run KPI generation from materialized config settings."""
 
@@ -78,7 +89,6 @@ class KPIRunner:
         self.ctx.daily_data_excluded_days = None
         self.ctx.lost_sales_weekly_base = None
         self.ctx.instock_weekly_base = None
-        self.ctx.inventory_warehouse_raw = None
         self.ctx.item_family_raw = None
         self.ctx.inventory_warehouse_rolled = None
 
@@ -146,15 +156,8 @@ class KPIRunner:
         return plan
 
     def _infer_active_slices_from_kpi_long(self) -> None:
-        """Infer cut dimensions + roots from a LOADED kpi_long (html_only mode never re-runs
-        fiscal.build_fiscal_and_products, which is where these normally come from a fresh
-        Spark computation) -- configured cut order first, then any extras found in the data.
-
-        Only "root" (the name) is inferred for each root here, not "dim_col"/"value" -- html
-        rendering only ever reads the "root" key (see html_report.render_kpi_html), and
-        re-deriving which dimension_source column/value produced a saved root isn't needed to
-        render its already-computed rows.
-        """
+        """html_only: infer the cut dimensions (configured order first, then extras found) and the root names
+        from the loaded kpi_long; rendering reads only each root's name."""
         if self.ctx.kpi_long is None or self.ctx.kpi_long.empty:
             self.ctx.active_slice_dimensions = []
             self.ctx.cut_dimensions = []
@@ -221,6 +224,16 @@ class KPIRunner:
         build_hybrid_scope(self.ctx)
         apply_scope_adjustments(self.ctx, fund_paste=fund_paste)
 
+    def latest_overall_kpis(self) -> pd.DataFrame:
+        """kpi_long's overall rows (root and dimension "overall") of the latest period of each period_type,
+        metric columns only."""
+        kpi_long = self.ctx.kpi_long
+        overall = kpi_long[(kpi_long["root"] == "overall") & (kpi_long["dimension"] == "overall")]
+        latest = overall.groupby("period_type")["period"].transform("max")
+        return overall[overall["period"] == latest][
+            ["period_type", "period"] + self.settings["METRIC_COLS"]
+        ].reset_index(drop=True)
+
     def build_kpis(self) -> None:
         self.ctx.hybrid_frames = build_pipeline_frames(self.ctx, self.ctx.hybrid_scope_keys)
         self.ctx.kpi_long = build_kpi_long(self.ctx, self.ctx.hybrid_frames)
@@ -231,17 +244,21 @@ class KPIRunner:
             "| periods:",
             self.ctx.kpi_long["period_type"].unique().tolist(),
         )
+        _show("kpi_long — overall, latest period of each period type", self.latest_overall_kpis())
 
     def build_comparisons(self) -> None:
         build_comparisons(self.ctx)
-        # Trimmed copy for HTML display only — ctx.kpi_long itself must stay FULL through the
-        # save step (main.ipynb calls runner.run(save=False) then save_outputs(ctx, ...)
-        # separately in a later cell, so trimming ctx.kpi_long here would have truncated
-        # exactly what gets persisted to Delta).
+        # Trimmed copy for the HTML report only: ctx.kpi_long stays full for the save step.
         self.ctx.kpi_long_display = trim_periods_to_recent(self.ctx.kpi_long, self.ctx)
+        for kind in _selected_comparison_kinds(self.ctx):
+            _show(f"{kind.upper()} — overall", getattr(self.ctx, COMPARISON_KIND_ATTRS[kind][1]))
 
     def build_comparable_pairs(self) -> None:
         build_comparable_pairs(self.ctx)
+        if not self.settings.get("COMPARABLE_PAIRS_ENABLED", False):
+            return
+        for kind in self.settings.get("COMPARABLE_KINDS") or []:
+            _show(f"Comparable {kind} — overall (latest link)", getattr(self.ctx, COMPARABLE_KIND_ATTRS[kind][2]))
 
     def build_scope_comparison(self) -> None:
         if not self.settings.get("RUN_SCOPE_DIFF", False):
@@ -258,21 +275,8 @@ class KPIRunner:
         build_scope_diff(self.ctx)
 
     def build_html_report(self, local_dir: "str | Path | None" = ".") -> Optional[str]:
-        """
-        Render the HTML report when html_report.enabled is True.
-
-        Parameters
-        ----------
-        local_dir:
-            Directory to write the HTML file next to the notebook.
-            Defaults to '.' (notebook working directory).  Pass an absolute path
-            if running on Databricks where '.' may not be writable.
-
-        Returns
-        -------
-        str | None — the path written, or None when html_report.enabled is False
-        or the pipeline has not been run yet.
-        """
+        """Render the HTML report into ``local_dir`` (also copied to html_report's datastore path when set);
+        returns the path, or None when html_report.enabled is False or the pipeline has not run."""
         if not self.settings.get("HTML_REPORT_ENABLED", True):
             print("HTML report disabled (html_report.enabled=False).")
             return None
@@ -291,7 +295,6 @@ class KPIRunner:
             metric_definitions=self.settings.get("HTML_REPORT_METRIC_DEFS") or {},
         )
 
-        # Optionally also copy to the datastore path
         datastore_dir = self.settings["HTML_REPORT_OUTPUT_DIR"]
         if datastore_dir:
             datastore_path = f"{datastore_dir.rstrip('/')}/{filename}"
@@ -307,13 +310,8 @@ class KPIRunner:
         return written
 
     def scope_debug_summary(self):
-        """Distinct product/store/pair counts for the final scope — overall and per slice.
-
-        Read-only pre-flight debug helper, distinct from :meth:`run`. Call it after
-        :meth:`build_dimensions` and :meth:`build_scopes` (both idempotent) and before
-        the expensive :meth:`build_kpis`, to sanity-check scope size and per-slice
-        coverage. Returns a pandas DataFrame for ``display()``.
-        """
+        """Distinct product / store / pair counts of the final scope, overall and per slice: a pre-flight
+        check after build_dimensions and build_scopes, before the expensive build_kpis."""
         return scope_universe_counts(self.ctx)
 
     def hybrid_scope_summary(self):

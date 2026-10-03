@@ -1,13 +1,8 @@
-"""YoY / YTD comparison tables (overall + slice dimensions) and defined-vs-score diff.
+"""YoY / YTD comparison tables (per root x cut) and the defined-vs-score scope diff.
 
-YoY compares the latest two full years present. YTD compares each year's elapsed
-(fully-closed-months) window against the prior year's same window, chained across every
-consecutive pair of years present (e.g. also 2025 YTD vs 2024 YTD if a third year exists).
-
-Both read kpi_long's annual / ytd rows, so they follow reporting_window.report_end. With "latest_day"
-the annual rows are complete fiscal years only (YoY compares the latest two complete years; the current
-fiscal year is in YTD only) and the ytd rows are the same fiscal day for every year (days 1..K of the
-fiscal year, K = day of the fiscal year of REPORT_END_DATE; see kpi_long._period_frames).
+YoY compares the latest two annual periods; YTD compares each year's YTD window with the prior year's,
+chained across every consecutive year pair. Both read kpi_long's annual / ytd rows, so they follow
+reporting_window.report_end ("latest_day": complete fiscal years, and days 1..K of every fiscal year).
 """
 
 from __future__ import annotations
@@ -48,15 +43,13 @@ def _format_metric_value(metric: str, value) -> str:
     return f"{value:,.2f}"
 
 
-def _format_change(metric: str, current, prior, pp_change_metrics) -> str:
-    if current is None or prior is None or pd.isna(current) or pd.isna(prior):
-        return "—"
-    if metric in pp_change_metrics:
-        delta_pp = (current - prior) * 100 if metric in _FRACTIONAL_RATE_METRICS else current - prior
-        return f"{delta_pp:+.1f}pp"
-    if prior == 0:
-        return "—"
-    return f"{(current - prior) / abs(prior) * 100:+.1f}%"
+def _format_change(change_pct, change_pp) -> str:
+    """Display text of _metric_change_values's result: the pp change, the % change, or "—" for none."""
+    if change_pp is not None:
+        return f"{change_pp:+.1f}pp"
+    if change_pct is not None:
+        return f"{change_pct:+.1f}%"
+    return "—"
 
 
 def _metric_change_values(metric: str, current, prior, pp_change_metrics):
@@ -104,7 +97,7 @@ def build_comparison_long(
                 "current_value": current_v,
                 "change_pct": change_pct,
                 "change_pp": change_pp,
-                "change_display": _format_change(metric, current_v, prior_v, pp_metrics),
+                "change_display": _format_change(change_pct, change_pp),
                 "prior_display": _format_metric_value(metric, prior_v),
                 "current_display": _format_metric_value(metric, current_v),
             }
@@ -161,9 +154,7 @@ def _series_groups(df: pd.DataFrame, dimension: str) -> List[Tuple[str, pd.DataF
 
 
 def _consecutive_year_pairs(df: pd.DataFrame) -> List[Tuple[pd.Series, pd.Series]]:
-    """Every consecutive pair of years present in ``df`` (must have a ``Year`` column), sorted
-    ascending. Empty if fewer than 2 years are present — the shared "gracefully skip" guard for
-    a single-year window."""
+    """Every consecutive pair of years in ``df`` (a ``Year`` column), ascending; empty with one year."""
     ordered = df.sort_values("Year").reset_index(drop=True)
     return [(ordered.iloc[i], ordered.iloc[i + 1]) for i in range(len(ordered) - 1)]
 
@@ -171,11 +162,7 @@ def _consecutive_year_pairs(df: pd.DataFrame) -> List[Tuple[pd.Series, pd.Series
 def _concat_pair_comparisons(
     pairs_with_display: List[Tuple[Any, Any, pd.DataFrame]]
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Combine multiple (sort_key, display, save) comparison results into one (display, save).
-
-    ``display`` returned is the LATEST pair's pivoted view (for at-a-glance inspection); the full
-    multi-pair detail is in the concatenated ``save`` (long-format) table.
-    """
+    """(display of the latest pair, all pairs' save rows concatenated) of (sort_key, display, save) results."""
     if not pairs_with_display:
         return pd.DataFrame(), pd.DataFrame()
     pairs_with_display.sort(key=lambda t: t[0])
@@ -220,10 +207,7 @@ def ytd_comparison_long(
     dimension: str,
     dimension_value: str,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Each year's elapsed (fully-closed-months) window vs the prior year's same window,
-    chained across every consecutive pair of years present (2026 YTD vs 2025 YTD, 2025 YTD vs
-    2024 YTD, ...). A single-year window produces no comparison. With report_end="latest_day" the
-    window is the same fiscal day for every year (days 1..K), not closed months."""
+    """Each year's YTD vs the prior year's, for every consecutive year pair; none with one year."""
     pairs_with_display: List[Tuple[Any, pd.DataFrame, pd.DataFrame]] = []
     for prior, current in _consecutive_year_pairs(ytd):
         prior_label, current_label = f"{int(prior['Year'])} YTD", f"{int(current['Year'])} YTD"
@@ -257,15 +241,12 @@ def _build_comparison_for_dimension(
     display_overall: pd.DataFrame = pd.DataFrame()
 
     if comparison_kind == "yoy":
-        compare_fn = yoy_comparison_long
-        period_df, key_cols = tables["annual"], ["Year"]
+        compare_fn, period_df = yoy_comparison_long, tables["annual"]
     else:
-        compare_fn = ytd_comparison_long
-        period_df, key_cols = tables["ytd"], ["Year"]
+        compare_fn, period_df = ytd_comparison_long, tables["ytd"]
 
     for dval, grp in _series_groups(period_df, dimension):
-        cols = key_cols + metric_cols
-        display, save = compare_fn(ctx, grp[cols], metric_cols, root, dimension, dval)
+        display, save = compare_fn(ctx, grp[["Year"] + metric_cols], metric_cols, root, dimension, dval)
         if not save.empty:
             save_parts.append(save)
         if root == "overall" and dimension == "overall" and dval == "ALL" and not display.empty:
@@ -291,8 +272,7 @@ def _selected_comparison_kinds(ctx: KPIContext) -> List[str]:
 def build_comparisons(ctx: KPIContext) -> None:
     kinds = _selected_comparison_kinds(ctx)
 
-    # Reset every comparison table + overall display; unselected kinds stay empty so save,
-    # HTML render, and notebook cells all treat them as "not requested".
+    # Unselected kinds stay empty, read as "not requested" by save, HTML and notebook.
     for save_attr, display_attr in _KIND_CTX_ATTRS.values():
         setattr(ctx, save_attr, pd.DataFrame())
         setattr(ctx, display_attr, pd.DataFrame())
@@ -327,9 +307,7 @@ def build_comparisons(ctx: KPIContext) -> None:
 
 
 def slice_comparison_view(comparison_df: pd.DataFrame, dimension: str, root: str = "overall") -> pd.DataFrame:
-    """Readable view of comparisons for one (root, dimension) combination -- root defaults to
-    "overall" (the grand total's own roots), e.g. root="nvrout", dimension="brand" for brand
-    inside the nvrout root specifically."""
+    """Readable comparison rows of one (root, dimension), e.g. root="nvrout", dimension="brand"."""
     if comparison_df is None or comparison_df.empty:
         return pd.DataFrame()
     sub = comparison_df[(comparison_df["root"] == root) & (comparison_df["dimension"] == dimension)].copy()
@@ -349,18 +327,20 @@ def slice_comparison_view(comparison_df: pd.DataFrame, dimension: str, root: str
 
 
 def build_scope_diff(ctx: KPIContext) -> None:
-    """Annual key-metric diff: defined-only scope vs score-only scope (hybrid sanity check). Its years are
-    the Annual tab's: with report_end="latest_day" complete fiscal years only (kpi_long._period_frames)."""
+    """Annual SCOPE_DIFF_METRICS under defined-only vs score-only scope (a hybrid sanity check), over the
+    Annual tab's years."""
+    from pyspark.sql import functions as F
+
     from kpi_pipeline.kpi_long import _period_frames
     from kpi_pipeline.metrics import build_kpi_table
 
     scope_diff_metrics = ctx.settings["SCOPE_DIFF_METRICS"]
-    defined_annual = build_kpi_table(ctx, _period_frames(ctx, ctx.defined_frames, "annual"), "Year", [])[
-        ["Year"] + scope_diff_metrics
-    ]
-    score_annual = build_kpi_table(ctx, _period_frames(ctx, ctx.score_frames, "annual"), "Year", [])[
-        ["Year"] + scope_diff_metrics
-    ]
+    defined_annual = build_kpi_table(
+        ctx, _period_frames(ctx, ctx.defined_frames, "annual"), "Year", [], F.lit(True)
+    )[["Year"] + scope_diff_metrics]
+    score_annual = build_kpi_table(
+        ctx, _period_frames(ctx, ctx.score_frames, "annual"), "Year", [], F.lit(True)
+    )[["Year"] + scope_diff_metrics]
     merged = defined_annual.merge(score_annual, on="Year", suffixes=("_defined", "_score"))
     records = []
     for _, r in merged.iterrows():
