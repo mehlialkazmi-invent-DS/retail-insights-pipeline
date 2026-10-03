@@ -335,9 +335,9 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
         store_scope = "All scoped stores"
         if cfg["input_filters"]:
             store_scope += " (input filter: " + " AND ".join(cfg["input_filters"]) + ")"
-        if settings["SCOPE_SOURCE"]["instock_main_eligible_only"]:
+        if settings["SCOPE"]["instock_main_eligible_only"]:
             store_scope += "; only stores where the main (new) item itself is eligible"
-        if settings["SCOPE_SOURCE"]["instock_exclude_unsuperseded_sizes"]:
+        if settings["SCOPE"]["instock_exclude_unsuperseded_sizes"]:
             store_scope += "; sizes of a superseded class color that are not in the supersession are excluded"
         out["in_stock_rate"] = {
             "label": "In-Stock Rate",
@@ -1505,12 +1505,7 @@ def _report_info_html(
     as_of = settings.get("AS_OF_DATE", "—")
     report_start = settings.get("EFFECTIVE_REPORT_START_DATE", "—")
     report_end = settings.get("REPORT_END_DATE", "—")
-    if settings.get("USE_HYBRID_SCOPE"):
-        scope_mode = "Hybrid"
-    elif settings["SCOPE_SOURCE"]["mode"] == "operation_scope":
-        scope_mode = "Operation scope"
-    else:
-        scope_mode = "Defined only"
+    scope_mode = "Hybrid" if settings["SCOPE"]["use_hybrid_scope"] else "Scope table only"
     period_basis_card = ""
     if settings["REPORT_END_MODE"] == "latest_day":
         period_basis = (

@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+#### One scope definition (no change to any output except the `scope_diff` column and `scope_origin` value)
+
+The two scope modes (`scope_source.mode` `"operation_scope"` / `"defined_scope"`) and the three config sections
+`scope_source`, `defined_scope` and `scope` are one `scope` section with one table (`path_segments.scope`) and
+one reader (`inputs.read_scope_source`). The user defines the scope in one place: `time` (`daily` / `weekly`),
+`grain` (`product` / `product_store`) and a `columns` map (`None` = column not used). Roll-up to the family main,
+`active_only`, blocked scope and the in-stock client rules apply the same way to any source; a rule that needs a
+column that is not configured raises a `ValueError` at `materialize()` (`dc_solution_id`, blocked scope, a
+`count_start` other than `first_daily_row` and `instock_main_eligible_only` need `columns.start`; weekly with a
+start column is invalid, like operation scope with `product_store_week` was). The settings `SCOPE_SOURCE`,
+`DEFINED_SCOPE`, `USE_HYBRID_SCOPE`, `RUN_SCOPE_DIFF` and `PATH_DEFINED_SCOPE` are one `SCOPE` dict.
+tbretail resolves to the same behaviour as before (solution 21, open on the run date, family mains, earliest
+start, active only, DC solution 22, blocked days, in-stock client rules); `config.py` resolves to the same
+distinct pairs x every window week.
+
+| Old | New |
+|---|---|
+| `scope_source.mode = "operation_scope"` | `scope.time = "daily"` with `scope.columns` `start` / `end` / `solution` / `run_date` set (tbretail: `product_id`, `location_id`, `start_date`, `end_date`, `solution_id`, `run_date`) |
+| `scope_source.mode = "defined_scope"`, grain `product` / `product_store` | `scope.time = "daily"`, `scope.grain` the same, `columns.start` / `end` / `solution` / `run_date` = `None` |
+| `defined_scope.grain = "product_store_week"` | `scope.time = "weekly"`, `scope.grain = "product_store"` |
+| `defined_scope.product_col` / `store_col` | `scope.columns.product` / `store` |
+| `defined_scope.date_col` / `year_col` / `week_col` | `scope.columns.date` / `year` / `week` (weekly only; `None` under daily) |
+| `defined_scope.backfill_leading_gap` | `scope.backfill_leading_gap` (weekly only) |
+| `scope_source.solution_id` / `dc_solution_id` / `run_date` | `scope.solution_id` / `dc_solution_id` / `run_date` |
+| `scope_source.roll_to_family_main` / `active_only` | `scope.roll_to_family_main` / `active_only` |
+| `item_family_rollup.defined_scope` (applied to a defined-scope table only; the scope source's `roll_to_family_main` / `active_only` were ignored there) | `scope.roll_to_family_main`; `config.py` sets it and `active_only` to `False` |
+| `scope_source.instock_main_eligible_only` / `instock_exclude_unsuperseded_sizes` | `scope.instock_main_eligible_only` / `instock_exclude_unsuperseded_sizes` |
+| `scope.use_hybrid_scope` / `run_scope_diff` | unchanged keys; settings `USE_HYBRID_SCOPE` / `RUN_SCOPE_DIFF` are `SCOPE["use_hybrid_scope"]` / `SCOPE["run_scope_diff"]` |
+| `path_segments.defined_scope` / `path_segments.scope` | `path_segments.scope` (one path) |
+| `input_filters.defined_scope` | `input_filters.scope` (applies to the DC scope read as well) |
+| env `KPI_ITEM_FAMILY_ROLLUP_DEFINED_SCOPE` | `KPI_SCOPE_ROLL_TO_FAMILY_MAIN` |
+| settings `SCOPE_SOURCE`, `DEFINED_SCOPE`, `USE_HYBRID_SCOPE`, `RUN_SCOPE_DIFF`, `PATH_DEFINED_SCOPE`, `PATH_SCOPE` | `SCOPE` (its `path` is the one scope path; `PATH_SCOPE` stays) |
+| `ctx.defined_scope_keys` / `ctx.operation_scope_pairs` / `ctx.defined_frames` | `ctx.scope_table_keys` / `ctx.scope_pairs` / `ctx.scope_frames` |
+| `build_defined_scope`, `read_defined_scope_source`, `read_operation_scope_source` | `build_scope`, `read_scope_source` (`scope._scope_run_date` is `inputs.scope_run_date`) |
+| `scope_origin` value `"defined"` | `"scope"` |
+| `scope_diff` column `defined` | `scope` (renames a column of the saved `scope_diff` Delta table: refresh that table, or drop it, before an incremental save) |
+| HTML header scope mode `Operation scope` / `Defined only` | `Scope table only` (`Hybrid` unchanged) |
+
+New (only reachable by configuring it): `scope.time = "weekly"` with `scope.grain = "product"`, and
+`roll_to_family_main` / `active_only` on a weekly or start-less scope. The empty-scope check
+(wrong `solution_id` or `run_date`) now applies whenever `columns.solution` or `columns.run_date` is set.
+
 > The entries below were written as each feature landed; later in this release the keys were merged.
 > Read `inventory_git` / `instock_daily.git_date_shift_days` / `dc_instock.git_date_shift_days` /
 > `item_family_rollup.goods_in_transit` as `goods_in_transit.*`, `instock_daily` / `instock_source` as

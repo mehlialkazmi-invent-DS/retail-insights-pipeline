@@ -23,8 +23,8 @@ from kpi_pipeline.scope import (
     build_blocked_days,
     build_dc_blocked_days,
     build_dc_scope,
-    build_defined_scope,
     build_hybrid_scope,
+    build_scope,
     scope_summary_by_origin,
 )
 from kpi_pipeline.scope_debug import scope_universe_counts
@@ -113,17 +113,16 @@ class KPIRunner:
             s["USE_FISCAL_CALENDAR"],
         )
         print("RUN_MODE:", s.get("RUN_MODE", "full"))
-        print("SCOPE MODE:", "hybrid" if s["USE_HYBRID_SCOPE"] else "defined only")
-        print("RUN_SCOPE_DIFF:", s.get("RUN_SCOPE_DIFF", False))
-        if s["USE_HYBRID_SCOPE"] or s.get("RUN_SCOPE_DIFF", False):
+        print("SCOPE MODE:", "hybrid" if s["SCOPE"]["use_hybrid_scope"] else "scope table only")
+        print("RUN_SCOPE_DIFF:", s["SCOPE"]["run_scope_diff"])
+        if s["SCOPE"]["use_hybrid_scope"] or s["SCOPE"]["run_scope_diff"]:
             print(
                 "score scope: p",
                 int(s["SCOPE_MIN_PERCENTILE"] * 100),
                 "AND rule; skip filter when pair weeks <=",
                 s["SCOPE_MIN_WEEKS_FOR_FILTER"],
             )
-        print("SCOPE SOURCE:", s["SCOPE_SOURCE"])
-        print("DEFINED_SCOPE path:", s["DEFINED_SCOPE"]["path"])
+        print("SCOPE:", s["SCOPE"])
         print("BLOCKED_SCOPE:", s["BLOCKED_SCOPE"])
         print("INSTOCK:", s["INSTOCK_METHOD"], "|", s["INSTOCK_DAILY"])
         print("GOODS_IN_TRANSIT:", s["GOODS_IN_TRANSIT"])
@@ -225,7 +224,7 @@ class KPIRunner:
         build_fiscal_and_products(self.ctx)
 
     def build_scopes(self) -> None:
-        build_defined_scope(self.ctx)
+        build_scope(self.ctx)
         build_blocked_days(self.ctx)
         build_dc_scope(self.ctx)
         build_dc_blocked_days(self.ctx)
@@ -268,16 +267,16 @@ class KPIRunner:
             _show(f"Comparable {kind} — overall (latest link)", getattr(self.ctx, COMPARABLE_KIND_ATTRS[kind][2]))
 
     def build_scope_comparison(self) -> None:
-        if not self.settings.get("RUN_SCOPE_DIFF", False):
+        if not self.settings["SCOPE"]["run_scope_diff"]:
             self.ctx.scope_diff = None
             print("scope diff: skipped (scope.run_scope_diff=False)")
             return
         if self.ctx.score_only_scope_keys is None:
             raise RuntimeError(
                 "scope.run_scope_diff=True but score scope was not computed — "
-                "check build_hybrid_scope and RUN_SCOPE_DIFF settings."
+                "check build_hybrid_scope and the scope.run_scope_diff setting."
             )
-        self.ctx.defined_frames = build_pipeline_frames(self.ctx, self.ctx.defined_scope_keys)
+        self.ctx.scope_frames = build_pipeline_frames(self.ctx, self.ctx.scope_table_keys)
         self.ctx.score_frames = build_pipeline_frames(self.ctx, self.ctx.score_only_scope_keys)
         build_scope_diff(self.ctx)
 

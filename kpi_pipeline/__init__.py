@@ -8,8 +8,8 @@ from kpi_pipeline.runner import KPIRunner
 from kpi_pipeline.inputs import (
     preview_input_table,
     read_daily_data_source,
-    read_defined_scope_source,
     read_lost_sales_source,
+    read_scope_source,
 )
 
 __all__ = [
@@ -20,7 +20,7 @@ __all__ = [
     "load_saved_outputs",
     "preview_input_table",
     "read_daily_data_source",
-    "read_defined_scope_source",
     "read_lost_sales_source",
+    "read_scope_source",
     "slice_comparison_view",
 ]

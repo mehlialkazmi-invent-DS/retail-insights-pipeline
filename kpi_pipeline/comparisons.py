@@ -1,4 +1,4 @@
-"""YoY / YTD comparison tables (per root x cut) and the defined-vs-score scope diff.
+"""YoY / YTD comparison tables (per root x cut) and the scope-vs-score scope diff.
 
 YoY compares the latest two annual periods; YTD compares each year's YTD window with the prior year's,
 chained across every consecutive year pair. Both read kpi_long's annual / ytd rows, so they follow
@@ -327,7 +327,7 @@ def slice_comparison_view(comparison_df: pd.DataFrame, dimension: str, root: str
 
 
 def build_scope_diff(ctx: KPIContext) -> None:
-    """Annual SCOPE_DIFF_METRICS under defined-only vs score-only scope (a hybrid sanity check), over the
+    """Annual SCOPE_DIFF_METRICS under scope-table-only vs score-only scope (a hybrid sanity check), over the
     Annual tab's years."""
     from pyspark.sql import functions as F
 
@@ -335,27 +335,27 @@ def build_scope_diff(ctx: KPIContext) -> None:
     from kpi_pipeline.metrics import build_kpi_table
 
     scope_diff_metrics = ctx.settings["SCOPE_DIFF_METRICS"]
-    defined_annual = build_kpi_table(
-        ctx, _period_frames(ctx, ctx.defined_frames, "annual"), "Year", [], F.lit(True)
+    scope_annual = build_kpi_table(
+        ctx, _period_frames(ctx, ctx.scope_frames, "annual"), "Year", [], F.lit(True)
     )[["Year"] + scope_diff_metrics]
     score_annual = build_kpi_table(
         ctx, _period_frames(ctx, ctx.score_frames, "annual"), "Year", [], F.lit(True)
     )[["Year"] + scope_diff_metrics]
-    merged = defined_annual.merge(score_annual, on="Year", suffixes=("_defined", "_score"))
+    merged = scope_annual.merge(score_annual, on="Year", suffixes=("_scope", "_score"))
     records = []
     for _, r in merged.iterrows():
         for m in scope_diff_metrics:
-            dv, sv = r[f"{m}_defined"], r[f"{m}_score"]
+            dv, sv = r[f"{m}_scope"], r[f"{m}_score"]
             records.append(
                 {
                     "Year": int(r["Year"]),
                     "metric": m,
-                    "defined": dv,
+                    "scope": dv,
                     "score": sv,
                     "abs_diff": (sv - dv) if pd.notna(sv) and pd.notna(dv) else None,
                     "pct_diff": ((sv - dv) / abs(dv) * 100) if pd.notna(sv) and pd.notna(dv) and dv != 0 else None,
                 }
             )
     ctx.scope_diff = pd.DataFrame(
-        records, columns=["Year", "metric", "defined", "score", "abs_diff", "pct_diff"]
+        records, columns=["Year", "metric", "scope", "score", "abs_diff", "pct_diff"]
     ).sort_values(["Year", "metric"]).reset_index(drop=True)

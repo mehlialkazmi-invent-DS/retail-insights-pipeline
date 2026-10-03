@@ -54,19 +54,6 @@ def apply_input_filters(df: DataFrame, expressions: List[str], source_name: str,
     return df
 
 
-def read_defined_scope_source(
-    spark: SparkSession, settings: Dict[str, Any], quiet: bool = False
-) -> DataFrame:
-    path = settings["DEFINED_SCOPE"]["path"]
-    filters = _input_filters(settings, "defined_scope")
-    if not quiet:
-        print(f"reading defined_scope: {path}")
-    raw = spark.read.format("delta").load(path)
-    if filters and not quiet:
-        print(f"defined_scope filters ({len(filters)}):")
-    return apply_input_filters(raw, filters, "defined_scope", quiet=quiet)
-
-
 def _print_date_range(df: DataFrame, date_col: str, label: str) -> None:
     """Print the date span present in a main input source (on every run, whatever ``quiet`` says)."""
     parsed = F.to_date(F.col(date_col))
@@ -332,25 +319,62 @@ def get_item_family_raw(ctx) -> DataFrame:
     return ctx.item_family_raw
 
 
-def read_operation_scope_source(
-    spark: SparkSession, settings: Dict[str, Any], run_date, solution_ids: List[int], location_col: str
+def scope_run_date(settings: Dict[str, Any]) -> datetime.date:
+    """scope.run_date, or the latest Sunday on or before today when unset."""
+    configured = settings["SCOPE"]["run_date"]
+    if configured is not None:
+        return configured
+    today = datetime.date.today()
+    return today - datetime.timedelta(days=(today.weekday() + 1) % 7)
+
+
+def read_scope_source(
+    spark: SparkSession,
+    settings: Dict[str, Any],
+    solution_ids: Optional[List[int]],
+    location_col: str,
+    quiet: bool = False,
 ) -> DataFrame:
-    """operation/scope rows of the solution(s) for one run_date still open on it (end_date null or >=
-    run_date), as (product_id, <location_col>, start_date); location_id is the store or the warehouse.
-    Fails when there is no row: a wrong solution_id or run_date must not give an empty report.
+    """The scope table's rows, renamed to product_id, <location_col> (the store or the warehouse), start_date
+    (columns.start, as a date), and for time="weekly" scope_date (columns.date, as a date) or Year / Week
+    (columns.year / columns.week, as ints); only the configured columns are kept.
+
+    Rows are limited to solution_ids (columns.solution), to the scope run_date (columns.run_date), and to
+    those still open on it (columns.end null or >= run_date); input_filters.scope applies on top. Fails when
+    a solution / run_date filter leaves no row: a wrong solution_id or run_date must not give an empty report.
     """
-    path = settings["PATH_SCOPE"]
-    print(f"reading operation scope: {path} (solution_id in {solution_ids}, run_date={run_date})")
-    rows = (
-        spark.read.format("delta").load(path)
-        .filter(F.col("solution_id").isin(solution_ids) & (F.col("run_date") == F.lit(run_date)))
-        .filter(F.col("end_date").isNull() | (F.col("end_date") >= F.lit(run_date)))
-        .select("product_id", F.col("location_id").alias(location_col), F.to_date("start_date").alias("start_date"))
-    )
-    if rows.limit(1).count() == 0:
+    cfg = settings["SCOPE"]
+    cols = cfg["columns"]
+    path = cfg["path"]
+    filters = _input_filters(settings, "scope")
+    run_date = scope_run_date(settings)
+    if not quiet:
+        detail = f" (solution_id in {solution_ids}, run_date={run_date})" if cols["solution"] or cols["run_date"] else ""
+        print(f"reading scope: {path}{detail}")
+        if filters:
+            print(f"scope filters ({len(filters)}):")
+    rows = apply_input_filters(spark.read.format("delta").load(path), filters, "scope", quiet=quiet)
+    if cols["solution"]:
+        rows = rows.filter(F.col(cols["solution"]).isin(solution_ids))
+    if cols["run_date"]:
+        rows = rows.filter(F.col(cols["run_date"]) == F.lit(run_date))
+    if cols["end"]:
+        rows = rows.filter(F.col(cols["end"]).isNull() | (F.col(cols["end"]) >= F.lit(run_date)))
+    select = [F.col(cols["product"]).alias("product_id")]
+    if cols["store"]:
+        select.append(F.col(cols["store"]).alias(location_col))
+    if cols["start"]:
+        select.append(F.to_date(cols["start"]).alias("start_date"))
+    if cfg["time"] == "weekly":
+        if cols["date"]:
+            select.append(F.to_date(cols["date"]).alias("scope_date"))
+        else:
+            select += [F.col(cols["year"]).cast("int").alias("Year"), F.col(cols["week"]).cast("int").alias("Week")]
+    rows = rows.select(*select)
+    if (cols["solution"] or cols["run_date"]) and rows.limit(1).count() == 0:
         raise ValueError(
-            f"No operation scope rows for solution_id in {solution_ids} run_date={run_date} at {path}; "
-            "check the solution_id setting and scope_source.run_date."
+            f"No scope rows for solution_id in {solution_ids} run_date={run_date} at {path}; "
+            "check scope.solution_id and scope.run_date."
         )
     return rows
 

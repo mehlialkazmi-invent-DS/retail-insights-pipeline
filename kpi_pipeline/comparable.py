@@ -11,7 +11,7 @@ qualifying year of that kind, then compares each consecutive-year link within th
           (_complete_period_years); a pair must be present in Q of each of them.
   half    like quarter, per half number (H1 = Q1-Q2, H2 = Q3-Q4).
 
-The universe's grain is comparable_pairs.grain: "product_store" (default, under every defined_scope.grain,
+The universe's grain is comparable_pairs.grain: "product_store" (default, under every scope.grain,
 since scoped_daily is store-level anyway) or "product" (every store of a qualifying product; store churn
 is not isolated). Frames without store_id are restricted to the universe's products; dc_daily / dc_inst
 each get their own (product_id, warehouse_id) universe (_restrict_frames).

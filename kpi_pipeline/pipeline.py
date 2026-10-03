@@ -376,7 +376,7 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
     """In-stock frame of instock.method="daily": per scope pair x fiscal week, stocked_pairs (in-stock days)
     and available_days (counted store-days), the shape of the weekly inst_data, from noob/daily-data.
 
-    Pairs: the scope pairs after instock.daily.input_filters and the scope_source in-stock client rules.
+    Pairs: the scope pairs after instock.daily.input_filters and the scope in-stock client rules.
     Each pair counts from its count start (instock.daily.count_start: "first_daily_row" from history_start,
     "scope_start", or the "earliest" of the two), clipped to the window start, to the window end;
     require_daily_data drops pairs without a daily row. A day without a daily row counts as out of stock.
@@ -404,11 +404,11 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
     fw = broadcast(_fiscal_week_parts(ctx))
 
     pairs = apply_input_filters(scope_pairs, cfg["input_filters"], "instock.daily.input_filters")
-    if s["SCOPE_SOURCE"]["instock_main_eligible_only"]:
+    if s["SCOPE"]["instock_main_eligible_only"]:
         # Client rule: stores where only a sub item (not the main) is eligible leave in-stock only.
-        sub_only = ctx.operation_scope_pairs.filter(~F.col("main_eligible")).select(*pair_keys)
+        sub_only = ctx.scope_pairs.filter(~F.col("main_eligible")).select(*pair_keys)
         pairs = pairs.join(sub_only, on=pair_keys, how="left_anti")
-    if s["SCOPE_SOURCE"]["instock_exclude_unsuperseded_sizes"]:
+    if s["SCOPE"]["instock_exclude_unsuperseded_sizes"]:
         # Client rule: sizes of a superseded class color outside the supersession (likely NGF) leave in-stock only.
         pairs = pairs.join(broadcast(_unsuperseded_sizes(ctx)), on="product_id", how="left_anti")
     daily = get_instock_daily_raw(ctx).join(pairs, on=pair_keys, how="left_semi")
@@ -425,9 +425,9 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
 
     first_day = daily.groupBy(*pair_keys).agg(F.min("date").alias("first_date"))
     pair_start = pairs.join(first_day, on=pair_keys, how="left")
-    if ctx.operation_scope_pairs is not None:
+    if ctx.scope_pairs is not None:
         pair_start = pair_start.join(
-            ctx.operation_scope_pairs.select(*pair_keys, "scope_start"), on=pair_keys, how="left"
+            ctx.scope_pairs.select(*pair_keys, "scope_start"), on=pair_keys, how="left"
         )
     else:
         pair_start = pair_start.withColumn("scope_start", F.lit(None).cast("date"))
@@ -519,7 +519,7 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
 
 def _unsuperseded_sizes(ctx: KPIContext) -> DataFrame:
     """product_ids in no item_family row whose class color (products.option_code) has a size in item_family:
-    the sizes left out of a superseded class color's supersession (scope_source.instock_exclude_unsuperseded_sizes)."""
+    the sizes left out of a superseded class color's supersession (scope.instock_exclude_unsuperseded_sizes)."""
     family_ids = get_item_family_raw(ctx).select("product_id").distinct()
     products = ctx.spark.read.format("delta").load(ctx.settings["PATH_PRODUCTS"]).select("product_id", "option_code")
     superseded_class_colors = products.join(family_ids, on="product_id", how="inner").select("option_code").distinct()
@@ -602,7 +602,7 @@ def _get_inventory_warehouse_parent_rolled(ctx: KPIContext) -> DataFrame:
 
 
 def _dc_scope_keys(ctx: KPIContext) -> DataFrame:
-    """(product_id, warehouse_id) of the DC (network) scope, scope_source.dc_solution_id."""
+    """(product_id, warehouse_id) of the DC (network) scope, scope.dc_solution_id."""
     return ctx.dc_scope_pairs.select("product_id", "warehouse_id")
 
 
@@ -747,15 +747,15 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
     frames and lost sales's sales denominator drop them at build time when in_stock_rate /
     dc_in_stock_rate / lost_sales_pct are in blocked_scope.metrics.
 
-    has_store comes from ctx.scope_keys (defined_scope.grain); a scope frame without the store_id it
+    has_store comes from ctx.scope_keys (scope.grain); a scope frame without the store_id it
     expects fails here rather than as an unresolved column later.
     """
     scope_keys = ctx.scope_keys
     has_store = "store_id" in scope_keys
     if has_store and "store_id" not in scope_in.columns:
         raise ValueError(
-            "ctx.scope_keys expects store_id (defined_scope.grain is product_store or "
-            "product_store_week) but the scope frame passed to build_pipeline_frames doesn't "
+            "ctx.scope_keys expects store_id (scope.grain is product_store) "
+            "but the scope frame passed to build_pipeline_frames doesn't "
             f"have it -- columns: {sorted(scope_in.columns)}"
         )
     scope_core = scope_in.select(*scope_keys).distinct().cache()

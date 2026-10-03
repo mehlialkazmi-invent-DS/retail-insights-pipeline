@@ -4,7 +4,7 @@
 
 # Retail Insights Pipeline
 
-PySpark toolkit for weekly, monthly, quarterly, annual, and YTD retail KPIs with configurable scope (defined-only or hybrid with score backfill), comparable (like-for-like) pair analysis, and incremental Delta output saves.
+PySpark toolkit for weekly, monthly, quarterly, annual, and YTD retail KPIs with configurable scope (one scope table, alone or hybrid with score backfill), comparable (like-for-like) pair analysis, and incremental Delta output saves.
 
 Designed to run on **Databricks** against the customer Delta datastore (`/mnt/invent-{customer}-datastore`).
 
@@ -14,7 +14,7 @@ Designed to run on **Databricks** against the customer Delta datastore (`/mnt/in
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `kpi_long`                              | One tidy table: `period_type` (annual / **ytd** / quarter / half / monthly / weekly; `half` only with `fiscal_calendar.half_periods`), `period`, `root`, `dimension`, `dimension_value`, plus all configured metrics. `root` is `"overall"` plus one per [dimension_source root](#roots-and-cuts-report-structure); `dimension`/`dimension_value` is the cut within that root. Filter it to reproduce any root/cut/period panel. |
 | `comparison_yoy / ytd`                  | Prior vs current period with formatted display columns, per root × cut. YoY = last two annual periods; YTD = the **same** elapsed window **across years**, chained across every consecutive year pair (see [Selecting which comparisons to run](#selecting-which-comparisons-to-run)). With `report_end = "latest_day"` annual periods are complete fiscal years only and YTD is the same fiscal day of every year ([Latest-day report end](#latest-day-report-end-report_end--latest_day)). No QoQ/MoM/WoW table; use the Quarter/Half/Monthly/Weekly `kpi_long` rows for trends. Recomputed from the full merged kpi_long on incremental saves. |
-| `scope_diff`                            | Side-by-side annual KPIs for **defined-only** vs **score-only** scope (sanity check, only with `scope.run_scope_diff=True`), computed on the defined and score scopes. Its years are the Annual tab's. |
+| `scope_diff`                            | Side-by-side annual KPIs for **scope-table-only** vs **score-only** scope (sanity check, only with `scope.run_scope_diff=True`), computed on the scope-table and score scopes; its columns are `Year, metric, scope, score, abs_diff, pct_diff`. Its years are the Annual tab's. |
 | `comparable_kpi_long` / `comparable_comparison_{ytd,yoy,quarter}` | Like-for-like metrics over only the pairs present in every qualifying year, per root × cut. Gated on `comparable_pairs.enabled=True`; kinds via `comparable_pairs.kinds` (default `["ytd"]`). See [Comparable pairs](#comparable-pairs-like-for-like-ytd--yoy--quarter--half). |
 | **HTML report**                         | Standalone offline tabbed HTML (outer root tab when more than one root), Metric Details, client/period info panel ([HTML report](#html-report)). |
 
@@ -35,14 +35,14 @@ retail-insights-pipeline/
 ├── main.ipynb          # Databricks runner — compute, preview save plan, write, HTML report
 └── kpi_pipeline/       # Pipeline logic (imported by main.ipynb)
     ├── runner.py       # KPIRunner orchestrates the full run + HTML report generation
-    ├── scope.py        # Defined scope, operation scope, hybrid/score scope, blocked scope
+    ├── scope.py        # Scope table, hybrid/score scope, blocked scope
     ├── scope_debug.py  # Pre-flight distinct product/store counts overall + per slice
     ├── fiscal.py       # Fiscal calendar + product attributes / slice dims
     ├── inputs.py       # Cached Delta reads (daily_data, lost_sales) + input_filters
     ├── pipeline.py     # Scoped daily, lost sales, instock input frames per scope
     ├── metrics.py      # KPI aggregation (sales, WOS, instock, lost sales %, …)
     ├── kpi_long.py     # Long-format output across periods and slices
-    ├── comparisons.py  # YoY / YTD + defined vs score diff
+    ├── comparisons.py  # YoY / YTD + scope vs score diff
     ├── comparable.py   # Gated like-for-like YTD comparison (all-years pair restriction)
     ├── io.py           # Incremental Delta saves + save plan preview
     ├── html_report.py  # Standalone HTML renderer (offline, tabbed report)
@@ -51,14 +51,14 @@ retail-insights-pipeline/
 
 ## Quick start (Databricks)
 
-**`config.py` is a generic reference template, not any customer's deployed config.** Every optional feature ships disabled with a placeholder; copy it per client and replace `customer`, every `path_segments` entry, `defined_scope`'s column names and the business rules (dimension sources, population filters). tbretail's deployed config is `./tbretail_config.py`; the copies one directory up (`../tbretail_config.py`, `../tbretail_config_2.py`) are older versions and must be replaced by it before a run. It reads `lost_sales_source` from a customer-specific reporting table instead of `lost_sales_ensemble`, uses `instock.method = "daily"`, and has real `dimension_sources` (see [tbretail setup](#tbretail-setup)). Every config keeps **all** sections and keys, switched off when unused.
+**`config.py` is a generic reference template, not any customer's deployed config.** Every optional feature ships disabled with a placeholder; copy it per client and replace `customer`, every `path_segments` entry, `scope.columns` and the business rules (dimension sources, population filters). tbretail's deployed config is `./tbretail_config.py`; the copies one directory up (`../tbretail_config.py`, `../tbretail_config_2.py`) are older versions and must be replaced by it before a run. It reads `lost_sales_source` from a customer-specific reporting table instead of `lost_sales_ensemble`, uses `instock.method = "daily"`, and has real `dimension_sources` (see [tbretail setup](#tbretail-setup)). Every config keeps **all** sections and keys, switched off when unused.
 
 1. **Upload** `main.ipynb`, `config.py` and the entire `kpi_pipeline/` folder to one Databricks workspace folder.
 2. **Edit** `config.py` → `CONFIG` (at minimum):
   - `reporting_window.as_of_date` — anchor date; `reporting_window.run_min_date` — optional narrow start (Sunday-aligned)
-  - `scope.use_hybrid_scope` — `False` (default) for week-agnostic defined scope, `True` for hybrid (covered weeks + score backfill on missing weeks)
-  - `defined_scope` — column mapping for your scope Delta table; `path_segments.defined_scope` — its path segments under the datastore bucket
-  - `input_filters` — optional Spark SQL filters on defined scope, lost sales, daily data
+  - `scope.use_hybrid_scope` — `False` (default) for the scope table alone, `True` for hybrid (covered weeks + score backfill on missing weeks)
+  - `scope` — `time`, `grain` and `columns` (the column mapping) for your scope Delta table; `path_segments.scope` — its path segments under the datastore bucket
+  - `input_filters` — optional Spark SQL filters on the scope table, lost sales, daily data
   - `slices.dimensions` — product-master columns to cut by (e.g. `brand`), applied within every root
   - `dimension_sources` — optional: each column becomes a root, e.g. NVROUT from `extended_product` (see [Dimension sources → roots](#dimension-sources--roots-population-tabs-from-other-tables), [Roots and cuts](#roots-and-cuts-report-structure))
   - `instock.method`, `blocked_scope.metrics`, `goods_in_transit` — all gated, see [`instock`](#instock), [`blocked_scope`](#blocked_scope), [`goods_in_transit`](#goods_in_transit)
@@ -74,33 +74,41 @@ retail-insights-pipeline/
 
 ## Scope modes
 
-`defined_scope.grain` controls how the scope table defines KPI membership — three values:
+One `scope` section defines the scope, from one table (`path_segments.scope`), whatever its origin (a client-built table or the platform `operation/scope`). Two settings shape it:
 
-| `grain` | Universe | Week behaviour |
-| ------- | -------- | -------------- |
-| `"product"` | distinct `product_id` | store- and week-agnostic: every store, every window week, for each in-scope product |
-| `"product_store"` (default) | distinct `(product_id, store_id)` | week-agnostic: every window week, for each in-scope pair |
-| `"product_store_week"` | the scope table's own `(product_id, store_id, week)` rows | honoured (strict) — weeks come from `date_col` (or `year_col`/`week_col`) |
+`scope.grain` decides what a scope row identifies:
 
-The two week-agnostic grains (`product`, `product_store`) flatten scope down to ids: a pair (or product) scoped in **any** period is scoped for **every** week in the report window. This keeps a pair that has **dropped out of the current-year scope weeks yet still transacts** from being silently dropped and undercounted. `product_store_week` is stricter: only the scope table's own weeks count.
+| `grain` | Universe |
+| ------- | -------- |
+| `"product"` | distinct `product_id`: store-agnostic, every store of an in-scope product |
+| `"product_store"` (default) | distinct `(product_id, store_id)` |
 
-`scope_source.mode = "operation_scope"` swaps the scope table for the platform scope (see [`scope_source`](#scope_source)); the grains behave the same.
+`scope.time` decides how the rows relate to weeks:
 
-Downstream always consumes `ctx.scope_keys` — `[product_id, Year, Week]` for `"product"`, `[product_id, store_id, Year, Week]` for `"product_store"`/`"product_store_week"`.
+| `time` | Week behaviour |
+| ------ | -------------- |
+| `"daily"` (default) | week-agnostic: a pair (or product) scoped in **any** row counts on **every** day / week of the report window. With `columns.start` / `columns.end` the rows still open on the run date are used and a pair's `scope_start` is its earliest start |
+| `"weekly"` | the scope table's own `(product[, store], week)` rows (strict): weeks come from `columns.date` (or `columns.year` + `columns.week`) |
 
-### Defined scope only (default: `use_hybrid_scope = False`)
+The `daily` time flattens scope down to ids, which keeps a pair that has **dropped out of the current-year scope rows yet still transacts** from being silently dropped and undercounted. `weekly` is stricter: only the scope table's own weeks count.
 
-Final scope = `defined_scope_keys` as built at the configured grain. For `product`/`product_store` that is every scope pair (or product) **× every week in the report window**; the scope table's own weeks are ignored (`date_col`/`year_col`/`week_col` are not read). For `product_store_week`, only the scope table's own (product, store, week) rows survive, window-filtered. Score scope is **not** computed unless `scope.run_scope_diff=True`.
+Roll-up to the family main, `active_only`, blocked scope and the in-stock client rules apply the same way to any source; a rule that needs a column that is not configured fails in `materialize()` (see [`scope`](#scope)).
+
+Downstream always consumes `ctx.scope_keys`: `[product_id, Year, Week]` for `"product"`, `[product_id, store_id, Year, Week]` for `"product_store"`.
+
+### Scope table only (default: `use_hybrid_scope = False`)
+
+Final scope = `ctx.scope_table_keys` as built at the configured grain and time. For `daily` that is every scope pair (or product) **x every week in the report window**; for `weekly`, only the scope table's own (product[, store], week) rows survive, window-filtered. Score scope is **not** computed unless `scope.run_scope_diff=True`.
 
 ### Hybrid scope (`use_hybrid_scope = True`)
 
-Hybrid = defined scope (at the configured grain) **+ score backfill on the window weeks the defined scope does not cover**:
+Hybrid = scope table (at the configured grain and time) **+ score backfill on the window weeks the scope table does not cover**:
 
-1. **Covered weeks** — fiscal weeks in the window present in `defined_scope_keys`.
-2. **Missing weeks** — fiscal weeks in the window with no rows in `defined_scope_keys`. These are backfilled from **score scope** (`scope_origin=score`): computed once over the **full** window, each `(product_id, store_id)` keeps the weeks whose weekly sales and **last available in-week inventory** clear a per-pair percentile threshold (**all stores included**; scope membership is store-agnostic), restricted to the missing weeks.
-3. **Hybrid union** — defined rows (`scope_origin=defined`) ∪ missing-week backfill rows (`scope_origin=score`).
+1. **Covered weeks**: fiscal weeks in the window present in `scope_table_keys`.
+2. **Missing weeks**: fiscal weeks in the window with no rows in `scope_table_keys`. These are backfilled from **score scope** (`scope_origin=score`): computed once over the **full** window, each `(product_id, store_id)` keeps the weeks whose weekly sales and **last available in-week inventory** clear a per-pair percentile threshold (**all stores included**; scope membership is store-agnostic), restricted to the missing weeks.
+3. **Hybrid union**: scope-table rows (`scope_origin=scope`) U missing-week backfill rows (`scope_origin=score`).
 
-For the week-agnostic grains the defined scope already covers **every** window week, so the backfill is a **no-op**. Hybrid backfill only matters for `product_store_week`.
+For `time="daily"` the scope table already covers **every** window week, so the backfill is a **no-op**. Hybrid backfill only matters for `time="weekly"`.
 
 ### Scope debug (product/store counts before the full run)
 
@@ -192,7 +200,7 @@ To exclude a list but keep the rest (a "not going forward" list leaves everyone 
 
 | Need | Use | Effect |
 | ---- | --- | ------ |
-| Which (product, store, week) rows enter the KPIs at all | The scope source (`defined_scope` table or `operation/scope`) | Scope **membership** comes only from there |
+| Which (product, store, week) rows enter the KPIs at all | The scope table (`path_segments.scope`) | Scope **membership** comes only from there |
 | A named, fully-broken-out population tab (NVROUT vs COMP) | `dimension_sources[].root_values` | Adds a **root** |
 | Break any root's population out by a dimension (brand, SMW) | `slices` | Adds a **cut**, applied within every root |
 | Narrow ONE metric's own population, inside every root/cut | `metrics.population_filters` | Restricts that **metric only** (see [Metrics](#metrics)) |
@@ -212,7 +220,7 @@ To leave a labelled group out of one metric, use `metrics.population_filters`; t
 
 - `yoy`'s window-boundary years can be partial, as on the regular Annual/YoY tab, when `run_min_date`/`as_of_date` don't land on Jan 1 / Dec 31. Under `latest_day` only complete years are compared ([Latest-day report end](#latest-day-report-end-report_end--latest_day)).
 - `quarter`/`half` never compare a partial period to a full one: `REPORT_END_DATE` is never quarter-aligned, so the latest in-progress quarter is excluded. A year counts only if that quarter's fiscal-calendar weeks fall entirely inside `[EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE]` (`comparable.py`'s `_complete_period_years`; `ytd` uses `fiscal.complete_fiscal_periods` at month grain, see [Complete periods only](#complete-periods-only-quarter-half--monthly-trend-tabs)).
-- The universe is pair-level under every `defined_scope.grain`, including `"product"`, because `scoped_daily` carries `store_id` from `noob/daily-data`.
+- The universe is pair-level under every `scope.grain`, including `"product"`, because `scoped_daily` carries `store_id` from `noob/daily-data`.
 
 ```python
 "comparable_pairs": {
@@ -223,7 +231,7 @@ To leave a labelled group out of one metric, use `metrics.population_filters`; t
 },
 ```
 
-- **`grain`** (independent of `defined_scope.grain`): `"product_store"` (default) = distinct pairs present in every qualifying year; `"product"` = distinct `product_id`s, keeping every store of a qualifying product. `"product"` does **not** isolate store-estate churn (a product that opened/closed a store still moves the metrics); use it only when the pair intersection is too small. It affects only the store-side frames; `dc_daily`/`dc_inst` keep their own `(product_id, warehouse_id)` universe.
+- **`grain`** (independent of `scope.grain`): `"product_store"` (default) = distinct pairs present in every qualifying year; `"product"` = distinct `product_id`s, keeping every store of a qualifying product. `"product"` does **not** isolate store-estate churn (a product that opened/closed a store still moves the metrics); use it only when the pair intersection is too small. It affects only the store-side frames; `dc_daily`/`dc_inst` keep their own `(product_id, warehouse_id)` universe.
 - **`pair_days`** (`"unblocked"` default | `"all"`): which days make a pair "present" in a year. `"unblocked"` counts only real daily-data rows outside blocked days (and DC rows outside DC blocked days); `"all"` counts blocked days too. Goods-in-transit-only days never count. Each metric then applies its own `blocked_scope.metrics` gate. tbretail: `"unblocked"`.
 
 **One fixed universe per kind, shared by every link.** For `ytd`/`yoy` it is the intersection across **every** qualifying year, computed once: with 2024/2025/2026 only pairs present in all three count, so a pair in 2025 and 2026 but not 2024 is excluded from every link. For `quarter`/`half` it is built **per number independently**. The same year therefore carries the same value in every link it appears in. The universe uses **real** daily-data / `inventory_warehouse` rows only: goods-in-transit-only days ([`goods_in_transit`](#goods_in_transit)) and blocked days ([`blocked_scope`](#blocked_scope), whatever `metrics` says) never make a pair present (their rows are still restricted to the common pairs afterwards). All metric frames are restricted before metrics are computed, for Overall and every slice (slice dimensions are product attributes, so one overall intersection equals per-slice ones). The key is chosen per frame:
@@ -245,13 +253,13 @@ A kind's comparison needs at least 2 qualifying years; on a narrow window (singl
 
 ## Input previews and filters
 
-The notebook reads **defined scope**, **lost sales**, and **daily data** separately before the pipeline run so you can inspect them. Config filters are applied to both previews and the pipeline.
+The notebook reads the **scope table**, **lost sales**, and **daily data** separately before the pipeline run so you can inspect them. Config filters are applied to both previews and the pipeline.
 
 ### `input_filters`
 
 ```python
 "input_filters": {
-    "defined_scope": [
+    "scope": [  # also applied to the DC scope read
         # "store_id NOT IN (829, 639, 917)",
     ],
     "lost_sales": [],
@@ -362,7 +370,7 @@ Default: `/mnt/invent-{customer}-datastore/analysis/kpi_reports/outputs/kpi_long
 | `kpi_long` | All metrics × periods × slices (annual / ytd / quarter / half / monthly / weekly) | `period_type`, `period`, `root`, `dimension`, `dimension_value` |
 | `comparison_yoy` | YoY comparison rows | `comparison_type`, `root`, `dimension`, `dimension_value`, `metric_key`, `current_period` |
 | `comparison_ytd` | YTD comparison rows (one row set per consecutive-year pair, elapsed-window sums) | same as YoY |
-| `scope_diff` | Defined vs score annual diff (when `run_scope_diff=True`) | `Year`, `metric` |
+| `scope_diff` | Scope vs score annual diff (when `run_scope_diff=True`) | `Year`, `metric` |
 | `comparable_kpi_long` | Comparable (like-for-like) per-link metrics for every enabled kind + `comparable_pair_count` + `comparison_type` (when `comparable_pairs.enabled=True`) | `comparison_type`, `period_type`, `period`, `root`, `dimension`, `dimension_value`, `link_prior_year`, `link_current_year` |
 | `comparable_comparison_ytd` / `_yoy` / `_quarter` / `_half` | Comparable comparison rows for that kind (only when `comparable_pairs.enabled=True` and the kind is in `comparable_pairs.kinds`) | `comparison_type`, `root`, `dimension`, `dimension_value`, `metric_key`, `current_period` (same shape as YoY/YTD; `_quarter` additionally keys on `quarter_number`, `_half` on `half_number`); usually recomputed from merged `comparable_kpi_long` and overwritten wholesale |
 
@@ -480,43 +488,60 @@ See [Input previews and filters](#input-previews-and-filters).
 
 ### `scope`
 
+One section for the whole scope definition (tbretail's deployed values shown):
+
 ```python
 "scope": {
-    "use_hybrid_scope": False,  # False (default) = week-agnostic defined scope; True = hybrid
-    "run_scope_diff": False,    # True = compute score scope and defined-vs-score annual diff
+    "time": "daily",             # "daily" | "weekly" (see Scope modes)
+    "grain": "product_store",    # "product" | "product_store"
+    "columns": {                 # column names of path_segments.scope; None = column not used
+        "product": "product_id",
+        "store": "location_id",  # required for product_store; for dc_solution_id it holds the warehouse
+        "start": "start_date",   # daily only
+        "end": "end_date",       # daily only
+        "solution": "solution_id",
+        "run_date": "run_date",
+        "date": None,            # weekly only: date OR year + week
+        "year": None,
+        "week": None,
+    },
+    "solution_id": 21,           # store scope solution(s), int or list (blocks: blocked_scope.solution_id)
+    "dc_solution_id": 22,        # DC (network) scope, int or list: DC metrics' warehouse pairs among store-scope products; DC blocks
+    "run_date": None,            # Sunday "YYYY-MM-DD"; None = latest Sunday on or before today
+    "roll_to_family_main": True,
+    "active_only": True,
+    "instock_main_eligible_only": True,             # in-stock only where the main itself is eligible
+    "instock_exclude_unsuperseded_sizes": True,     # in-stock leaves out sizes not in a supersession
+    "backfill_leading_gap": False,                  # weekly only
+    "use_hybrid_scope": False,   # False = scope table alone; True = hybrid (covered weeks + score backfill)
+    "run_scope_diff": False,     # True = compute score scope and the scope-vs-score annual diff
 }
 ```
+
+The generic `config.py` reads a client table: `columns` = `product_id` / `store_id` only, `solution_id` 21 unused (no `columns.solution`), `dc_solution_id` / run date `None`, `roll_to_family_main` and `active_only` `False`, both in-stock rules `False`, `backfill_leading_gap` `True`.
+
+**Reading the table** (`inputs.read_scope_source`): rows of `solution_id` (when `columns.solution` is set) for `run_date` (when `columns.run_date` is set) that are still open (`columns.end` null or `>= run_date`) are kept, then `input_filters.scope` applies; the DC read does the same with `dc_solution_id`, `columns.store` holding the warehouse. A solution / run-date filter that leaves no row fails the run: a wrong `solution_id` or `run_date` must not give an empty report. `run_date` defaults to the latest Sunday on or before **today** (`inputs.scope_run_date`), not the report's as-of date, so a backdated run or `KPI_AS_OF_DATE` still reads today's scope; set it for a reproducible backfill.
+
+**`time = "daily"`** (`scope._scope_pairs`): rows reduce to `(product_id[, store_id])` pairs. With `roll_to_family_main` every row is rolled to its family main (`coalesce(parent_id, product_id)`; a product without a main keeps its own id), so a store where only a sub-item is in scope gets the main. With `columns.start` each pair keeps its **earliest** start as `scope_start` and `main_eligible` (the main's own id is among its rows), cached as `ctx.scope_pairs`; a row without a start fails. `active_only` keeps `is_active = true` products. The scope is built once for every metric; `input_filters.daily_data` and population filters apply on top.
+
+**`time = "weekly"`** (`scope._weekly_scope_keys`): `grain` `"product"` needs no `columns.store`; weeks come from `columns.date` via `fiscal_cal`, or from native `columns.year` / `columns.week` (valid only when `fiscal_calendar.use_fiscal_calendar=False`; it takes `Year` / `Week` verbatim, so `Year` must be a genuine calendar year: scope is joined to daily and lost-sales data by exact match on `(product_id[, store_id], Year, Week)`, and an ISO week-year in the source breaks that match). With `use_fiscal_calendar=True`, `columns.date` is required: `build_scope` raises rather than trust week numbering that may not match `fiscal_cal`. `columns.start` / `end` are invalid with `weekly`.
+
+**`backfill_leading_gap`** (`weekly` only): if the source's earliest week (across all pairs) starts after the window start, that is a data-availability limit, so only the pairs tied to that earliest week are assumed in scope back to the window start (same "min date in window" principle as [`dc_instock`](#dc_instock), no hardcoded floor). A pair whose own first week is later than the source's earliest week is left alone (a real new store/product). Only the leading gap is filled. Set `False` for a deployment with **existing** weekly history saved without this option, to avoid mixing two scope definitions in one incrementally merged table.
+
+**Not the same knob as `comparable_pairs.grain`.** `scope.grain` decides scope *membership*; [`comparable_pairs.grain`](#comparable-pairs-like-for-like-ytd--yoy--quarter--half) decides what "the same pair across years" means for that feature only.
+
+`materialize()` fails loudly when: `time` / `grain` is invalid; `columns.product` is unset, or `columns.store` for `product_store`; `weekly` has neither `columns.date` nor `year` + `week`, or has `start` / `end`; `daily` has `date` / `year` / `week`; `columns.solution` is set without `solution_id`; `run_date` is not a Sunday; and for a rule whose column is missing: `dc_solution_id` needs `columns.solution`, `start` and `store`; `blocked_scope.ui_parameters_path` needs `columns.start` and `store`; `instock.daily.count_start` other than `first_daily_row` needs `columns.start`; `instock_main_eligible_only` needs `columns.start`, `roll_to_family_main` and `instock.method = "daily"`; `instock_exclude_unsuperseded_sizes` needs `instock.method = "daily"`.
 
 When `run_scope_diff=False` (default), score-scope computation is skipped unless `use_hybrid_scope=True` (hybrid backfill needs it). The notebook scope-diff cell and `scope_diff` Delta output are omitted.
 
-### `defined_scope`
+- **`instock_main_eligible_only`** (tbretail `True`, generic `False`): in-stock (and weighted in-stock) counts only stores where the main item itself is eligible; a store where only a superseded (sub) item is eligible was intentionally not assorted the new item (client rule). Those stores stay in every other metric. The pair's start is still the earliest of the main and sub rows. Built from `ctx.scope_pairs.main_eligible`, applied in `pipeline.build_instock_daily`.
+- **`instock_exclude_unsuperseded_sizes`** (tbretail `True`, generic `False`): in-stock leaves out sizes "not created in the supersession": a product in no `item_family` row whose class color (`products.option_code`) has at least one size in `item_family` (main or sub). Treated like NGF: out of in-stock, still in every other metric (`pipeline._unsuperseded_sizes`).
 
-```python
-"defined_scope": {
-    "grain": "product_store",   # "product" | "product_store" (default) | "product_store_week"
-    "product_col": "product_id",
-    "store_col": "store_id",
-    "date_col": "week_start_date",
-    "year_col": None,
-    "week_col": None,
-    "backfill_leading_gap": True,   # product_store_week only
-}
-```
-
-`grain` selects the scope universe ([Scope modes](#scope-modes)): `"product"` needs no `store_col`; `"product_store"` (default) and `"product_store_week"` **require `store_col`**, and `product_store_week` also needs `date_col` (or `year_col`+`week_col`) to resolve weeks. `date_col`/`year_col`/`week_col` are read **only for `product_store_week`** (defined scope and, under hybrid, covered vs missing weeks) and ignored otherwise.
-
-**Not the same knob as `comparable_pairs.grain`.** This `grain` decides scope *membership*; [`comparable_pairs.grain`](#comparable-pairs-like-for-like-ytd--yoy--quarter--half) decides what "the same pair across years" means for that feature only.
-
-DATE path (preferred): `"date_col": "week_start_date", "year_col": None, "week_col": None`. NATIVE path (`date_col: None` plus `year_col`/`week_col`) is valid only when `fiscal_calendar.use_fiscal_calendar=False`; it takes `Year`/`Week` verbatim, so `Year` must be a genuine calendar year: scope is joined to daily and lost-sales data by exact match on `(product_id[, store_id], Year, Week)`, and an ISO week-year in the source breaks that match. With `use_fiscal_calendar=True`, `date_col` is required: `materialize()`/`build_defined_scope` raises rather than trust week numbering that may not match `fiscal_cal`.
-
-**`backfill_leading_gap`** (`product_store_week` only, default `True`): if the source's earliest week (across all pairs) starts after the window start, that is a data-availability limit, so only the pairs tied to that earliest week are assumed in scope back to the window start (same "min date in window" principle as [`dc_instock`](#dc_instock), no hardcoded floor). A pair whose own first week is later than the source's earliest week is left alone (a real new store/product). Only the leading gap is filled. Set `False` for a deployment with **existing** `product_store_week` history saved without this option, to avoid mixing two scope definitions in one incrementally merged table.
-
-`materialize()` fails loudly if `grain` is invalid, `store_col` is missing for `product_store`/`product_store_week`, or `product_store_week` has neither `date_col` nor `year_col`/`week_col`; `build_defined_scope` also fails for `product_store_week` + `use_fiscal_calendar=True` + `date_col=None`.
-
+Block product_ids are **not** rolled: only blocks on the main's own `product_id` apply, as in the client reference script.
 
 ### `score_scope`
 
-Used when `use_hybrid_scope=True` or `run_scope_diff=True`. Applies to the **missing** (uncovered) weeks under hybrid scope.
+Used when `scope.use_hybrid_scope=True` or `scope.run_scope_diff=True`. Applies to the **missing** (uncovered) weeks under hybrid scope.
 
 ```python
 "score_scope": {
@@ -620,13 +645,13 @@ Where `in_stock_rate` (and the in-stock side of `weighted_instock_rate`) comes f
 | `"weekly_source"` | a separate weekly table (`weekly_source`) |
 | `"lost_sales_source"` | `lost_sales_source`'s `in_stock_col` / `total_days_col`, on the same rows as lost sales (generic default; a null `total_days` falls back to the fiscal week's day count) |
 
-`materialize()` raises on: an unknown `method`; empty `weekly_source.path_segments` under `"weekly_source"`; `"daily"` with `defined_scope.grain = "product"`; `"daily"` or `"weekly_source"` with `lost_sales_ensemble.enabled` (the ensemble blends in-stock columns they do not produce); `daily.count_start` outside its three values (checked whatever the method), `scope_start` / `earliest` without `scope_source.mode = "operation_scope"`, or `first_daily_row` without `require_daily_data`; `daily.history_start` after the window start; `report_end = "latest_day"` or [`goods_in_transit.store_instock`](#goods_in_transit) unless the method is `"daily"`. The method is `settings["INSTOCK_METHOD"]`; env `KPI_INSTOCK_METHOD` overrides it.
+`materialize()` raises on: an unknown `method`; empty `weekly_source.path_segments` under `"weekly_source"`; `"daily"` with `scope.grain = "product"`; `"daily"` or `"weekly_source"` with `lost_sales_ensemble.enabled` (the ensemble blends in-stock columns they do not produce); `daily.count_start` outside its three values (checked whatever the method), `scope_start` / `earliest` without `scope.columns.start`, or `first_daily_row` without `require_daily_data`; `daily.history_start` after the window start; `report_end = "latest_day"` or [`goods_in_transit.store_instock`](#goods_in_transit) unless the method is `"daily"`. The method is `settings["INSTOCK_METHOD"]`; env `KPI_INSTOCK_METHOD` overrides it.
 
 **`method = "daily"`** (`pipeline.build_instock_daily`; the Metric Details text is generated from these settings), per scope pair:
 
 1. Every scoped pair counts, so every metric shares one scope. `daily.input_filters` (Spark SQL on `product_id` / `store_id` only) narrow the pair universe, so a store group can leave in-stock without touching other metrics.
 2. `get_instock_daily_raw` reads daily-data **without** `input_filters.daily_data` (usually `usable = 1`, which would hide the unusable days this method subtracts), from `history_start` to `REPORT_END_DATE` (filtered on the raw date column before `to_date` for Delta pruning), restricted to those pairs, blocked days removed when `in_stock_rate` is in [`blocked_scope.metrics`](#blocked_scope), cached. It is not family-rolled (daily-data is already rolled to the family main upstream). The run raises unless daily-data's latest date for those pairs reaches `REPORT_END_DATE` (later days would count as out of stock).
-3. Count start: `first_daily_row` (first daily row from `history_start`), `scope_start` (operation-scope start) or `earliest` of the two, clipped to the window start. `require_daily_data` drops pairs without any daily row.
+3. Count start: `first_daily_row` (first daily row from `history_start`), `scope_start` (the scope table's start) or `earliest` of the two, clipped to the window start. `require_daily_data` drops pairs without any daily row.
 4. Store-days = every day from the count start to `REPORT_END_DATE` (a day with no daily row is out of stock) minus blocked days (when `in_stock_rate` is in `blocked_scope.metrics`) minus, with `usable_only`, days with `usable != 1`.
 5. In-stock day = `inventory > 0` on a usable day; with `goods_in_transit.store_instock` also a day with store GIT (`destination_type = 0`, `quantity > 0`, family main, shifted by `date_shift_days`); united (OH OR GIT), never summed; blocked and unusable days drop out too.
 
@@ -662,13 +687,13 @@ DC/warehouse daily inventory table backing `dc_mean_stock`, `total_mean_stock`, 
 },
 ```
 
-Read via `read_inventory_warehouse_source`; its window-filtered, family-rolled result is cached per run (`pipeline._get_inventory_warehouse_parent_rolled`). Built into `dc_daily` (`pipeline.build_dc_daily`), restricted by left-semi join to the SAME in-scope `(product_id, Year, Week)` population as every other frame, so under `product_store_week` grain a product's DC inventory is kept only for the weeks it is in scope. DC data has no store dimension; filter unwanted warehouse rows via `input_filters.inventory_warehouse`.
+Read via `read_inventory_warehouse_source`; its window-filtered, family-rolled result is cached per run (`pipeline._get_inventory_warehouse_parent_rolled`). Built into `dc_daily` (`pipeline.build_dc_daily`), restricted by left-semi join to the SAME in-scope `(product_id, Year, Week)` population as every other frame, so under `scope.time = "weekly"` a product's DC inventory is kept only for the weeks it is in scope. DC data has no store dimension; filter unwanted warehouse rows via `input_filters.inventory_warehouse`.
 
-**Item-family rollup before restriction (unconditional, NOT gated by `dc_instock.enabled`).** `scope_core` (and `defined_scope`) is in **parent** id space (its producer maps `product_id -> coalesce(parent_id, product_id)` via `item_family`'s `is_main=false` rows), but `inventory_warehouse`'s `product_id` is raw. `build_dc_daily` therefore rolls it to parent id (`pipeline._roll_to_item_family_parent`, re-aggregating `F.sum("inventory")` at `(product_id, warehouse_id, date)`) **before** restricting to `scope_core`; otherwise DC inventory on a superseded/child `product_id` would be dropped. So `path_segments.item_family` must point at a real table **whenever `path_segments.inventory_warehouse` is configured**, and `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL` shift wherever a family had inventory split across old and current item codes.
+**Item-family rollup before restriction (unconditional, NOT gated by `dc_instock.enabled`).** `scope_core` (and the scope table's rows) is in **parent** id space (its producer maps `product_id -> coalesce(parent_id, product_id)` via `item_family`'s `is_main=false` rows), but `inventory_warehouse`'s `product_id` is raw. `build_dc_daily` therefore rolls it to parent id (`pipeline._roll_to_item_family_parent`, re-aggregating `F.sum("inventory")` at `(product_id, warehouse_id, date)`) **before** restricting to `scope_core`; otherwise DC inventory on a superseded/child `product_id` would be dropped. So `path_segments.item_family` must point at a real table **whenever `path_segments.inventory_warehouse` is configured**, and `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL` shift wherever a family had inventory split across old and current item codes.
 
 ### `dc_instock`
 
-**DC product scope.** The store scope leads: every DC metric (`dc_mean_stock`, `WOS_DC`, the DC part of `WOS_TOTAL` / `total_mean_stock`, `dc_in_stock_rate`) reads `inventory_warehouse` for the **store** scope's products (one `operation/scope` snapshot, every week). With `scope_source.dc_solution_id` set (tbretail 22), only the DC (network) scope's product × warehouse pairs among them count (`scope.build_dc_scope` reads that solution's `operation/scope` pairs, family main, earliest start, active, into `ctx.dc_scope_pairs`, which also give DC blocked days their start dates). With `None`, every warehouse counts.
+**DC product scope.** The store scope leads: every DC metric (`dc_mean_stock`, `WOS_DC`, the DC part of `WOS_TOTAL` / `total_mean_stock`, `dc_in_stock_rate`) reads `inventory_warehouse` for the **store** scope's products (one scope table snapshot, every week). With `scope.dc_solution_id` set (tbretail 22), only the DC (network) scope's product × warehouse pairs among them count (`scope.build_dc_scope` reads that solution's `operation/scope` pairs, family main, earliest start, active, into `ctx.dc_scope_pairs`, which also give DC blocked days their start dates). With `None`, every warehouse counts.
 
 **Gated** (`dc_instock.enabled`, default `False`), but `item_family` is **not** (see [`inventory_warehouse`](#inventory_warehouse)). Backs `dc_in_stock_rate`. Unlike `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL`, which use only days `inventory_warehouse` has a row for, it **expands** rows into a continuous daily grid per `(product_id, warehouse_id)` and counts gaps as stockouts.
 
@@ -698,7 +723,7 @@ Read via `read_inventory_warehouse_source`; its window-filtered, family-rolled r
 - **Window start.** Each pair's grid runs from **its own first `inventory_warehouse` row** to `REPORT_END_DATE`, not from a scope `start_date` or a flat window: the same "first day with any history" signal `daily_data_expanded` uses for the **store-level** in-stock denominator (`customer-analysis-tbretail`'s `05_future_visibility_data_prep.py`), so both series share one definition.
 - **Trade-off:** a pair ranged at a DC but never stocked inside the window has no row and is **absent**, not 0%. A pair that *stops* being stocked is still covered: its grid continues to `REPORT_END_DATE` and every later day is a stockout.
 
-**Build** (`pipeline.build_dc_inst`): from rolled-up `inventory_warehouse` (`_get_inventory_warehouse_parent_rolled`, shared with `build_dc_daily`, window-filtered) take `first_stocked_date = MIN(date)` per pair; `F.explode(F.sequence(first_stocked_date, REPORT_END_DATE))` gives the pair's days, joined to the fiscal calendar; restrict to the SAME in-scope `(product_id, Year, Week)` population as `build_dc_daily` before the inventory join; left-join inventory with `F.coalesce(inventory, 0)` (a grid day with no row is a stockout); flag DC blocked days (`ctx.dc_blocked_days`, with `scope_source.dc_solution_id`) as `is_blocked` and left-join DC GIT days (with `goods_in_transit.dc_instock`); aggregate to `(product_id, warehouse_id, Year, Week)`:
+**Build** (`pipeline.build_dc_inst`): from rolled-up `inventory_warehouse` (`_get_inventory_warehouse_parent_rolled`, shared with `build_dc_daily`, window-filtered) take `first_stocked_date = MIN(date)` per pair; `F.explode(F.sequence(first_stocked_date, REPORT_END_DATE))` gives the pair's days, joined to the fiscal calendar; restrict to the SAME in-scope `(product_id, Year, Week)` population as `build_dc_daily` before the inventory join; left-join inventory with `F.coalesce(inventory, 0)` (a grid day with no row is a stockout); flag DC blocked days (`ctx.dc_blocked_days`, with `scope.dc_solution_id`) as `is_blocked` and left-join DC GIT days (with `goods_in_transit.dc_instock`); aggregate to `(product_id, warehouse_id, Year, Week)`:
 
 - `dc_stocked_days = COUNT(inventory > stock_threshold OR goods in transit)`, `dc_available_days = COUNT(*)`, both over unblocked days only when `dc_in_stock_rate` is in `blocked_scope.metrics` (rows with no available day are dropped), plus `dc_unblocked_days` (unblocked days either way; the comparable-pairs universe reads it).
 
@@ -719,7 +744,6 @@ Parent/child product roll-up: a superseded/child product (`is_main = false`) rol
     "daily_data": True,
     "lost_sales": False,
     "inventory_warehouse": True,
-    "defined_scope": False,
 },
 ```
 
@@ -728,34 +752,8 @@ Parent/child product roll-up: a superseded/child product (`is_main = false`) rol
 - `daily_data` (default `True`): without it `build_scoped_daily`'s join to the parent-rolled `scope_core` silently drops daily rows still carrying a child product_id. Can shift historical numbers for products with a supersede history.
 - `lost_sales` (default `False`): `report_dfu` already substitutes upstream, so a second roll-up is likely a no-op; opt-in safety net.
 - `inventory_warehouse` (default `True`): see [`inventory_warehouse`](#inventory_warehouse).
-- `defined_scope` (default `False`, every grain): opt-in safety net; tbretail's scope is already rolled upstream.
+- The scope has its own toggle, `scope.roll_to_family_main`.
 - Goods in transit has its own toggle, `goods_in_transit.roll_to_family_main`.
-
-### `scope_source`
-
-Chooses the table that defines the scope universe. Default `"defined_scope"`; `"operation_scope"` builds it from the platform scope table (`path_segments.scope`, `operation/scope`):
-
-```python
-"scope_source": {
-    "mode": "operation_scope",   # "defined_scope" | "operation_scope"
-    "solution_id": 21,           # store scope solution(s), int or list (blocks: blocked_scope.solution_id)
-    "dc_solution_id": None,      # DC (network) scope, int or list (tbretail 22): DC metrics' warehouse pairs among store-scope products; DC blocks
-    "run_date": None,            # Sunday "YYYY-MM-DD"; None = latest Sunday on or before today
-    "roll_to_family_main": True,
-    "instock_main_eligible_only": False,  # True: in-stock only where the main itself is eligible
-    "instock_exclude_unsuperseded_sizes": False,  # True: in-stock leaves out sizes not in a supersession
-    "active_only": True,
-},
-```
-
-Rows of `solution_id` for `run_date` that are still open (`end_date` null or `>= run_date`) are reduced to `(product_id, store_id)` pairs. With `roll_to_family_main` every row is rolled to its family main (`coalesce(parent_id, product_id)`), so a store where only a sub-item is in scope gets the main; each pair keeps its **earliest** `start_date` as `scope_start` (`ctx.operation_scope_pairs`, `scope._scope_start_pairs`). `active_only` keeps `is_active = true` products. The scope is built once for every metric. `input_filters.daily_data` and population filters apply on top; `input_filters.defined_scope` does **not** (the table is not read in this mode, so tbretail's `week_start_date < '2026-08-02'` entry is unused). Needs `defined_scope.grain` `product` or `product_store` (`product_store_week` is rejected; in-stock and blocked days need `product_store`).
-
-`run_date` defaults to the latest Sunday on or before **today** (`scope._scope_run_date`), not the report's as-of date, so a backdated run or `KPI_AS_OF_DATE` still reads today's scope; set it for a reproducible backfill.
-
-- **`instock_main_eligible_only`** (tbretail `True`, generic `False`): in-stock (and weighted in-stock) counts only stores where the main item itself is eligible; a store where only a superseded (sub) item is eligible was intentionally not assorted the new item (client rule). Those stores stay in every other metric. The pair's start is still the earliest of the main and sub rows. Built from `ctx.operation_scope_pairs.main_eligible`, applied in `pipeline.build_instock_daily`. Requires `mode = "operation_scope"`, `roll_to_family_main = True`, `instock.method = "daily"`.
-- **`instock_exclude_unsuperseded_sizes`** (tbretail `True`, generic `False`): in-stock leaves out sizes "not created in the supersession": a product in no `item_family` row whose class color (`products.option_code`) has at least one size in `item_family` (main or sub). Treated like NGF: out of in-stock, still in every other metric (`pipeline._unsuperseded_sizes`). Requires `instock.method = "daily"`.
-
-Block product_ids are **not** rolled: only blocks on the main's own `product_id` apply, as in the client reference script.
 
 ### `blocked_scope`
 
@@ -765,7 +763,7 @@ UI-blocked days, applied per metric. Default off: on exactly when `ui_parameters
 "blocked_scope": {
     "ui_parameters_path": "ui-data/parameter_config/<timestamp>_<id>",  # under the datastore root; None = off
     "rule": "after_scope_start",   # or "all"
-    "solution_id": 21,             # store blocks of these solution(s) only (int or list), whatever scope_source reads
+    "solution_id": 21,             # store blocks of these solution(s) only (int or list), whatever scope reads
     "dc_solution_id": None,        # DC blocks of these solution(s) (tbretail 22); None = no DC blocks
     "kinds": ["product", "product_destination", "destination"],  # store block folders read
     "dc_kinds": ["product", "product_destination"],  # DC block folders read
@@ -773,13 +771,13 @@ UI-blocked days, applied per metric. Default off: on exactly when `ui_parameters
 },
 ```
 
-**Block solutions**: the snapshot is filtered to `solution_id` / `dc_solution_id` independently of `scope_source`'s solutions; adding e.g. allocation (51) to `scope_source.solution_id` widens scope but does not pull in its blocks unless 51 is also listed here. DC blocks need `scope_source.dc_solution_id`. tbretail: 21 and 22. Always set `ui_parameters_path` explicitly (the newest snapshot folder may hold no blocks for the solution); a missing listed `blocked_scope/<kind>` folder fails the run (tbretail's `dc_blocked_scope` has no `destination` folder, so `dc_kinds` omits it).
+**Block solutions**: the snapshot is filtered to `solution_id` / `dc_solution_id` independently of `scope`'s solutions; adding e.g. allocation (51) to `scope.solution_id` widens scope but does not pull in its blocks unless 51 is also listed here. DC blocks need `scope.dc_solution_id`. tbretail: 21 and 22. Always set `ui_parameters_path` explicitly (the newest snapshot folder may hold no blocks for the solution); a missing listed `blocked_scope/<kind>` folder fails the run (tbretail's `dc_blocked_scope` has no `destination` folder, so `dc_kinds` omits it).
 
-**Store blocks** come from `{ui_parameters_path}/blocked_scope/{product,product_destination,destination}` (parquet; `destination_id` is the store), matched to the operation-scope pairs (requires `scope_source.mode = "operation_scope"`). With `rule = "after_scope_start"` a block applies only when `block.start_date >= scope_start` (same day: applies); an earlier block is ignored because the pair was set up again after it; `"all"` applies every matched block. A block covers `start_date` to `end_date` (null = open-ended), clipped to the window. Block `product_id`s are not rolled to the family main.
+**Store blocks** come from `{ui_parameters_path}/blocked_scope/{product,product_destination,destination}` (parquet; `destination_id` is the store), matched to the scope pairs (requires `scope.columns.start` and `store`). With `rule = "after_scope_start"` a block applies only when `block.start_date >= scope_start` (same day: applies); an earlier block is ignored because the pair was set up again after it; `"all"` applies every matched block. A block covers `start_date` to `end_date` (null = open-ended), clipped to the window. Block `product_id`s are not rolled to the family main.
 
 **Blocked-day representation.** Blocked days are built as cached, disjoint per-pair date intervals `(product_id, store_id, first_day, last_day)` (`ctx.blocked_days`, `scope.build_blocked_days` via `scope._applied_block_intervals`, shared with DC blocks); overlapping or adjacent blocks of a pair are merged. Frames flag or drop a day with a range join on (pair, `first_day <= date <= last_day`) rather than a per-pair-day table. The printed "blocked pair-days in window" count is the number of covered pair-days.
 
-**DC blocks** (`dc_solution_id`, int not bool, e.g. 22; `None` = none) work the same from `{ui_parameters_path}/dc_blocked_scope/{product,product_destination}` (`destination_id` = warehouse), by `rule`. A DC pair's `scope_start` comes from that solution's `operation/scope` (same `run_date`, family roll-up, earliest start and `active_only` as `scope_source`, location = warehouse); DC pairs outside it get no blocks. Built once per run as `(product_id, warehouse_id, first_day, last_day)` intervals, `ctx.dc_blocked_days` (`scope.build_dc_blocked_days`).
+**DC blocks** (`dc_solution_id`, int not bool, e.g. 22; `None` = none) work the same from `{ui_parameters_path}/dc_blocked_scope/{product,product_destination}` (`destination_id` = warehouse), by `rule`. A DC pair's `scope_start` comes from that solution's rows of the scope table (same `run_date`, family roll-up, earliest start and `active_only` as the store scope, location = warehouse); DC pairs outside it get no blocks. Built once per run as `(product_id, warehouse_id, first_day, last_day)` intervals, `ctx.dc_blocked_days` (`scope.build_dc_blocked_days`).
 
 **`metrics` — which metrics drop blocked days.** Blocked days stay in the frames, flagged `is_blocked` (on `scoped_daily` and `dc_daily`, from one range join in `pipeline.build_scoped_daily` / `build_dc_daily`). A metric reads **only unblocked rows when it is named in `metrics`**, and **blocked and unblocked rows alike when it is not**. `"all"` (generic default) means every name of `METRICS_ALL`; an unknown name raises (the allowed names are listed); `settings["BLOCKED_SCOPE"]["metrics"]` holds the resolved list in `METRICS_ALL` order. tbretail names the inventory, WOS, in-stock and DC metrics and leaves sales units, sales revenue, AUR, AUC, the distinct counts and `lost_sales_pct` out: a blocked pair can still sell its existing stock, and the report never removes blocked days from history for those metrics. Per-metric gating is tabulated in [Inventory metrics: blocked days and goods in transit](#inventory-metrics-blocked-days-and-goods-in-transit).
 
@@ -855,8 +853,8 @@ See [HTML report](#html-report).
 | `KPI_AS_OF_DATE`, `KPI_RUN_MIN_DATE` | Override `as_of_date`, `run_min_date`                     |
 | `KPI_REPORT_END`                  | Overrides `reporting_window.report_end` (`as_of` / `complete_month` / `latest_day`) |
 | `KPI_HALF_PERIODS`                | `true`/`false` — overrides `fiscal_calendar.half_periods`    |
-| `KPI_USE_HYBRID_SCOPE`            | `true`/`false`                                               |
-| `KPI_RUN_SCOPE_DIFF`              | `true`/`false` — enable defined-vs-score scope diff          |
+| `KPI_USE_HYBRID_SCOPE`            | `true`/`false` — overrides `scope.use_hybrid_scope`          |
+| `KPI_RUN_SCOPE_DIFF`              | `true`/`false` — enable scope-vs-score scope diff          |
 | `KPI_COMPARABLE_PAIRS`            | `true`/`false` — enable comparable (like-for-like) pairs     |
 | `KPI_COMPARISONS`                 | Comma-separated subset of `yoy,ytd` — selects which comparisons to compute |
 | `KPI_RECOMPUTE_COMPARISONS`       | `true`/`false` — recompute comparisons from merged history (default `true` under incremental) |
@@ -895,7 +893,7 @@ Default metrics (configurable in `CONFIG["metrics"]`):
 
 Every metric uses all scoped stores; there is no global store-exclusion key. The per-metric exceptions are `instock.daily.input_filters` (stores out of in-stock under `instock.method = "daily"`), `lost_sales_source.sales_filter` (out of `lost_sales_pct`) and `metrics.population_filters` (a metric's product population). tbretail uses exactly these: **NON-COMP** (`IS_COMP == "no"`) is removed from in-stock only (`population_filters.in_stock_rate`), **ECOM** stores 829 / 639 / 917 from in-stock and lost sales only (`instock.daily.input_filters`, `lost_sales_source.sales_filter` and the ECOM-excluding model behind `report_dfu`). Every other metric keeps both on every root tab (Overall, NVROUT, LFL), period type, comparison, comparable table and the HTML (all share one `compute_kpis` call); the LFL (`comp`) root is `IS_COMP == "yes"`, so NON-COMP is absent there. To drop a store from everything use `input_filters.daily_data` (plus `instock.daily.input_filters` under `"daily"`, whose read skips `input_filters.daily_data`) or exclude it upstream; for **`lost_sales_pct` only** use [`lost_sales_source.sales_filter`](#lost_sales_source).
 
-**One population per source.** Every metric read from `noob/daily-data` (sales, `total_inventory`, `mean_stock`, `WOS`, turnover, weighted-instock's weights) uses the **same** rows under every `defined_scope.grain`, except that [`goods_in_transit`](#goods_in_transit) adds GIT-only days for the metrics it gates and [`blocked_scope`](#blocked_scope) reads or drops blocked days per `blocked_scope.metrics` (see [Inventory metrics](#inventory-metrics-blocked-days-and-goods-in-transit)); `population_filters` / `sales_filter` are the only other deviations. Lost sales and in-stock come from their own source restricted at that source's grain; DC inventory comes from `inventory_warehouse`, family-rolled to parent `product_id` ([`dc_instock`](#dc_instock)).
+**One population per source.** Every metric read from `noob/daily-data` (sales, `total_inventory`, `mean_stock`, `WOS`, turnover, weighted-instock's weights) uses the **same** rows under every `scope.grain`, except that [`goods_in_transit`](#goods_in_transit) adds GIT-only days for the metrics it gates and [`blocked_scope`](#blocked_scope) reads or drops blocked days per `blocked_scope.metrics` (see [Inventory metrics](#inventory-metrics-blocked-days-and-goods-in-transit)); `population_filters` / `sales_filter` are the only other deviations. Lost sales and in-stock come from their own source restricted at that source's grain; DC inventory comes from `inventory_warehouse`, family-rolled to parent `product_id` ([`dc_instock`](#dc_instock)).
 
 **Lost Sales %** = `100 × sum(lost_sales) / sum(floor(weekly_sales + lost_sales))`; the denominator includes imputed lost demand. `weekly_sales` comes from `daily_data` and `lost_sales` from `lost_sales_source`, so a narrower-population source makes the ratio read low (see [`lost_sales_source.sales_filter`](#lost_sales_source)).
 
@@ -981,7 +979,7 @@ Notes behind `tbretail_config.py` (its comments point here).
 
 2. NGF item product IDs (`ngf_product_ids.csv`): same join on an NGF item list (`pdf_ngf["itemcode"]`). NGF items stay in daily-data / scope and Overall and are only flagged (`IS_COMP = 'no'`), so comp vs non-comp can be sliced in one report. `fillna: {"IS_COMP": "yes"}` sets every non-NGF product to `'yes'` (otherwise NULL, since the CSV only covers NGF items). The configured `ngf_comp_split.path` currently points at `non_comp_ids_20260817.csv` (the step-1 file), not `ngf_product_ids.csv`; unclear whether that is deliberate reuse or the step-2 CSV was never generated, so verify before treating either as correct.
 
-**tbretail scope is the open operation scope only.** Former manual additions (JAB, NGF products, `nvrout_scope_backfill`) and the NON-COMP removal no longer exist: the additions put products into scope at every store with daily data, outside the operation scope and its rules (no roll-up, active filter, scope start or blocks), which pulled NVROUT in-stock 5-20 points below the in-stock script that matched the client. NVROUT / COMP / NON-COMP are labels from `dimension_sources`.
+**tbretail scope is the open scope table (platform `operation/scope`) only.** Former manual additions (JAB, NGF products, `nvrout_scope_backfill`) and the NON-COMP removal no longer exist: the additions put products into scope at every store with daily data, outside the scope table and its rules (no roll-up, active filter, scope start or blocks), which pulled NVROUT in-stock 5-20 points below the in-stock script that matched the client. NVROUT / COMP / NON-COMP are labels from `dimension_sources`.
 
 **NON-COMP in-stock rule.** kpi-skill-toolkit's Overall in-stock excludes NON-COMP products (`inst_products = nvr_ids ∪ comp_ids_primary`). This pipeline's `overall` root has no restriction of its own, so NON-COMP products (then in scope via the since-removed "NGF products" addition) counted toward Overall's in-stock rate, the confirmed cause of the 2026-09-03/04 Overall-instock-only mismatch (COMP / NVROUT matched, since NON-COMP is in neither root). `metrics.population_filters.in_stock_rate = {"IS_COMP": {"exclude": ["no"]}}` aligns Overall without touching scope, roots or other metrics.
 
@@ -1031,7 +1029,7 @@ Patterns to preserve when changing internals:
 - **HTML weekly columns**: sorted by `week_start_date` from `fiscal_week`, not lexicographic `Year_Week`.
 - **KPI sort**: final sort in pandas after `toPandas()`, not Spark `orderBy` (removes a shuffle stage from every aggregation).
 
-If runs are slow, check that the scope table path is correct (defined scope not empty) and `run_min_date` is Sunday-aligned (or null for full YTD).
+If runs are slow, check that the scope table path is correct (scope table not empty) and `run_min_date` is Sunday-aligned (or null for full YTD).
 
 ## Known limitations
 
@@ -1051,8 +1049,8 @@ If runs are slow, check that the scope table path is correct (defined scope not 
 | A root you expected is missing, or you want only one root value | Set `root_values` on that entry (`{"yes": "nvrout"}` makes exactly one root); omit it to auto-discover one root per distinct value. `NULL` never gets its own root. |
 | Ensemble run fails loudly on read | Wrong `slow_path_segments` / `speed_cluster_path_segments`, or the attributes table lacks the `attribute_name` value. Fix it or set `enabled: False`. For a **wide** cluster table (no `attribute_name`/`attribute_value`) set `speed_cluster_format: "wide"` and `speed_cluster_value_col` |
 | Monthly tab empty or stops earlier than Quarterly/Annual | Fiscal weeks in the window have a null `Fiscal_Month` in `one_time_uploads/fiscal_cal` while `Fiscal_Quarter`/`Fiscal_Year` are complete. `kpi_pipeline/fiscal.py` raises listing the weeks; fix the upload or narrow the window to covered months. |
-| `product_store_week`: a pair's earliest weeks are missing though it is active | Pairs tied to the source's earliest week are backfilled by default (`defined_scope.backfill_leading_gap`, [`defined_scope`](#defined_scope)); a later first-seen week is left as-is (a real new store/product). Set `False` for existing history saved without the option. |
-| `product_store_week` raises `ValueError` about `date_col` on load | `use_fiscal_calendar=True` requires `defined_scope.date_col`; native `year_col`/`week_col` is valid only under `use_fiscal_calendar=False`. |
+| `time="weekly"`: a pair's earliest weeks are missing though it is active | Pairs tied to the source's earliest week are backfilled by default (`scope.backfill_leading_gap`, [`scope`](#scope)); a later first-seen week is left as-is (a real new store/product). Set `False` for existing history saved without the option. |
+| `time="weekly"` raises `ValueError` about `columns.date` on load | `use_fiscal_calendar=True` requires `scope.columns.date`; native `columns.year`/`columns.week` is valid only under `use_fiscal_calendar=False`. |
 | A comparable `quarter` link looks wrong / never appears though 2+ years have data | That quarter must be **fully elapsed** inside the window in those years ([Comparable pairs](#comparable-pairs-like-for-like-ytd--yoy--quarter--half)); the latest year's in-progress quarter, or an earliest year cut by a `run_min_date` not on a quarter boundary, is excluded |
 | Latest Quarter/Monthly row missing, or a stale partial-period row in saved Delta | The period has not fully elapsed ([Complete periods only](#complete-periods-only-quarter-half--monthly-trend-tabs)). A partial row saved by an earlier run stays until `allow_overwrite_existing=True` or `full_refresh` |
 | `ValueError: reporting_window.report_end='latest_day' requires instock.method='daily'` | `latest_day` splits the daily in-stock frame's fiscal week, which weekly sources cannot do. Use `instock.method = "daily"` or `as_of` / `complete_month`. |

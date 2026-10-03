@@ -49,14 +49,14 @@ class KPIContext:
     ytd_lost_sales_last_week: Optional[int] = None
     day_calendar: Optional[DataFrame] = None
 
-    defined_scope_keys: Optional[DataFrame] = None
+    scope_table_keys: Optional[DataFrame] = None
     scope_keys: List[str] = field(default_factory=list)
-    # operation_scope only: cached (product_id, store_id, scope_start, main_eligible) after the family
+    # scope.columns.start only: cached (product_id, store_id, scope_start, main_eligible) after the family
     # roll-up and active filter.
-    operation_scope_pairs: Optional[DataFrame] = None
+    scope_pairs: Optional[DataFrame] = None
     # blocked_scope on only: cached disjoint (product_id, store_id, first_day, last_day) block intervals.
     blocked_days: Optional[DataFrame] = None
-    # scope_source.dc_solution_id only: cached (product_id, warehouse_id, scope_start, main_eligible) of the
+    # scope.dc_solution_id only: cached (product_id, warehouse_id, scope_start, main_eligible) of the
     # DC (network) scope.
     dc_scope_pairs: Optional[DataFrame] = None
     # DC blocks on only: cached disjoint (product_id, warehouse_id, first_day, last_day) block intervals.
@@ -65,7 +65,7 @@ class KPIContext:
     hybrid_scope_keys: Optional[DataFrame] = None
     score_only_scope_keys: Optional[DataFrame] = None
     hybrid_frames: Optional[Dict[str, DataFrame]] = None
-    defined_frames: Optional[Dict[str, DataFrame]] = None
+    scope_frames: Optional[Dict[str, DataFrame]] = None
     score_frames: Optional[Dict[str, DataFrame]] = None
 
     # Full computed history: saved to Delta and compared. kpi_long_display is the HTML report's copy,

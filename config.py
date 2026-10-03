@@ -9,11 +9,11 @@
 # CONFIG, applies any KPI_* environment overrides (README: Environment variable overrides) and returns the flat
 # settings dict the pipeline reads. Every section and key stays in the file; unused ones are switched off.
 #
-# First edits: customer, path_segments (defined_scope, daily_data, products, lost_sales at minimum),
-# defined_scope column names, reporting_window.as_of_date. Before each run: reporting_window.as_of_date.
+# First edits: customer, path_segments (scope, daily_data, products, lost_sales at minimum),
+# scope.columns, reporting_window.as_of_date. Before each run: reporting_window.as_of_date.
 #
 # What this config turns on:
-#   Scope       the defined_scope table at product_store grain
+#   Scope       the scope table at product_store grain, daily
 #   Window      report_end "as_of": YTD from the week of Jan 1 to the last complete Sun-Sat week; Half tab OFF
 #   In-stock    instock.method "lost_sales_source" (read from the lost-sales table)
 #   Lost sales  noob lost-sales table through lost_sales_source; lost_sales_ensemble OFF
@@ -90,17 +90,16 @@ CONFIG: Dict[str, Any] = {
         "daily_data": ["noob", "daily-data"],  # store x product daily sales and inventory
         "inventory_warehouse": ["operation", "inventory_warehouse"],  # DC daily inventory
         "item_family": ["operation", "item_family"],  # parent / child product map
-        "scope": ["operation", "scope"],  # platform scope table (scope_source.mode "operation_scope")
+        "scope": ["analysis", "instock_rate", "instock_rate_scope"],  # the scope table
         "goods_in_transit": ["operation", "goods_in_transit"],  # destination_type 0 = store, 1 = warehouse
         "products": ["master-data", "products"],  # product attributes: slice dimensions, active flag
         "lost_sales": ["noob", "lost-sales"],  # add a model_id=... segment if partitioned by model
-        "defined_scope": ["analysis", "instock_rate", "instock_rate_scope"],  # scope_source.mode "defined_scope"
         "product_planning_level": ["operation", "product_planning_level"],  # product_agg_level -> product_id map
     },
     # Spark SQL expressions applied when reading each source (README: input_filters). To keep a store out of
     # every metric, filter it in daily_data here and, for the daily in-stock, in instock.daily.input_filters.
     "input_filters": {
-        "defined_scope": [],
+        "scope": [],
         "lost_sales": [],  # also applied to lost_sales_ensemble.slow_path_segments
         "daily_data": ["usable = 1"],
         "inventory_warehouse": [],
@@ -115,49 +114,50 @@ CONFIG: Dict[str, Any] = {
         "daily_data": True,
         "lost_sales": False,  # opt-in safety net
         "inventory_warehouse": True,
-        "defined_scope": False,  # opt-in safety net
     },
     # =============================================================================
     # 3. SCOPE -- which product x store pairs count, and on which days
     # =============================================================================
-    "scope_source": {  # which table defines the scope universe (README: scope_source)
-        "mode": "defined_scope",  # "defined_scope" | "operation_scope"
-        "solution_id": 21,  # store scope solution(s), int or list (blocks: blocked_scope.solution_id)
+    "scope": {  # which product x store pairs count, from one table (README: scope)
+        "time": "daily",  # "daily": every pair counts on every day of the window; "weekly": rows carry their own week
+        "grain": "product_store",  # "product" | "product_store"; daily in-stock needs stores
+        "columns": {  # column names of path_segments.scope; None = column not used
+            "product": "product_id",
+            "store": "store_id",  # required for grain product_store; for scope.dc_solution_id it holds the warehouse
+            "start": None,  # daily only: rows open on the run date, scope_start = earliest start
+            "end": None,  # daily only: null or on / after the run date = open
+            "solution": None,  # rows of scope.solution_id / dc_solution_id only
+            "run_date": None,  # rows of the run date only
+            "date": None,  # weekly only: the row's week as a date, OR year + week below
+            "year": None,
+            "week": None,
+        },
+        "solution_id": 21,  # store scope solution(s), int or list (blocks: blocked_scope.solution_id); needs columns.solution
         "dc_solution_id": None,  # DC (network) scope: DC metrics' warehouse pairs, among the store scope's products; DC blocks
-        "run_date": None,  # "YYYY-MM-DD" Sunday; None = latest Sunday on or before today
-        "roll_to_family_main": True,  # roll each scope row onto its family main
-        "active_only": True,  # drop pairs of inactive products
+        "run_date": None,  # "YYYY-MM-DD" Sunday; None = latest Sunday on or before today; needs columns.run_date / end
+        "roll_to_family_main": False,  # roll each scope row onto its family main (opt-in safety net)
+        "active_only": False,  # drop pairs of inactive products
         # In-stock only at stores where the main item itself is eligible (sub-only stores stay in every
-        # other metric). Needs roll_to_family_main and instock.method "daily".
+        # other metric). Needs columns.start, roll_to_family_main and instock.method "daily".
         "instock_main_eligible_only": False,
         # In-stock leaves out sizes not in a supersession whose class color is (likely NGF); they stay
         # in every other metric. Needs instock.method "daily".
         "instock_exclude_unsuperseded_sizes": False,
-    },
-    "defined_scope": {  # column mapping of path_segments.defined_scope (README: defined_scope)
-        "grain": "product_store",  # "product" | "product_store" | "product_store_week"
-        "product_col": "product_id",
-        "store_col": "store_id",  # required for the store grains
-        "date_col": "week_start_date",  # date_col / year_col / week_col: product_store_week grain only
-        "year_col": None,
-        "week_col": None,
-        "backfill_leading_gap": True,  # product_store_week only
-    },
-    "scope": {  # README: Scope modes
-        "use_hybrid_scope": False,  # True also backfills the weeks the defined scope leaves uncovered
-        "run_scope_diff": False,  # True adds the defined-vs-score scope comparison
+        "backfill_leading_gap": True,  # weekly only
+        "use_hybrid_scope": False,  # True also backfills the weeks the scope table leaves uncovered
+        "run_scope_diff": False,  # True adds the scope-vs-score comparison
     },
     "score_scope": {  # activity-based scope, used only by use_hybrid_scope and run_scope_diff
         "min_percentile": 0.2,  # a pair-week counts when sales and inventory reach this percentile (20 = 0.2)
         "min_weeks_for_filter": 2,  # pairs with this many weeks or fewer skip the filter
     },
     # UI blocked days, dropped from the metrics named here (README: blocked_scope).
-    # Needs scope_source.mode "operation_scope".
+    # Needs scope.columns.start and store.
     "blocked_scope": {
         "ui_parameters_path": None,  # path under the datastore root; None = blocked scope off
         "rule": "after_scope_start",  # or "all"
-        "solution_id": 21,  # store blocks of these solution(s) only (int or list), whatever scope_source reads
-        "dc_solution_id": None,  # DC blocks of these solution(s); None = no DC blocks (also needs scope_source.dc_solution_id)
+        "solution_id": 21,  # store blocks of these solution(s) only (int or list), whatever scope reads
+        "dc_solution_id": None,  # DC blocks of these solution(s); None = no DC blocks (also needs scope.dc_solution_id)
         "kinds": ["product", "product_destination", "destination"],  # store block folders read
         "dc_kinds": ["product", "product_destination"],  # DC block folders read (no destination folder)
         "metrics": "all",  # metrics that drop blocked days: "all" or a list from METRICS_ALL
@@ -172,7 +172,7 @@ CONFIG: Dict[str, Any] = {
     "instock": {
         "method": "lost_sales_source",
         "daily": {
-            "count_start": "first_daily_row",  # or "scope_start" / "earliest" (need scope_source "operation_scope")
+            "count_start": "first_daily_row",  # or "scope_start" / "earliest" (need scope.columns.start)
             "require_daily_data": True,  # drop pairs with no daily-data row at all
             "history_start": None,  # None = window start; earlier counts pairs stocked before the window
             "usable_only": True,  # usable != 1 days leave the store-days and the in-stock days
@@ -190,7 +190,7 @@ CONFIG: Dict[str, Any] = {
         },
     },
     # dc_in_stock_rate from an expanded inventory_warehouse grid (README: dc_instock). DC metrics read
-    # path_segments.inventory_warehouse for the store scope's products; with scope_source.dc_solution_id set,
+    # path_segments.inventory_warehouse for the store scope's products; with scope.dc_solution_id set,
     # only the DC scope's product x warehouse pairs among them count (None = every warehouse).
     "dc_instock": {
         "enabled": False,
@@ -403,7 +403,7 @@ _ENV_OVERRIDES = (
     ("KPI_ITEM_FAMILY_ROLLUP_DAILY_DATA", ("item_family_rollup", "daily_data"), _parse_bool),
     ("KPI_ITEM_FAMILY_ROLLUP_LOST_SALES", ("item_family_rollup", "lost_sales"), _parse_bool),
     ("KPI_ITEM_FAMILY_ROLLUP_INVENTORY_WAREHOUSE", ("item_family_rollup", "inventory_warehouse"), _parse_bool),
-    ("KPI_ITEM_FAMILY_ROLLUP_DEFINED_SCOPE", ("item_family_rollup", "defined_scope"), _parse_bool),
+    ("KPI_SCOPE_ROLL_TO_FAMILY_MAIN", ("scope", "roll_to_family_main"), _parse_bool),
     ("KPI_SAVE_OUTPUTS", ("output", "save_outputs"), _parse_bool),
     ("KPI_OUTPUT_PATH", ("output", "path_segments"), _comma_list),
     ("KPI_OUTPUT_RUN_DATE", ("output", "run_date"), _strip_or_none),
@@ -579,7 +579,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "PATH_ITEM_FAMILY": fund_paste(bucket, *path_segments["item_family"]),
         "PATH_PRODUCTS": fund_paste(bucket, *path_segments["products"]),
         "PATH_LOST_SALES": fund_paste(bucket, *path_segments["lost_sales"]),
-        "PATH_DEFINED_SCOPE": fund_paste(bucket, *path_segments["defined_scope"]),
         "PATH_LOST_SALES_SLOW": fund_paste(bucket, *cfg["lost_sales_ensemble"]["slow_path_segments"]),
         "PATH_SPEED_CLUSTER": fund_paste(bucket, *cfg["lost_sales_ensemble"]["speed_cluster_path_segments"]),
         "PATH_PRODUCT_PLANNING_LEVEL": fund_paste(bucket, *path_segments["product_planning_level"]),
@@ -643,7 +642,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "daily_data": bool(item_family_rollup_cfg.get("daily_data", True)),
         "lost_sales": bool(item_family_rollup_cfg.get("lost_sales", False)),
         "inventory_warehouse": bool(item_family_rollup_cfg.get("inventory_warehouse", True)),
-        "defined_scope": bool(item_family_rollup_cfg.get("defined_scope", False)),
     }
 
     dc_instock_cfg = cfg["dc_instock"]
@@ -661,23 +659,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         run_min,
         report_end_mode,
     )
-
-    # --- Defined scope ------------------------------------------------------------
-    defined_scope = {**cfg["defined_scope"], "path": paths["PATH_DEFINED_SCOPE"]}
-
-    grain = defined_scope.get("grain", "product_store")
-    valid_grains = {"product", "product_store", "product_store_week"}
-    if grain not in valid_grains:
-        raise ValueError(f"defined_scope.grain must be one of {sorted(valid_grains)}; got {grain!r}")
-    if grain in ("product_store", "product_store_week") and not defined_scope.get("store_col"):
-        raise ValueError(f"defined_scope.grain={grain!r} requires defined_scope.store_col")
-    if grain == "product_store_week" and not (
-        defined_scope.get("date_col") or (defined_scope.get("year_col") and defined_scope.get("week_col"))
-    ):
-        raise ValueError(
-            "defined_scope.grain='product_store_week' requires date_col OR both year_col and week_col"
-        )
-    defined_scope["grain"] = grain
 
     # --- Lost sales ensemble ------------------------------------------------------
     lse = cfg["lost_sales_ensemble"]
@@ -712,32 +693,50 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
                 "speed_cluster_format='wide' and enabled=True"
             )
 
-    # --- Scope source -------------------------------------------------------------
-    scope_source_cfg = cfg["scope_source"]
-    scope_source_run_date = scope_source_cfg["run_date"]
-    scope_source = {
-        "mode": scope_source_cfg["mode"],
-        "solution_id": _solution_ids(scope_source_cfg["solution_id"], "scope_source.solution_id"),
-        "run_date": (
-            datetime.date.fromisoformat(scope_source_run_date) if scope_source_run_date else None
-        ),
-        "roll_to_family_main": bool(scope_source_cfg["roll_to_family_main"]),
-        "active_only": bool(scope_source_cfg["active_only"]),
-        "instock_main_eligible_only": bool(scope_source_cfg["instock_main_eligible_only"]),
-        "instock_exclude_unsuperseded_sizes": bool(scope_source_cfg["instock_exclude_unsuperseded_sizes"]),
-        "dc_solution_id": _optional_solution_ids(scope_source_cfg["dc_solution_id"], "scope_source.dc_solution_id"),
+    # --- Scope --------------------------------------------------------------------
+    scope_cfg = cfg["scope"]
+    scope_run_date = scope_cfg["run_date"]
+    scope = {
+        "path": paths["PATH_SCOPE"],
+        "time": scope_cfg["time"],
+        "grain": scope_cfg["grain"],
+        "columns": {
+            key: scope_cfg["columns"][key]
+            for key in ("product", "store", "start", "end", "solution", "run_date", "date", "year", "week")
+        },
+        "solution_id": _optional_solution_ids(scope_cfg["solution_id"], "scope.solution_id"),
+        "dc_solution_id": _optional_solution_ids(scope_cfg["dc_solution_id"], "scope.dc_solution_id"),
+        "run_date": datetime.date.fromisoformat(scope_run_date) if scope_run_date else None,
+        "roll_to_family_main": bool(scope_cfg["roll_to_family_main"]),
+        "active_only": bool(scope_cfg["active_only"]),
+        "instock_main_eligible_only": bool(scope_cfg["instock_main_eligible_only"]),
+        "instock_exclude_unsuperseded_sizes": bool(scope_cfg["instock_exclude_unsuperseded_sizes"]),
+        "backfill_leading_gap": bool(scope_cfg["backfill_leading_gap"]),
+        "use_hybrid_scope": scope_cfg["use_hybrid_scope"],
+        "run_scope_diff": scope_cfg["run_scope_diff"],
     }
-    if scope_source["mode"] not in ("defined_scope", "operation_scope"):
-        raise ValueError(
-            f"scope_source.mode must be 'defined_scope' or 'operation_scope'; got {scope_source['mode']!r}"
-        )
-    if scope_source["run_date"] is not None and scope_source["run_date"].weekday() != 6:
-        raise ValueError(f"scope_source.run_date must be a Sunday; got {scope_source['run_date']}")
-    operation_scope_mode = scope_source["mode"] == "operation_scope"
-    if scope_source["dc_solution_id"] is not None and not operation_scope_mode:
-        raise ValueError("scope_source.dc_solution_id requires scope_source.mode='operation_scope'")
-    if operation_scope_mode and grain == "product_store_week":
-        raise ValueError("scope_source.mode='operation_scope' does not support defined_scope.grain='product_store_week'")
+    columns = scope["columns"]
+    if scope["time"] not in ("daily", "weekly"):
+        raise ValueError(f"scope.time must be 'daily' or 'weekly'; got {scope['time']!r}")
+    if scope["grain"] not in ("product", "product_store"):
+        raise ValueError(f"scope.grain must be 'product' or 'product_store'; got {scope['grain']!r}")
+    if not columns["product"]:
+        raise ValueError("scope.columns.product is required")
+    if scope["grain"] == "product_store" and not columns["store"]:
+        raise ValueError("scope.grain='product_store' requires scope.columns.store")
+    if scope["time"] == "weekly":
+        if not (columns["date"] or (columns["year"] and columns["week"])):
+            raise ValueError("scope.time='weekly' requires scope.columns.date OR both scope.columns.year and week")
+        if columns["start"] or columns["end"]:
+            raise ValueError("scope.time='weekly' does not support scope.columns.start / end (set them to None)")
+    elif columns["date"] or columns["year"] or columns["week"]:
+        raise ValueError("scope.columns.date / year / week apply to scope.time='weekly' only (set them to None)")
+    if columns["solution"] and scope["solution_id"] is None:
+        raise ValueError("scope.columns.solution requires scope.solution_id")
+    if scope["run_date"] is not None and scope["run_date"].weekday() != 6:
+        raise ValueError(f"scope.run_date must be a Sunday; got {scope['run_date']}")
+    if scope["dc_solution_id"] is not None and not (columns["solution"] and columns["start"] and columns["store"]):
+        raise ValueError("scope.dc_solution_id requires scope.columns.solution, start and store")
 
     # --- Blocked scope ------------------------------------------------------------
     blocked_scope_cfg = cfg["blocked_scope"]
@@ -746,13 +745,13 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     blocked_scope = {
         "rule": blocked_scope_cfg["rule"],
         "path": fund_paste(bucket, *ui_segments, "blocked_scope") if ui_segments is not None else None,
-        # DC blocks of the same snapshot, read only when scope_source.dc_solution_id is set.
+        # DC blocks of the same snapshot, read only when scope.dc_solution_id is set.
         "dc_path": fund_paste(bucket, *ui_segments, "dc_blocked_scope") if ui_segments is not None else None,
     }
     if blocked_scope["rule"] not in ("after_scope_start", "all"):
         raise ValueError(f"blocked_scope.rule must be 'after_scope_start' or 'all'; got {blocked_scope['rule']!r}")
-    if blocked_scope["path"] is not None and not operation_scope_mode:
-        raise ValueError("blocked_scope.ui_parameters_path requires scope_source.mode='operation_scope'")
+    if blocked_scope["path"] is not None and not (columns["start"] and columns["store"]):
+        raise ValueError("blocked_scope.ui_parameters_path requires scope.columns.start and scope.columns.store")
 
     blocked_metrics_cfg = blocked_scope_cfg["metrics"]
     if blocked_metrics_cfg != "all" and not isinstance(blocked_metrics_cfg, (list, tuple)):
@@ -778,8 +777,8 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     blocked_scope["dc_solution_id"] = _optional_solution_ids(
         blocked_scope_cfg["dc_solution_id"], "blocked_scope.dc_solution_id"
     )
-    if blocked_scope["dc_solution_id"] is not None and scope_source["dc_solution_id"] is None:
-        raise ValueError("blocked_scope.dc_solution_id needs scope_source.dc_solution_id (the DC pairs the blocks match)")
+    if blocked_scope["dc_solution_id"] is not None and scope["dc_solution_id"] is None:
+        raise ValueError("blocked_scope.dc_solution_id needs scope.dc_solution_id (the DC pairs the blocks match)")
 
     # --- Daily in-stock -----------------------------------------------------------
     instock_daily_cfg = instock_cfg["daily"]
@@ -802,26 +801,26 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             f"start {window['EFFECTIVE_REPORT_START_DATE']}"
         )
     if instock_method == "daily":
-        if grain == "product":
-            raise ValueError("instock.method='daily' requires a store-level defined_scope.grain (product_store)")
+        if scope["grain"] == "product":
+            raise ValueError("instock.method='daily' requires a store-level scope.grain (product_store)")
         if lse.get("enabled"):
             raise ValueError("instock.method='daily' and lost_sales_ensemble.enabled cannot both be True")
-        if daily_instock["count_start"] != "first_daily_row" and not operation_scope_mode:
+        if daily_instock["count_start"] != "first_daily_row" and not columns["start"]:
             raise ValueError(
-                f"instock.daily.count_start={daily_instock['count_start']!r} needs the operation scope start "
-                "date: set scope_source.mode='operation_scope' or count_start='first_daily_row'."
+                f"instock.daily.count_start={daily_instock['count_start']!r} needs the scope start "
+                "date: set scope.columns.start or count_start='first_daily_row'."
             )
         if daily_instock["count_start"] == "first_daily_row" and not daily_instock["require_daily_data"]:
             raise ValueError("instock.daily.count_start='first_daily_row' requires require_daily_data=True")
-    if scope_source["instock_main_eligible_only"] and not (
-        operation_scope_mode and scope_source["roll_to_family_main"] and instock_method == "daily"
+    if scope["instock_main_eligible_only"] and not (
+        columns["start"] and scope["roll_to_family_main"] and instock_method == "daily"
     ):
         raise ValueError(
-            "scope_source.instock_main_eligible_only requires scope_source.mode='operation_scope', "
+            "scope.instock_main_eligible_only requires scope.columns.start, "
             "roll_to_family_main=True and instock.method='daily'"
         )
-    if scope_source["instock_exclude_unsuperseded_sizes"] and instock_method != "daily":
-        raise ValueError("scope_source.instock_exclude_unsuperseded_sizes requires instock.method='daily'")
+    if scope["instock_exclude_unsuperseded_sizes"] and instock_method != "daily":
+        raise ValueError("scope.instock_exclude_unsuperseded_sizes requires instock.method='daily'")
     if report_end_mode == "latest_day" and instock_method != "daily":
         raise ValueError(
             "reporting_window.report_end='latest_day' requires instock.method='daily': the YTD cut at the "
@@ -921,7 +920,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             f"choose at least one of {list(COMPARABLE_KINDS_ALL)}"
         )
 
-    # Grain of the like-for-like pair population itself, not defined_scope.grain.
+    # Grain of the like-for-like pair population itself, not scope.grain.
     comparable_pairs_grain = comparable_pairs_cfg.get("grain", "product_store")
     comparable_pairs_pair_days = comparable_pairs_cfg["pair_days"]
     if comparable_pairs_pair_days not in ("unblocked", "all"):
@@ -1000,8 +999,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "DAILY_TIME_COLUMNS": cfg["fiscal_calendar"]["daily_time_columns"],
         "SCOPE_MIN_PERCENTILE": min_pct,
         "SCOPE_MIN_WEEKS_FOR_FILTER": score_scope["min_weeks_for_filter"],
-        "USE_HYBRID_SCOPE": cfg["scope"]["use_hybrid_scope"],
-        "RUN_SCOPE_DIFF": cfg["scope"].get("run_scope_diff", False),
         "COMPARABLE_PAIRS_ENABLED": comparable_pairs_enabled,
         "COMPARABLE_KINDS": comparable_kinds,
         "COMPARABLE_PAIRS_GRAIN": comparable_pairs_grain,
@@ -1020,14 +1017,13 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "INSTOCK_SOURCE_COLUMN_MAP": instock_source_column_map,
         "ITEM_FAMILY_COLUMN_MAP": item_family_column_map,
         "ITEM_FAMILY_ROLLUP": item_family_rollup,
-        "SCOPE_SOURCE": scope_source,
+        "SCOPE": scope,
         "BLOCKED_SCOPE": blocked_scope,
         "INSTOCK_DAILY": daily_instock,
         "GOODS_IN_TRANSIT": goods_in_transit,
         "DC_INSTOCK_ENABLED": dc_instock_enabled,
         "DC_INSTOCK_STOCK_THRESHOLD": dc_instock_stock_threshold,
         **paths,
-        "DEFINED_SCOPE": defined_scope,
         "INPUT_FILTERS": cfg.get("input_filters", {}),
         "SLICE_DIMENSIONS": cfg["slices"]["dimensions"],
         "DERIVED_SLICE_DIMENSIONS": cfg["slices"]["derived_dimensions"],
