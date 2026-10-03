@@ -33,7 +33,7 @@ from pyspark.sql import functions as F
 
 from kpi_pipeline.comparisons import _comparison_dimensions, _comparison_roots, _series_groups, build_comparison_long
 from kpi_pipeline.context import KPIContext
-from kpi_pipeline.kpi_long import _period_frames, kpi_long_frame, kpi_rows
+from kpi_pipeline.kpi_long import _METRIC_FRAMES, _period_frames, kpi_long_frame, kpi_rows
 
 _PAIR_KEYS = ["product_id", "store_id"]
 _PRODUCT_KEYS = ["product_id"]
@@ -262,7 +262,13 @@ def _build_comparable_kind(
         period_filter = F.col("Year").isin([prior_year, current_year])
         if numbered:
             period_filter = period_filter & (F.col(numbered.number_col) == number)
-        rows = _comparable_period_rows(ctx, restricted, period_filter, period_type, period_col)
+        # The link's restricted rows, cached once: every root x cut aggregation below reads them instead of
+        # re-joining the full frames to the comparable keys. compute_kpis / build_kpi_table apply the same
+        # period_filter to these five frames again, a no-op on rows that already match.
+        link_frames = {key: restricted[key].filter(period_filter).cache() for key in _METRIC_FRAMES}
+        rows = _comparable_period_rows(ctx, {**restricted, **link_frames}, period_filter, period_type, period_col)
+        for frame in link_frames.values():
+            frame.unpersist()
 
         tagged = rows.copy()
         tagged.insert(0, "comparison_type", comparison_type)

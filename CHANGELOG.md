@@ -23,6 +23,8 @@ Every metric computes exactly as before; the configs resolve to identical settin
   readers use; scope-adjustment steps are cached; mean_stock / total_mean_stock / turnover share one
   day-level groupBy when their populations match; redundant `distinct()`s and the full-history
   `inventory_warehouse` cache removed.
+- **Comparable pairs**: each year link's restricted rows are cached once, so the root x cut aggregations
+  read them instead of re-joining the full frames to the comparable keys for every metric.
 - **Early output**: `KPIRunner` displays the latest overall KPIs right after `kpi_long` is built, then the
   overall comparisons and comparable views as each finishes.
 - **Configs**: `config.py` / `tbretail_config.py` regrouped into nine numbered sections with short
