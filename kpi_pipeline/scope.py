@@ -165,9 +165,17 @@ def build_blocked_product_days(ctx: KPIContext) -> None:
     daily in-stock frame, a weekly in-stock source with a store column) uses ctx.blocked_days, built from every
     kind in blocked_scope.kinds. Only the in-stock frame of a source without a store column uses these
     product-level intervals, as product_destination / destination blocks name a store it does not have.
+    Both are also printed at run time.
     """
     cfg = ctx.settings["BLOCKED_SCOPE"]
+    store_kinds = [k for k in cfg["kinds"] if k != "product"]
+    if store_kinds:
+        print(
+            f"note: the in-stock source has no store column, so in-stock applies only 'product' blocks; {store_kinds} "
+            "still apply to every store-level metric (sales, WOS, turnover, inventory)"
+        )
     if "product" not in cfg["kinds"]:
+        print("note: 'product' is not in blocked_scope.kinds, so no block applies to the store-less in-stock source")
         return
     products = ctx.scope_pairs.groupBy("product_id").agg(F.min("scope_start").alias("scope_start"))
     ctx.blocked_product_days = _applied_block_intervals(
