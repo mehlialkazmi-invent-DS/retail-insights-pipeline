@@ -235,7 +235,7 @@ def get_daily_data_raw(ctx) -> DataFrame:
     [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] dropped, rolled to the family main when
     ITEM_FAMILY_ROLLUP["daily_data"] is True, and only the columns its readers use.
 
-    Every reader (build_scoped_daily, scope.read_daily_for_scope, scope.apply_scope_adjustments,
+    Every reader (build_scoped_daily, scope.read_daily_for_scope,
     fiscal.build_time_grain_from_daily_data) keeps only window dates itself, so the window filter and the
     column selection drop nothing they read; they only keep the cache small.
 

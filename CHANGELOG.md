@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `instock.method` + `instock.daily` / `instock.weekly_source`, and "blocked days removed" as flagged and
 > removed per `blocked_scope.metrics` (see "Config simplification" and "Per-metric blocked scope gate").
 
+#### Scope adjustments removed; tbretail scope is the open operation scope only (changes tbretail's numbers)
+
+`scope_adjustments` (manual additions and removals from CSV / Delta) is deleted: added pairs could not go through
+the scope rules (no scope start, so no blocks; no main-eligible), and a pair inside the scope needs no addition.
+The scope now comes only from the scope source; NVROUT / COMP / NON-COMP are labels from `dimension_sources`, and
+`metrics.population_filters` leaves a labelled group out of a metric. `KPIRunner.prepare_scopes()` /
+`build_scopes()` no longer take `fund_paste`; `scope_before_adjustments_summary` and
+`scope_adjustment_steps_table` are gone. For tbretail this drops the "NGF products" and `nvrout_scope_backfill`
+additions, which put products at every store with daily data outside the scope rules and pulled NVROUT in-stock
+5–20 points below the in-stock script that matched the client.
+
 #### Faster runs, results shown as they finish, simpler configs (no metric changes)
 
 Every metric computes exactly as before; the configs resolve to identical settings.

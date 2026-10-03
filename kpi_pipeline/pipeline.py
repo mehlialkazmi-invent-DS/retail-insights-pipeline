@@ -376,11 +376,10 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
     """In-stock frame of instock.method="daily": per scope pair x fiscal week, stocked_pairs (in-stock days)
     and available_days (counted store-days), the shape of the weekly inst_data, from noob/daily-data.
 
-    Pairs: the scope pairs after instock.daily.input_filters and the scope_source in-stock client rules
-    (scope additions included; they have no scope_start and get no blocks). Each pair counts from its
-    count start (instock.daily.count_start: "first_daily_row" from history_start, "scope_start", or the
-    "earliest" of the two), clipped to the window start, to the window end; require_daily_data drops pairs
-    without a daily row. A day without a daily row counts as out of stock.
+    Pairs: the scope pairs after instock.daily.input_filters and the scope_source in-stock client rules.
+    Each pair counts from its count start (instock.daily.count_start: "first_daily_row" from history_start,
+    "scope_start", or the "earliest" of the two), clipped to the window start, to the window end;
+    require_daily_data drops pairs without a daily row. A day without a daily row counts as out of stock.
 
     Removed from the store-days: blocked days when in_stock_rate is in blocked_scope.metrics, and days with
     usable != 1 when usable_only. An in-stock day is a usable day with inventory > 0 or, with

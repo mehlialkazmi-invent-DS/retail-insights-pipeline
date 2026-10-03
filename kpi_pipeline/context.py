@@ -62,10 +62,6 @@ class KPIContext:
     # DC blocks on only: cached disjoint (product_id, warehouse_id, first_day, last_day) block intervals.
     dc_blocked_days: Optional[DataFrame] = None
 
-    scope_adjustments_applied: bool = False
-    scope_before_adjustments: Optional[DataFrame] = None
-    scope_adjustment_steps: List[Dict[str, Any]] = field(default_factory=list)
-
     hybrid_scope_keys: Optional[DataFrame] = None
     score_only_scope_keys: Optional[DataFrame] = None
     hybrid_frames: Optional[Dict[str, DataFrame]] = None

@@ -1,10 +1,10 @@
-"""Defined scope, score-based scope, hybrid union, and manual scope adjustments."""
+"""Defined scope, score-based scope and hybrid union."""
 
 from __future__ import annotations
 
 import datetime
 from functools import reduce
-from typing import Any, Callable, Dict, List, Optional
+from typing import List
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
@@ -17,7 +17,6 @@ from kpi_pipeline.inputs import (
     get_daily_data_raw,
     read_active_product_ids,
     read_blocked_scope_source,
-    read_csv_source,
     read_defined_scope_source,
     read_operation_scope_source,
     rename_column_or_fail,
@@ -161,8 +160,7 @@ def _blocked_pair_days(intervals: DataFrame) -> int:
 def build_blocked_days(ctx: KPIContext) -> None:
     """Build ctx.blocked_days, the cached (product_id, store_id, first_day, last_day) block intervals of
     {ui_parameters_path}/blocked_scope for scope_source.solution_id, matched to the operation-scope pairs
-    (None when blocked_scope.ui_parameters_path is None). Pairs added by scope_adjustments are not
-    operation-scope pairs, so no block reaches them. The metrics named in blocked_scope.metrics drop the
+    (None when blocked_scope.ui_parameters_path is None). The metrics named in blocked_scope.metrics drop the
     blocked days; the daily frames only flag them (pipeline._flag_blocked_days).
     """
     if ctx.blocked_days is not None:
@@ -447,55 +445,6 @@ def build_hybrid_scope(ctx: KPIContext) -> None:
     print("missing_weeks:", missing_weeks.count(), "| final_scope:", ctx.hybrid_scope_keys.count())
 
 
-def _resolve_adjustment_path(
-    ctx: KPIContext, adj_cfg: Dict[str, Any], fund_paste: Optional[Callable[..., str]] = None
-) -> str:
-    if adj_cfg.get("path"):
-        return adj_cfg["path"]
-    segments = adj_cfg.get("path_segments")
-    if segments:
-        if fund_paste is None:
-            raise ValueError(
-                "scope adjustment uses path_segments but fund_paste was not provided; "
-                "set an absolute 'path' instead."
-            )
-        return fund_paste(ctx.settings["BUCKET"], *segments)
-    raise ValueError("scope adjustment requires 'path' or 'path_segments'")
-
-
-def _adjustment_source(adj_cfg: Dict[str, Any], path: str) -> str:
-    source = (adj_cfg.get("source") or "").strip().lower()
-    if source in {"delta", "csv"}:
-        return source
-    return "csv" if path.lower().endswith(".csv") else "delta"
-
-
-def _read_adjustment_raw(ctx: KPIContext, adj_cfg: Dict[str, Any], path: str) -> DataFrame:
-    """Load an adjustment table from Delta or CSV (``"location": "workspace"`` reads a /Workspace/... CSV)."""
-    source = _adjustment_source(adj_cfg, path)
-    if source == "csv":
-        print(f"scope adjustment source: csv ({path})")
-        return read_csv_source(
-            ctx.spark,
-            path,
-            csv_options=adj_cfg.get("csv_options") or {},
-            location=adj_cfg.get("location", "datastore"),
-        )
-    print(f"scope adjustment source: delta ({path})")
-    return ctx.spark.read.format("delta").load(path)
-
-
-def _enabled_adjustments(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-    steps = []
-    for adj in cfg.get("additions", []):
-        if adj.get("enabled"):
-            steps.append({**adj, "action": "addition"})
-    for adj in cfg.get("removals", []):
-        if adj.get("enabled"):
-            steps.append({**adj, "action": "removal"})
-    return steps
-
-
 def scope_summary_by_origin(scope: DataFrame):
     """Row counts by scope_origin, plus a TOTAL row."""
     spark = scope.sparkSession
@@ -507,185 +456,3 @@ def scope_summary_by_origin(scope: DataFrame):
     total = sum(int(row["scope_rows"]) for row in origin_rows)
     total_row = spark.createDataFrame([("TOTAL", total)], ["scope_origin", "scope_rows"])
     return by_origin.unionByName(total_row).orderBy(F.desc(F.col("scope_origin") == "TOTAL"), "scope_origin")
-
-
-def print_scope_summary(title: str, scope: DataFrame, scope_keys: List[str]) -> None:
-    """Print a human-readable scope snapshot."""
-    print(title)
-    print(f"  grain: {scope_keys}")
-    if "scope_origin" not in scope.columns:
-        print(f"  total rows: {scope.count():,}")
-        return
-    origin_rows = scope.groupBy("scope_origin").agg(F.count(F.lit(1)).alias("scope_rows")).collect()
-    total = sum(int(row["scope_rows"]) for row in origin_rows)
-    print(f"  total rows: {total:,}")
-    print("  by scope_origin:")
-    for row in sorted(origin_rows, key=lambda r: r["scope_origin"]):
-        print(f"    {row['scope_origin']}: {row['scope_rows']:,}")
-
-
-def _adjustment_select_cols(adj_cfg: Dict[str, Any], join_keys: List[str]) -> List:
-    cols = []
-    product_col = adj_cfg.get("product_col", "product_id")
-    store_col = adj_cfg.get("store_col", "store_id")
-    if "product_id" in join_keys:
-        cols.append(F.col(product_col).alias("product_id"))
-    if "store_id" in join_keys:
-        cols.append(F.col(store_col).alias("store_id"))
-    return cols
-
-
-def _read_adjustment_keys(
-    ctx: KPIContext,
-    adj_cfg: Dict[str, Any],
-    path: str,
-    scope_pairs: Optional[DataFrame] = None,
-) -> DataFrame:
-    """An adjustment table's keys at the scope_keys grain for the report window. ``scope_pairs`` (distinct
-    daily-data pairs) expands a single-key adjustment to the other key."""
-    join_keys = adj_cfg["join_keys"]
-    raw = _read_adjustment_raw(ctx, adj_cfg, path)
-    window_weeks = _window_weeks(ctx).select("Year", "Week", "week_start_date", "week_end_date")
-
-    date_col = adj_cfg.get("date_col")
-    year_col = adj_cfg.get("year_col")
-    week_col = adj_cfg.get("week_col")
-
-    if date_col:
-        sel = _adjustment_select_cols(adj_cfg, join_keys) + [F.to_date(F.col(date_col)).alias("scope_date")]
-        keyed = raw.select(*sel).distinct()
-        keyed = keyed.join(
-            broadcast(ctx.fiscal_cal.select(F.col("date").alias("scope_date"), "Year", "Week")),
-            on="scope_date",
-            how="inner",
-        ).drop("scope_date")
-        keyed = keyed.join(window_weeks.select("Year", "Week"), on=["Year", "Week"], how="inner")
-    elif year_col and week_col:
-        sel = _adjustment_select_cols(adj_cfg, join_keys) + [
-            F.col(year_col).cast("int").alias("Year"),
-            F.col(week_col).cast("int").alias("Week"),
-        ]
-        keyed = raw.select(*sel).distinct()
-        keyed = keyed.join(window_weeks.select("Year", "Week"), on=["Year", "Week"], how="inner")
-    else:
-        base = raw.select(*_adjustment_select_cols(adj_cfg, join_keys)).distinct()
-        keyed = base.crossJoin(window_weeks.select("Year", "Week"))
-
-    if "store_id" in ctx.scope_keys and "store_id" not in join_keys and "product_id" in join_keys:
-        keyed = keyed.join(scope_pairs, on="product_id", how="inner")
-
-    if "product_id" in ctx.scope_keys and "product_id" not in join_keys and "store_id" in join_keys:
-        keyed = keyed.join(scope_pairs, on="store_id", how="inner")
-
-    output_cols = [c for c in ctx.scope_keys if c in keyed.columns]
-    return keyed.select(*output_cols).distinct()
-
-
-def _anti_join_by_keys(scope: DataFrame, removal_keys: DataFrame, join_keys: List[str]) -> DataFrame:
-    """Anti-join ``scope`` against ``removal_keys`` on the adjustment's ``join_keys`` the scope grain carries,
-    plus Year/Week. A product-only removal under a product_store scope therefore removes every store of the
-    product. Fails when no non-time join key is left (a Year/Week-only match would strike whole weeks).
-    """
-    key_cols = set(scope.columns) & set(removal_keys.columns)
-    join_on = [k for k in join_keys if k in key_cols and k not in ("Year", "Week")]
-    join_on += [k for k in ("Year", "Week") if k in key_cols]
-    if all(k in ("Year", "Week") for k in join_on):
-        raise ValueError(
-            f"scope adjustment removal join_keys={join_keys} share no usable non-time column "
-            f"with the resolved scope grain {sorted(scope.columns)}; check defined_scope.grain "
-            "is compatible with this adjustment's join_keys/store_col."
-        )
-    return scope.join(removal_keys.select(*join_on).distinct(), on=join_on, how="left_anti")
-
-
-def apply_scope_adjustments(ctx: KPIContext, fund_paste: Optional[Callable[..., str]] = None) -> None:
-    """Apply the enabled scope_adjustments additions and removals, in order, to ctx.hybrid_scope_keys.
-
-    Each step's scope is cached, so its row counts, its summary and the next step read it once instead of
-    recomputing every earlier step.
-    """
-    cfg = ctx.settings.get("SCOPE_ADJUSTMENTS", {})
-    enabled = _enabled_adjustments(cfg)
-
-    ctx.scope_adjustments_applied = False
-    ctx.scope_before_adjustments = None
-    ctx.scope_adjustment_steps = []
-
-    if not enabled:
-        return
-
-    scope = ctx.hybrid_scope_keys
-    ctx.scope_before_adjustments = scope.cache()
-    ctx.scope_adjustments_applied = True
-
-    # Distinct (product, store) pairs with daily data in the window, for single-key adjustments: a
-    # join_keys=["product_id"] addition expands to every store selling the product.
-    needs_pairs = any(
-        ("store_id" in ctx.scope_keys and "store_id" not in adj["join_keys"] and "product_id" in adj["join_keys"])
-        or ("product_id" in ctx.scope_keys and "product_id" not in adj["join_keys"] and "store_id" in adj["join_keys"])
-        for adj in enabled
-    )
-    scope_pairs: Optional[DataFrame] = None
-    if needs_pairs:
-        scope_pairs = get_daily_data_raw(ctx).select("product_id", "store_id").distinct().cache()
-
-    print("=" * 72)
-    print("SCOPE ADJUSTMENTS — scope BEFORE additions/removals")
-    print_scope_summary("Base scope (hybrid or defined-only)", ctx.scope_before_adjustments, ctx.scope_keys)
-
-    # Counted on scope_keys only (not scope_origin): a key already in scope must not read as new coverage
-    # because a later step claims it under another origin.
-    before_count = scope.select(*ctx.scope_keys).distinct().count()
-    for adj in enabled:
-        path = _resolve_adjustment_path(ctx, adj, fund_paste)
-        source = _adjustment_source(adj, path)
-        action = adj["action"]
-        previous = scope
-
-        if action == "addition":
-            label = adj.get("label", "manual_add")
-            add_keys = _read_adjustment_keys(ctx, adj, path, scope_pairs).withColumn("scope_origin", F.lit(label))
-            # A key keeps the FIRST origin it was claimed under: keys already in scope are anti-joined out
-            # before the union, or the key would get a second row under this label.
-            new_keys = add_keys.join(scope.select(*ctx.scope_keys).distinct(), on=ctx.scope_keys, how="left_anti")
-            scope = scope.unionByName(new_keys.select(*scope.columns)).distinct().cache()
-        else:
-            removal_keys = _read_adjustment_keys(ctx, adj, path, scope_pairs)
-            scope = _anti_join_by_keys(scope, removal_keys, adj["join_keys"]).distinct().cache()
-        after_count = scope.select(*ctx.scope_keys).distinct().count()
-        if previous is not ctx.scope_before_adjustments:
-            previous.unpersist()
-
-        step = {"action": action}
-        if action == "addition":
-            step["label"] = label
-        step.update(
-            {
-                "source": source,
-                "path": path,
-                "join_keys": adj["join_keys"],
-                "rows_before": before_count,
-                "rows_after": after_count,
-                "rows_delta": after_count - before_count,
-            }
-        )
-        print("-" * 72)
-        if action == "addition":
-            print(f"ADDITION '{label}' from {source}: {path}")
-            print(f"  join_keys: {adj['join_keys']} | rows added (net): {step['rows_delta']:,}")
-        else:
-            print(f"REMOVAL from {source}: {path}")
-            print(f"  join_keys: {adj['join_keys']} | rows removed: {before_count - after_count:,}")
-
-        ctx.scope_adjustment_steps.append(step)
-        print_scope_summary(f"Scope AFTER {action}", scope, ctx.scope_keys)
-        before_count = after_count
-
-    if scope_pairs is not None:
-        scope_pairs.unpersist()
-    # Every step ends with distinct(), so the last step's cached frame is the final scope as is.
-    ctx.hybrid_scope_keys = scope
-    print("=" * 72)
-    print("SCOPE ADJUSTMENTS — FINAL scope used for KPIs")
-    print_scope_summary("Final scope", ctx.hybrid_scope_keys, ctx.scope_keys)
-    print("=" * 72)

@@ -12,8 +12,8 @@
 # Before each run: update reporting_window.as_of_date to a day noob/daily-data has reached.
 #
 # What this config turns on:
-#   Scope       operation scope (solution 21, family mains, active products) at product_store grain, plus three
-#               product additions (JAB, NGF products, nvrout_scope_backfill); the NON-COMP removal is OFF
+#   Scope       operation scope (solution 21, family mains, active products) at product_store grain, nothing
+#               added or removed; NVROUT, COMP and NON-COMP are labels from dimension_sources
 #   Window      report_end "latest_day": YTD runs to as_of_date, other views show complete periods; Half tab on
 #   In-stock    instock.method "daily" (on-hand or store GIT, count start "earliest", ECOM stores left out);
 #               metrics.population_filters leaves NON-COMP out of in_stock_rate only
@@ -154,82 +154,6 @@ CONFIG: Dict[str, Any] = {
     "score_scope": {  # activity-based scope, used only by use_hybrid_scope and run_scope_diff (both OFF)
         "min_percentile": 0.2,  # a pair-week counts when sales and inventory reach this percentile (20 = 0.2)
         "min_weeks_for_filter": 2,  # pairs with this many weeks or fewer skip the filter
-    },
-    # Manual product additions / removals (README: Manual scope adjustments). Additions skip the
-    # operation-scope roll-up and blocks.
-    "scope_adjustments": {
-        "additions": [
-            {
-                "enabled": False,
-                "label": "jab_products",  # name shown in logs
-                "source": "csv",  # "csv" | "delta"
-                "path": (
-                    "/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
-                    "KPI-NEW/data/jab_product_ids.csv"
-                ),
-                "location": "workspace",  # "workspace" file or "datastore" (under the bucket)
-                "csv_options": {"header": True, "inferSchema": True},
-                "join_keys": ["product_id"],
-                "product_col": "product_id",
-                "store_col": None,  # store_col and the time columns None = every store, every week
-                "date_col": None,
-                "year_col": None,
-                "week_col": None,
-            },
-            # UNCONFIRMED: same CSV as the NON-COMP removal below, but added to scope (README, "tbretail setup").
-            {
-                "enabled": True,
-                "label": "NGF products",
-                "source": "csv",
-                "path": (
-                    "/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
-                    "KPI-NEW/data/non_comp_ids_20260817.csv"
-                ),
-                "location": "workspace",
-                "csv_options": {"header": True, "inferSchema": True},
-                "join_keys": ["product_id"],
-                "product_col": "product_id",
-                "store_col": None,
-                "date_col": None,
-                "year_col": None,
-                "week_col": None,
-            },
-            {
-                "enabled": True,
-                "label": "nvrout_scope_backfill",
-                "source": "csv",
-                "path": (
-                    "/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
-                    "KPI-NEW/data/nvrout_product_ids.csv"
-                ),
-                "location": "workspace",
-                "csv_options": {"header": True, "inferSchema": True},
-                "join_keys": ["product_id"],
-                "product_col": "product_id",
-                "store_col": None,
-                "date_col": None,
-                "year_col": None,
-                "week_col": None,
-            },
-        ],
-        "removals": [  # NON-COMP removal: OFF
-            {
-                "enabled": False,
-                "source": "csv",
-                "path": (
-                    "/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
-                    "KPI-NEW/data/non_comp_ids_20260817.csv"
-                ),
-                "location": "workspace",
-                "csv_options": {"header": True, "inferSchema": True},
-                "join_keys": ["product_id"],
-                "product_col": "product_id",
-                "store_col": None,
-                "date_col": None,
-                "year_col": None,
-                "week_col": None,
-            },
-        ],
     },
     # UI blocked days, dropped from the metrics named here (README: blocked_scope).
     # Needs scope_source.mode "operation_scope". Sales units / revenue, AUR, AUC, distinct counts and
@@ -615,26 +539,6 @@ def _validate_scope_diff_metrics(scope_diff_metrics: list, metric_cols: list) ->
             f"metrics.scope_diff_metrics has entr{'y' if len(unknown) == 1 else 'ies'} "
             f"{unknown} not in metrics.metric_cols {sorted(known)}."
         )
-
-
-def _validate_scope_adjustments(scope_adjustments_cfg: Dict[str, Any]) -> None:
-    """An enabled addition / removal needs join_keys and a path or path_segments (scope.py indexes them)."""
-    for section in ("additions", "removals"):
-        for entry in scope_adjustments_cfg.get(section, []) or []:
-            if not entry.get("enabled"):
-                continue
-            label = entry.get("label", f"scope_adjustments.{section}[unlabeled]")
-            join_keys = entry.get("join_keys")
-            if not join_keys or not isinstance(join_keys, (list, tuple)):
-                raise ValueError(
-                    f"scope_adjustments.{section} entry {label!r} is enabled but has no "
-                    f"non-empty join_keys list."
-                )
-            if not entry.get("path") and not entry.get("path_segments"):
-                raise ValueError(
-                    f"scope_adjustments.{section} entry {label!r} is enabled but has neither "
-                    f"'path' nor 'path_segments' set."
-                )
 
 
 def _sunday_of_week(d: datetime.date) -> datetime.date:
@@ -1065,7 +969,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     if "half" in comparable_kinds and not half_periods:
         raise ValueError("comparable_pairs.kinds 'half' needs fiscal_calendar.half_periods=True")
 
-    # --- Output, metrics, scope adjustments, score scope, HTML report, run mode -------
+    # --- Output, metrics, score scope, HTML report, run mode -------
     output_cfg = cfg["output"]
     output_root = fund_paste(bucket, *output_cfg["path_segments"])
     run_date_raw = output_cfg.get("run_date")
@@ -1085,8 +989,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         raise ValueError(f"metrics.metric_cols has unknown metrics {unknown_metric_cols}; allowed: {list(METRICS_ALL)}")
     _validate_population_filters(population_filters, metrics["metric_cols"])
     _validate_scope_diff_metrics(metrics["scope_diff_metrics"], metrics["metric_cols"])
-
-    _validate_scope_adjustments(cfg.get("scope_adjustments", {}) or {})
 
     score_scope = cfg["score_scope"]
     min_pct = _as_fraction(score_scope["min_percentile"])
@@ -1137,7 +1039,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "COMPARABLE_PAIRS_GRAIN": comparable_pairs_grain,
         "COMPARABLE_PAIRS_PAIR_DAYS": comparable_pairs_pair_days,
         "COMPARISON_KINDS": comparison_kinds,
-        "SCOPE_ADJUSTMENTS": cfg.get("scope_adjustments", {}),
         # .get() here: the checks above require fast_mover_clusters only when enabled and
         # speed_cluster_attribute_name only for the "long" format.
         "LOST_SALES_ENSEMBLE_ENABLED": lse.get("enabled", False),

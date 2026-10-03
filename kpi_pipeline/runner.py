@@ -20,7 +20,6 @@ from kpi_pipeline.io import build_save_plan, load_saved_outputs, save_outputs
 from kpi_pipeline.kpi_long import build_kpi_long, trim_periods_to_recent
 from kpi_pipeline.pipeline import build_pipeline_frames
 from kpi_pipeline.scope import (
-    apply_scope_adjustments,
     build_blocked_days,
     build_dc_blocked_days,
     build_dc_scope,
@@ -197,7 +196,7 @@ class KPIRunner:
         if self.settings.get("RUN_MODE", "full") == "html_only":
             return self.run_html_only(fund_paste=fund_paste)
         if not self._scopes_ready:
-            self.prepare_scopes(fund_paste=fund_paste)
+            self.prepare_scopes()
         self._scopes_ready = False
         self.build_kpis()
         self.build_comparisons()
@@ -213,25 +212,24 @@ class KPIRunner:
                 )
         return self.ctx
 
-    def prepare_scopes(self, fund_paste=None) -> None:
+    def prepare_scopes(self) -> None:
         """Reset the run caches, then build the dimensions and scopes. The next run() reuses them (the
         notebook's Scope debug cell), so they are not built twice; a later run() builds them again."""
         self._reset_run_caches()
         self.build_dimensions()
-        self.build_scopes(fund_paste=fund_paste)
+        self.build_scopes()
         self._scopes_ready = True
 
     def build_dimensions(self) -> None:
         apply_report_end_mode(self.ctx)
         build_fiscal_and_products(self.ctx)
 
-    def build_scopes(self, fund_paste=None) -> None:
+    def build_scopes(self) -> None:
         build_defined_scope(self.ctx)
         build_blocked_days(self.ctx)
         build_dc_scope(self.ctx)
         build_dc_blocked_days(self.ctx)
         build_hybrid_scope(self.ctx)
-        apply_scope_adjustments(self.ctx, fund_paste=fund_paste)
 
     def latest_overall_kpis(self) -> pd.DataFrame:
         """kpi_long's overall rows (root and dimension "overall") of the latest period of each period_type,
@@ -326,12 +324,3 @@ class KPIRunner:
     def hybrid_scope_summary(self):
         return scope_summary_by_origin(self.ctx.hybrid_scope_keys)
 
-    def scope_before_adjustments_summary(self):
-        if self.ctx.scope_before_adjustments is None:
-            return None
-        return scope_summary_by_origin(self.ctx.scope_before_adjustments)
-
-    def scope_adjustment_steps_table(self):
-        if not self.ctx.scope_adjustment_steps:
-            return None
-        return pd.DataFrame(self.ctx.scope_adjustment_steps)
