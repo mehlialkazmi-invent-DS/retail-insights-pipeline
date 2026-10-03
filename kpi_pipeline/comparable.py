@@ -114,12 +114,16 @@ def _complete_period_years(ctx: KPIContext, kind: str, number: int) -> List[int]
 
 def _intersect_years(frame: DataFrame, years: Sequence[int], key_cols: List[str]) -> DataFrame:
     """Cached distinct ``key_cols`` present in ``frame`` in every one of ``years`` (``frame`` already holds
-    only the rows that count for each year)."""
-    year_frames = [frame.filter(F.col("Year") == y).select(*key_cols).distinct() for y in years]
-    common = year_frames[0]
-    for yf in year_frames[1:]:
-        common = common.intersect(yf)
-    return common.cache()
+    only the rows that count for each year), in one pass: a key is in every year when its rows of
+    ``years`` span ``len(years)`` distinct years."""
+    return (
+        frame.filter(F.col("Year").isin(list(years)))
+        .groupBy(*key_cols)
+        .agg(F.countDistinct("Year").alias("_years"))
+        .filter(F.col("_years") == len(years))
+        .select(*key_cols)
+        .cache()
+    )
 
 
 def _comparable_period_rows(
@@ -258,17 +262,24 @@ def _build_comparable_kind(
     save_parts: List[pd.DataFrame] = []
     display = pd.DataFrame()
 
+    def _year_rows(year: int) -> Dict[str, DataFrame]:
+        # One year's restricted rows, cached once and shared by the (up to) two links the year is in, so
+        # every root x cut aggregation reads them instead of re-joining the full frames to the comparable keys.
+        return {key: _in_number(restricted[key].filter(F.col("Year") == year)).cache() for key in _METRIC_FRAMES}
+
+    prior_frames = _year_rows(years[0])
     for prior_year, current_year in zip(years, years[1:]):
         period_filter = F.col("Year").isin([prior_year, current_year])
         if numbered:
             period_filter = period_filter & (F.col(numbered.number_col) == number)
-        # The link's restricted rows, cached once: every root x cut aggregation below reads them instead of
-        # re-joining the full frames to the comparable keys. compute_kpis / build_kpi_table apply the same
-        # period_filter to these five frames again, a no-op on rows that already match.
-        link_frames = {key: restricted[key].filter(period_filter).cache() for key in _METRIC_FRAMES}
+        # The link's rows: its two (distinct) years' rows. compute_kpis / build_kpi_table apply period_filter
+        # to these five frames again, a no-op on rows that already match.
+        current_frames = _year_rows(current_year)
+        link_frames = {key: prior_frames[key].unionByName(current_frames[key]) for key in _METRIC_FRAMES}
         rows = _comparable_period_rows(ctx, {**restricted, **link_frames}, period_filter, period_type, period_col)
-        for frame in link_frames.values():
+        for frame in prior_frames.values():
             frame.unpersist()
+        prior_frames = current_frames
 
         tagged = rows.copy()
         tagged.insert(0, "comparison_type", comparison_type)
@@ -291,6 +302,8 @@ def _build_comparable_kind(
         if not disp.empty:
             display = disp  # latest link's overall display wins, full detail is in the save table
 
+    for frame in prior_frames.values():
+        frame.unpersist()
     common_keys.unpersist()
     dc_common_keys.unpersist()
     dc_inst_common_keys.unpersist()

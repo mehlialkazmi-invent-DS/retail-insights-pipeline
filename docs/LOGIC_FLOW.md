@@ -392,13 +392,13 @@ Complete period: its real start is on or after `EFFECTIVE_REPORT_START_DATE` and
 Like-for-like comparison. Off unless `comparable_pairs.enabled`. For each kind in `comparable_pairs.kinds`:
 
 1. Take the kind's period frames (same completeness as above).
-2. To find the pairs present in a year, look at real daily rows only (`has_daily_row`). With `pair_days = "unblocked"` blocked days do not count as presence either (`comparable.py:229-236`). `all` lets blocked days count.
-3. A pair qualifies if it appears in every qualifying year (intersection) (`comparable.py:245-247`). The pair grain is `comparable_pairs.grain`: `product_store` or `product`.
-4. Recompute every metric over that one pair population and compare each consecutive year link (`comparable.py:255-290`).
-5. `dc_daily` and `dc_inst` each get their own (product, warehouse) universe (`comparable.py:246-247`, `comparable.py:98-102`). `dc_inst` rows need `dc_unblocked_days > 0` under `unblocked`.
+2. To find the pairs present in a year, look at real daily rows only (`has_daily_row`). With `pair_days = "unblocked"` blocked days do not count as presence either (`comparable.py:233-240`). `all` lets blocked days count.
+3. A pair qualifies if it appears in every qualifying year (intersection) (`comparable.py:249-251`). The pair grain is `comparable_pairs.grain`: `product_store` or `product`.
+4. Recompute every metric over that one pair population and compare each consecutive year link (`comparable.py:259-303`).
+5. `dc_daily` and `dc_inst` each get their own (product, warehouse) universe (`comparable.py:250-251`, `comparable.py:98-102`). `dc_inst` rows need `dc_unblocked_days > 0` under `unblocked`.
 6. Kinds: `ytd` (YTD window, `ytd_years` under `latest_day`), `yoy` (full years), `quarter` and `half` (per quarter or half number, only years where it is complete, `comparable.py:106-112`).
-7. A kind needs at least 2 qualifying years, otherwise it is skipped (`comparable.py:242-243`).
-8. Results carry `comparable_pair_count`, `link_prior_year`, `link_current_year` (`comparable.py:267-274`).
+7. A kind needs at least 2 qualifying years, otherwise it is skipped (`comparable.py:246-247`).
+8. Results carry `comparable_pair_count`, `link_prior_year`, `link_current_year` (`comparable.py:284-290`).
 
 ### Scope diff (`scope.run_scope_diff`, `comparisons.py:329-361`)
 
@@ -602,6 +602,6 @@ Every filter and removal. "Default" is the generic `config.py`; "tbretail" is `t
 | YTD cut (fiscal months, or days 1..K) | `kpi_long.py:81-104`, `kpi_long.py:132-138` | YTD tab | fiscal months | days 1..K |
 | Root filter | `kpi_long.py:247-250` | all metrics inside a root | `overall` only | `overall`, `nvrout`, `comp` |
 | Slice value filters | `kpi_long.py:201-212`, `kpi_long.py:252` | all metrics inside a cut | none | none |
-| Comparable pair universe | `comparable.py:245-255` | comparable tables | off | on, `product_store`, `unblocked` |
+| Comparable pair universe | `comparable.py:249-259` | comparable tables | off | on, `product_store`, `unblocked` |
 | `dc_inst` pairs never stocked | `pipeline.py:658-659`, `pipeline.py:731` | `dc_in_stock_rate` | off | off (frame empty) |
 | HTML display trim | `kpi_long.py:158-198` | HTML report only, not saved tables | 5, 5, 5, 4, all | 5, 5, 5, 4, all |
