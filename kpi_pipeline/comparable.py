@@ -262,26 +262,24 @@ def _build_comparable_kind(
     save_parts: List[pd.DataFrame] = []
     display = pd.DataFrame()
 
-    def _year_rows(year: int) -> Dict[str, DataFrame]:
-        # One year's restricted rows, cached once and shared by the (up to) two links the year is in, so
-        # every root x cut aggregation reads them instead of re-joining the full frames to the comparable keys.
-        return {key: _in_number(restricted[key].filter(F.col("Year") == year)).cache() for key in _METRIC_FRAMES}
+    # Every year of the kind computed once: each aggregation groups by period_col or a finer key holding Year,
+    # so a year's metrics read only its own rows, and a link takes its two years' rows. The restricted rows
+    # are cached once, so every root x cut aggregation reads them instead of re-joining the full frames to
+    # the comparable keys; compute_kpis / build_kpi_table apply period_filter again, a no-op on them.
+    period_filter = F.col("Year").isin(years)
+    if numbered:
+        period_filter = period_filter & (F.col(numbered.number_col) == number)
+    kind_frames = {key: restricted[key].filter(period_filter).cache() for key in _METRIC_FRAMES}
+    rows = _comparable_period_rows(ctx, {**restricted, **kind_frames}, period_filter, period_type, period_col)
+    for frame in [*kind_frames.values(), common_keys, dc_common_keys, dc_inst_common_keys]:
+        frame.unpersist()
 
-    prior_frames = _year_rows(years[0])
+    period_key_fn, display_label_fn, change_label_fn = _period_key_fns(comparison_type, number)
     for prior_year, current_year in zip(years, years[1:]):
-        period_filter = F.col("Year").isin([prior_year, current_year])
-        if numbered:
-            period_filter = period_filter & (F.col(numbered.number_col) == number)
-        # The link's rows: its two (distinct) years' rows. compute_kpis / build_kpi_table apply period_filter
-        # to these five frames again, a no-op on rows that already match.
-        current_frames = _year_rows(current_year)
-        link_frames = {key: prior_frames[key].unionByName(current_frames[key]) for key in _METRIC_FRAMES}
-        rows = _comparable_period_rows(ctx, {**restricted, **link_frames}, period_filter, period_type, period_col)
-        for frame in prior_frames.values():
-            frame.unpersist()
-        prior_frames = current_frames
+        link_rows = rows[rows["period"].isin([period_key_fn(prior_year), period_key_fn(current_year)])]
+        link_rows = link_rows.reset_index(drop=True)
 
-        tagged = rows.copy()
+        tagged = link_rows.copy()
         tagged.insert(0, "comparison_type", comparison_type)
         tagged["comparable_pair_count"] = pair_count
         tagged["link_prior_year"] = prior_year
@@ -290,9 +288,8 @@ def _build_comparable_kind(
             tagged[numbered.tag_col] = number
         kpi_parts.append(tagged)
 
-        period_key_fn, display_label_fn, change_label_fn = _period_key_fns(comparison_type, number)
         disp, parts = _comparisons_for_link(
-            ctx, rows, prior_year, current_year, metric_cols,
+            ctx, link_rows, prior_year, current_year, metric_cols,
             comparison_type, period_key_fn, display_label_fn, change_label_fn,
         )
         if numbered:
@@ -301,12 +298,6 @@ def _build_comparable_kind(
         save_parts.extend(parts)
         if not disp.empty:
             display = disp  # latest link's overall display wins, full detail is in the save table
-
-    for frame in prior_frames.values():
-        frame.unpersist()
-    common_keys.unpersist()
-    dc_common_keys.unpersist()
-    dc_inst_common_keys.unpersist()
 
     kpi_long_rows = pd.concat(kpi_parts, ignore_index=True) if kpi_parts else pd.DataFrame()
     comparison_rows = pd.concat(save_parts, ignore_index=True) if save_parts else pd.DataFrame()
