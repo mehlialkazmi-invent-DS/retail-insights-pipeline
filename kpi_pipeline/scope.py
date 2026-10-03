@@ -438,7 +438,8 @@ def _fully_blocked_pairs(ctx: KPIContext) -> DataFrame:
 def build_scope_removals(ctx: KPIContext) -> None:
     """Build the cached removal sets once per scope build, read by the Scope debug summary and the pipeline:
 
-    * ctx.fully_blocked_pairs (blocked scope on): scope pairs blocked on every in-window scope day.
+    * ctx.fully_blocked_pairs (blocked scope on, store-level scope): scope pairs blocked on every in-window
+      scope day.
     * ctx.instock_sub_only_pairs (instock.method "daily" + scope.instock_main_eligible_only): scope pairs
       where only a sub item, not the main, is eligible.
     * ctx.instock_unsuperseded_products (instock.method "daily" + scope.instock_exclude_unsuperseded_sizes):
@@ -452,7 +453,8 @@ def build_scope_removals(ctx: KPIContext) -> None:
             getattr(ctx, name).unpersist()
         setattr(ctx, name, None)
 
-    if ctx.blocked_days is not None:
+    # Pair counts need a store-level scope; grain "product" can still carry blocks (flagged on the daily rows).
+    if ctx.blocked_days is not None and "store_id" in ctx.scope_keys:
         ctx.fully_blocked_pairs = _fully_blocked_pairs(ctx).cache()
         print(f"scope pairs blocked on every window day: {ctx.fully_blocked_pairs.count():,}")
     if s["INSTOCK_METHOD"] != "daily":
