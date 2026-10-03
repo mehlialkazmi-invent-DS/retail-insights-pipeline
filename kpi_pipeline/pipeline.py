@@ -379,10 +379,10 @@ def instock_daily_pairs(ctx: KPIContext, scope_pairs: DataFrame) -> DataFrame:
     pairs = apply_input_filters(
         scope_pairs, ctx.settings["INSTOCK_DAILY"]["input_filters"], "instock.daily.input_filters"
     )
-    if ctx.instock_sub_only_pairs is not None:
+    if ctx.settings["SCOPE"]["instock_main_eligible_only"]:
         # Client rule: stores where only a sub item (not the main) is eligible leave in-stock only.
         pairs = pairs.join(ctx.instock_sub_only_pairs, on=["product_id", "store_id"], how="left_anti")
-    if ctx.instock_unsuperseded_products is not None:
+    if ctx.settings["SCOPE"]["instock_exclude_unsuperseded_sizes"]:
         # Client rule: sizes of a superseded class color outside the supersession (likely NGF) leave in-stock only.
         pairs = pairs.join(broadcast(ctx.instock_unsuperseded_products), on="product_id", how="left_anti")
     return pairs

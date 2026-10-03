@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+#### Scope debug counts after removals; removal sets built once (no change to any output) - 2026-10-04
+
+`runner.scope_debug_summary()` now shows distinct product / store / pair counts for each removal stage, one
+column set per stage: `scope_*` (the final scope: sales, revenue, AUR, AUC, distinct counts and every other
+metric that keeps all scope data), `unblocked_*` (blocked scope on: scope pairs minus pairs blocked on every
+in-window scope day, the population of the metrics in `blocked_scope.metrics`) and `instock_*`
+(`instock.method = "daily"`: the pairs `in_stock_rate` and `weighted_instock_rate` count, after
+`instock.daily.input_filters`, `instock_main_eligible_only` and `instock_exclude_unsuperseded_sizes`, starting
+from `unblocked` when `in_stock_rate` is in `blocked_scope.metrics`). Day-level rules (`usable`, count start,
+`require_daily_data`) are not pair counts and are not shown. The removal sets (`ctx.fully_blocked_pairs`,
+`ctx.instock_sub_only_pairs`, `ctx.instock_unsuperseded_products`) are built once by
+`scope.build_scope_removals` at the end of `build_scopes()`, and the debug summary and `build_instock_daily`
+both read them through `pipeline.instock_daily_pairs`, so unsuperseded sizes no longer re-read `item_family`
+and products on every `build_pipeline_frames` call. Each metric reads the same data as before: blocked days
+are still flagged per day and gated per metric, `fully_blocked_pairs` feeds only the debug counts, and the
+in-stock rules still apply only to the in-stock frame.
+
+**Affected:** `kpi_pipeline/scope.py`, `kpi_pipeline/scope_debug.py`, `kpi_pipeline/pipeline.py`,
+`kpi_pipeline/context.py`, `kpi_pipeline/runner.py`, `main.ipynb`, `README.md`,
+`.claude/commands/retail-insights-help.md`
+
 #### One scope definition (no change to any output except the `scope_diff` column and `scope_origin` value)
 
 The two scope modes (`scope_source.mode` `"operation_scope"` / `"defined_scope"`) and the three config sections
