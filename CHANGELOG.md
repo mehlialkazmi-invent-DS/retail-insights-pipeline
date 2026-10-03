@@ -16,8 +16,8 @@ now adds the other in `materialize()` (with a printed note). Blocked days also a
 blocked is dropped from the in-stock frame (`pipeline._drop_fully_blocked_weeks`); a partly blocked week stays,
 and lost sales / `lost_base` keep every week. An in-stock source without a store column has no pairs to block, so
 only `"product"`-kind blocks apply, matched to each product's earliest `scope_start` under `blocked_scope.rule`
-(`scope.build_blocked_product_days`, new `ctx.blocked_product_days`); a printed note names the
-`product_destination` / `destination` kinds that cannot apply. A scope with no keys inside the report window
+(`scope.build_blocked_product_days`, new `ctx.blocked_product_days`); every store-level frame (sales, WOS,
+turnover, inventory) still applies every kind, `product_destination` and `destination` included. A scope with no keys inside the report window
 (daily or weekly) now raises `ValueError` in `scope.build_scope`. The daily in-stock frame counts blocked days per
 pair-week by interval / week overlap instead of exploding one row per blocked day (same values). Cache hygiene:
 `_reset_run_caches` unpersists what it clears, `build_scope`, `build_blocked_days`, `build_kpis` and

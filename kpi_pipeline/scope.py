@@ -159,14 +159,15 @@ def instock_source_has_store(settings: Dict[str, Any]) -> bool:
 def build_blocked_product_days(ctx: KPIContext) -> None:
     """Build ctx.blocked_product_days, the cached (product_id, first_day, last_day) intervals of the "product"
     block kind, for an in-stock source without a store column: the scope pairs grouped to products (earliest
-    scope_start) take the blocked_scope.rule. product_destination / destination blocks need a store and
-    cannot apply there (None when "product" is not in blocked_scope.kinds)."""
+    scope_start) take the blocked_scope.rule (None when "product" is not in blocked_scope.kinds).
+
+    Which blocks apply where: every store-level frame (scoped_daily, so sales / WOS / turnover / inventory, the
+    daily in-stock frame, a weekly in-stock source with a store column) uses ctx.blocked_days, built from every
+    kind in blocked_scope.kinds. Only the in-stock frame of a source without a store column uses these
+    product-level intervals, as product_destination / destination blocks name a store it does not have.
+    """
     cfg = ctx.settings["BLOCKED_SCOPE"]
-    unusable_kinds = [k for k in cfg["kinds"] if k != "product"]
-    if unusable_kinds:
-        print(f"note: blocked_scope.kinds {unusable_kinds} cannot apply to an in-stock source without a store column")
     if "product" not in cfg["kinds"]:
-        print("note: no block applies to the in-stock source (no store column, 'product' not in blocked_scope.kinds)")
         return
     products = ctx.scope_pairs.groupBy("product_id").agg(F.min("scope_start").alias("scope_start"))
     ctx.blocked_product_days = _applied_block_intervals(
