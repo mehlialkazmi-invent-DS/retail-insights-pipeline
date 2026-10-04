@@ -62,7 +62,7 @@ INVENTORY_GIT_METRICS_ALL = (
 INSTOCK_METHODS = ("daily", "weekly_source", "lost_sales_source")
 
 # Which sales the sales metrics read: sales_basis. "net" = noob/daily-data (net of returns); "gross" = the
-# non-return rows of operation/transactional_sales (docs/CONFIG.md: sales_basis).
+# non-return rows of operation/transactional_sales, every day of them (docs/CONFIG.md: sales_basis).
 SALES_BASES = ("net", "gross")
 
 CONFIG: Dict[str, Any] = {
@@ -128,10 +128,11 @@ CONFIG: Dict[str, Any] = {
         "transactional_sales": True,  # read only with sales_basis "gross"; must equal daily_data (checked)
     },
     # Which sales every sales metric reads (docs/CONFIG.md: sales_basis). "net": noob/daily-data as it is. "gross": its
-    # sales_revenue / sales_quantity are replaced by the transactional_sales of the same product x store x day that
-    # pass input_filters.transactional_sales (0 where none). Gross is rolled to the family main by
-    # item_family_rollup.transactional_sales, which must equal item_family_rollup.daily_data: gross shares daily-data's
-    # id space. Changes what saved kpi_long means: use output.save_mode "full_refresh" when you change it.
+    # sales_revenue / sales_quantity are replaced by ALL the transactional_sales of the product x store x day that pass
+    # input_filters.transactional_sales (0 on a daily-data day with none); a transactional day daily-data has no row for
+    # (or removed, e.g. usable = 1) is added as a sales-only day: no inventory, no daily-data filter, no ECOM or blocked-day
+    # removal -- only the family-main roll-up (item_family_rollup.transactional_sales, which must equal daily_data), the
+    # scope and the active filter. Changes what saved kpi_long means: use output.save_mode "full_refresh" when you change it.
     "sales_basis": "net",
     # =============================================================================
     # 3. SCOPE -- which product x store pairs count, and on which days
@@ -702,6 +703,11 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         raise ValueError(
             "item_family_rollup.transactional_sales must equal item_family_rollup.daily_data when sales_basis is "
             "'gross': gross sales are joined onto daily-data, which must share its product id space"
+        )
+    if sales_basis == "gross" and not cfg["fiscal_calendar"]["use_fiscal_calendar"]:
+        raise ValueError(
+            "sales_basis 'gross' requires fiscal_calendar.use_fiscal_calendar=True: days daily-data has no row for "
+            "carry no native week column"
         )
 
     dc_instock_cfg = cfg["dc_instock"]

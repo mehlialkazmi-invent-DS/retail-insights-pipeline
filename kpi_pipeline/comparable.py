@@ -238,7 +238,7 @@ def _build_comparable_kind(
     # (default) also leaves blocked days out (dc_inst: dc_unblocked_days). Metrics then gate blocked days
     # per blocked_scope.metrics as on the other tabs.
     unblocked_only = ctx.settings["COMPARABLE_PAIRS_PAIR_DAYS"] == "unblocked"
-    present = F.col("has_daily_row") & ~F.col("is_blocked") if unblocked_only else F.col("has_daily_row")
+    present = F.col("has_sales_row") & ~F.col("is_blocked") if unblocked_only else F.col("has_sales_row")
     dc_present = F.col("has_inventory_row") & ~F.col("is_blocked") if unblocked_only else F.col("has_inventory_row")
     scoped_daily_pop = _in_number(pf["scoped_daily"]).filter(present)
     dc_daily_pop = _in_number(pf["dc_daily"]).filter(dc_present)

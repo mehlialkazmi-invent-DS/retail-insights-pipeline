@@ -294,8 +294,8 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
             **DEFAULT_METRIC_DEFINITIONS["total_sales_revenue"],
             "definition": (
                 "Total gross sales revenue across all scoped stores for the period: operation/transactional_sales "
-                f"rows with {passing}, on the days daily-data has a row for the product and store (no gross "
-                "sales that day count 0). Not net of returns."
+                f"rows with {passing}, on every transactional day of the scoped products and stores (not limited to "
+                "days daily-data has a row for). Not net of returns."
             ),
             "formula": "Σ(daily gross sales revenue)",
         }
@@ -303,7 +303,7 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
             **DEFAULT_METRIC_DEFINITIONS["total_sales_quantity"],
             "definition": (
                 "Total gross units sold across all scoped stores for the period: operation/transactional_sales "
-                f"rows with {passing}, on the days daily-data has a row for the product and store. "
+                f"rows with {passing}, on every transactional day of the scoped products and stores. "
                 "Not net of returns."
             ),
             "formula": "Σ(daily gross sales quantity)",

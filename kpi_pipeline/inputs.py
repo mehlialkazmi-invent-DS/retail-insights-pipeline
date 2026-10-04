@@ -251,8 +251,12 @@ def _gross_sales_by_day(ctx) -> DataFrame:
 
 def _with_gross_sales(daily: DataFrame, ctx) -> DataFrame:
     """``daily`` with sales_revenue / sales_quantity replaced by the gross (filtered) transactional sales of
-    the same product x store x day, 0 where the day has none. Daily rows stay as they are, and a transactional
-    day with no daily row is not added.
+    the same product x store x day, 0 where a daily row has none, plus a ``gross_only`` flag.
+
+    Every transactional day is kept: a day with no daily row (none exists, or input_filters.daily_data
+    removed it, e.g. usable = 1) becomes a row of its own with inventory 0 and gross_only True, so the
+    sales metrics see all gross sales while the inventory metrics still read only the daily-data days
+    (build_scoped_daily turns the flag into has_daily_row / has_sales_row / has_stock_row).
 
     With the daily-data family roll-up, a child and its parent on the same date are summed into one row first,
     so the gross of that day attaches once instead of once per row.
@@ -264,11 +268,16 @@ def _with_gross_sales(daily: DataFrame, ctx) -> DataFrame:
         daily = daily.groupBy(*[c for c in daily.columns if c not in measures]).agg(
             *[F.sum(m).alias(m) for m in measures]
         )
+    date_type = daily.schema[date_col].dataType
+    no_inventory = F.lit(0.0).cast(daily.schema["inventory"].dataType)
     return (
         daily.withColumn("_gross_date", F.to_date(F.col(date_col)))
-        .join(_gross_sales_by_day(ctx), on=["product_id", "store_id", "_gross_date"], how="left")
+        .join(_gross_sales_by_day(ctx), on=["product_id", "store_id", "_gross_date"], how="full_outer")
+        .withColumn("gross_only", F.col(date_col).isNull())
+        .withColumn(date_col, F.coalesce(F.col(date_col), F.col("_gross_date").cast(date_type)))
         .withColumn("sales_revenue", F.coalesce(F.col("gross_revenue"), F.lit(0.0)))
         .withColumn("sales_quantity", F.coalesce(F.col("gross_quantity"), F.lit(0.0)))
+        .withColumn("inventory", F.coalesce(F.col("inventory"), no_inventory))
         .drop("_gross_date", "gross_revenue", "gross_quantity")
     )
 
@@ -277,8 +286,9 @@ def get_daily_data_raw(ctx) -> DataFrame:
     """Cached daily-data for the report window: input_filters.daily_data applied, rows dated outside
     [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] dropped, rolled to the family main when
     ITEM_FAMILY_ROLLUP["daily_data"] is True, and only the columns its readers use. With sales_basis "gross"
-    its sales_revenue / sales_quantity are the transactional sales that pass input_filters.transactional_sales
-    (_with_gross_sales), so every reader follows the basis.
+    its sales_revenue / sales_quantity are the transactional sales that pass input_filters.transactional_sales,
+    on every transactional day (_with_gross_sales adds the days daily-data has no row for, flagged gross_only),
+    so every reader follows the basis.
 
     Every reader (build_scoped_daily, scope.read_daily_for_scope,
     fiscal.build_time_grain_from_daily_data) keeps only window dates itself, so the window filter and the

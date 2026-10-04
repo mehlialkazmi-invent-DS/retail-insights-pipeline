@@ -86,8 +86,8 @@ kpi_pipeline/
                    calendar)
   inputs.py        cached Delta reads (daily_data_raw, lost_sales_weekly_base) + input_filters;
                    prints the source date range for daily_data/lost_sales on every read
-                   sales_basis="gross": get_daily_data_raw joins the transactional_sales rows passing input_filters.transactional_sales
-                   onto daily-data (§3.9a); roll_to_item_family_parent (shared family roll-up)
+                   sales_basis="gross": get_daily_data_raw full-outer-joins the transactional_sales rows passing input_filters.transactional_sales
+                   onto daily-data, adding sales-only days (§3.9a); roll_to_item_family_parent (shared family roll-up)
   scope.py         scope table (daily / weekly), score scope (hybrid),
                    build_blocked_days (blocked_scope) — §3.2a/b;
                    build_scope_removals: removal sets built ONCE per scope build (§3.3a)
@@ -760,10 +760,10 @@ Map raw lost-sales and instock table columns to canonical names, or read in-stoc
 Top-level, `"net"` (default) | `"gross"`, validated by `materialize()` (anything else raises), env `KPI_SALES_BASIS`. `config.py` and `tbretail_config.py` handle it identically; `path_segments.transactional_sales` (`operation/transactional_sales`) is read only for `"gross"`.
 
 - `"net"`: every sales metric reads `noob/daily-data` as it is (net of returns; days with net quantity <= 0 or net revenue < 0 already dropped upstream). `transactional_sales` is never read, no join, byte-identical to before.
-- `"gross"`: `inputs.get_daily_data_raw` replaces `sales_revenue` / `sales_quantity` by the rows of `transactional_sales` that pass `input_filters.transactional_sales` (default `sales_type != 'return'`; return rows are stored positive): read once, window filtered on the raw `date` column, config filters on the raw columns, narrow select, rolled to the family main (`item_family_rollup.transactional_sales`, must equal `daily_data`: `materialize()` raises otherwise; follows `daily_data` when absent) BEFORE the sum, summed per product x store x date, LEFT-joined onto the daily-data rows on `(product_id, store_id, date)`, `coalesce(gross, 0)`, helper columns dropped. All of it sits inside the existing `daily_data_raw` cache.
-- Everything downstream follows untouched: `sales_cost`, blocked scope, input / population filters, the product-level collapse, comparable pairs, WOS / AUR / AUC / turnover, weighted in-stock weights, the `lost_sales_pct` denominator and the scope diff. One Sales Revenue only; the Metric Details text and the printed run summary state the basis. `get_instock_daily_raw` reads inventory / `usable` only, so it ignores the basis.
+- `"gross"`: `inputs.get_daily_data_raw` replaces `sales_revenue` / `sales_quantity` by the rows of `transactional_sales` that pass `input_filters.transactional_sales` (default `sales_type != 'return'`; return rows are stored positive): read once, window filtered on the raw `date` column, config filters on the raw columns, narrow select, rolled to the family main (`item_family_rollup.transactional_sales`, must equal `daily_data`: `materialize()` raises otherwise; follows `daily_data` when absent) BEFORE the sum, summed per product x store x date, FULL-OUTER-joined onto the daily-data rows on `(product_id, store_id, date)`, `coalesce(gross, 0)`, helper columns dropped. A transactional day with no daily-data row (none, or removed by `input_filters.daily_data`, e.g. `usable = 1`) becomes a row with inventory 0 and `gross_only` True; `build_scoped_daily` turns it into `has_daily_row` False, `has_sales_row` True, `has_stock_row` False (unless GIT exists that day): the sales metrics read `has_sales_row`, the inventory metrics only daily-data / GIT days (`metrics._day_stock` `stock_flag`). All of it sits inside the existing `daily_data_raw` cache.
+- Everything downstream follows: `sales_cost`, scope and the active filter (also on the added days), population filters, the product-level collapse, comparable pairs, WOS / AUR / AUC / turnover, weighted in-stock weights, the `lost_sales_pct` denominator and the scope diff. One Sales Revenue only; the Metric Details text and the printed run summary state the basis. `get_instock_daily_raw` reads inventory / `usable` only, so it ignores the basis.
 - Units are replaced with revenue on purpose: AUR, AUC and the WOS / turnover ratios divide by units.
-- Only days daily-data has a row for are reported. A transactional day with no daily-data row (or one `input_filters.daily_data` removed, e.g. `usable = 1`) is not added: its gross sales are lost.
+- The added days get no `input_filters.daily_data` filter (`usable = 1`), no ECOM removal and no blocked-day removal (blocked scope only gates the inventory metrics in `blocked_scope.metrics`); `lost_sales_source.sales_filter` still narrows the lost-sales denominator. Needs `fiscal_calendar.use_fiscal_calendar=True` (`materialize()` raises).
 - Changing the basis changes what saved `kpi_long` means: never mix bases in an incremental save, use `output.save_mode="full_refresh"` (the run prints a note under `incremental`).
 
 ---
@@ -860,7 +860,7 @@ For a genuinely new source table (not just a new column off an existing frame) t
 
 | Metric | Label | Scope | Notes |
 |--------|-------|-------|-------|
-| `total_sales_revenue` | Sales Revenue | All stores | `sales_basis` "net" (default): sum of daily-data sales revenue, net of returns; product-store-days with net quantity <= 0 or net revenue < 0 are not counted (5-day check 2026-09-14..18: 38,299 days, -2.42M, about -7%). "gross": non-return `operation/transactional_sales` of the days daily-data has a row for (§3.9a). Label unchanged, one Sales Revenue only |
+| `total_sales_revenue` | Sales Revenue | All stores | `sales_basis` "net" (default): sum of daily-data sales revenue, net of returns; product-store-days with net quantity <= 0 or net revenue < 0 are not counted (5-day check 2026-09-14..18: 38,299 days, -2.42M, about -7%). "gross": non-return `operation/transactional_sales` of every transactional day (§3.9a). Label unchanged, one Sales Revenue only |
 | `total_sales_quantity` | Sales Units | All stores | Sum of daily sales quantity (follows `sales_basis`, so do AUR, AUC, WOS, turnover, weighted in-stock weights and the lost-sales denominator) |
 | `AUR` | AUR | All stores | Revenue ÷ Units |
 | `AUC` | AUC | All stores | Cost ÷ Units |
@@ -1147,7 +1147,7 @@ For a quick distinct product/store count of the scope at each removal stage (ove
 
 - **Products**: `cache()` then `broadcast()` — never add joins to products Delta without caching.
 - **Cache release**: rebuilds unpersist what they replace (`context.release` / `release_frames` in `_reset_run_caches`, `build_scope`, `build_blocked_days`, `build_kpis`, `build_scope_comparison`); `scope_core` is in the `build_pipeline_frames` dict for that. The non-hybrid `hybrid_scope_keys` is not a second cache.
-- **Daily data**: always via `get_daily_data_raw(ctx)` — cached per run. With `sales_basis="gross"` the `transactional_sales` read, its aggregation and the join live inside that same cache (no extra cache, no per-KPI-table pass); `"net"` never reads `transactional_sales`.
+- **Daily data**: always via `get_daily_data_raw(ctx)` — cached per run. With `sales_basis="gross"` the `transactional_sales` read, its aggregation and the full-outer join live inside that same cache (no extra cache, no per-KPI-table pass); `"net"` never reads `transactional_sales`.
 - **Lost sales**: always via `read_lost_sales_weekly(ctx)` — cached per run.
 - **Score scope equi-join**: equi-join on `date` (fiscal_cal), never a `BETWEEN week_start/week_end` range join.
 - **Score scope inventory**: `max_by(inventory, date)` per fiscal week — last in-week snapshot, not Saturday-only.

@@ -38,7 +38,7 @@ Edit `CONFIG` in `config.py`. At minimum:
 - `slices.dimensions` — product-master columns to cut by (e.g. `brand`), applied within every root.
 - `dimension_sources` — optional: each column becomes a root (e.g. NVROUT from `extended_product`).
 - `instock.method`, `blocked_scope.metrics`, `goods_in_transit` — all gated.
-- `sales_basis` — `"net"` (default, `noob/daily-data` sales, net of returns) or `"gross"` (`operation/transactional_sales` rows that pass `input_filters.transactional_sales`, default non-return, joined onto daily-data). One Sales Revenue is shown either way; changing it changes what saved `kpi_long` means, so use `output.save_mode = "full_refresh"`. See [docs/CONFIG.md](docs/CONFIG.md#sales_basis).
+- `sales_basis` — `"net"` (default, `noob/daily-data` sales, net of returns) or `"gross"` (`operation/transactional_sales` rows that pass `input_filters.transactional_sales`, default non-return, every transactional day, rolled to the family main). One Sales Revenue is shown either way; changing it changes what saved `kpi_long` means, so use `output.save_mode = "full_refresh"`. See [docs/CONFIG.md](docs/CONFIG.md#sales_basis).
 - `output.save_outputs` and `output.save_mode` — `initial`, `incremental`, or `full_refresh`.
 - `run.mode` — `full` (default) or `html_only`.
 

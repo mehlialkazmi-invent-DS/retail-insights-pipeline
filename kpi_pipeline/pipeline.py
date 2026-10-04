@@ -304,9 +304,11 @@ def _join_store_goods_in_transit(ctx: KPIContext, daily: DataFrame, scope_pairs:
     the scoped pairs when the scope has stores.
 
     A GIT-only day gets sales / revenue / inventory 0 and has_daily_row False. GIT-only days whose daily row
-    input_filters.daily_data removed (e.g. usable = 1) are dropped: those days are not reported. Daily rows
-    are first summed to one row per pair-day (a child and its parent can share a date after the family
-    roll-up), so the quantity attaches once per day; every sum-based metric is unchanged by that.
+    input_filters.daily_data removed (e.g. usable = 1) are dropped: those days are not reported. A gross-only
+    day (sales_basis "gross", no daily-data row) has has_daily_row False too but keeps its sales, and the
+    goods in transit of such a removed day are 0. Daily rows are first summed to one row per pair-day (a
+    child and its parent can share a date after the family roll-up), so the quantity attaches once per day;
+    every sum-based metric is unchanged by that.
     """
     day_keys = ["product_id", "store_id", "date"]
     git = _goods_in_transit_quantity(ctx, 0, "store_id", ctx.settings["GOODS_IN_TRANSIT"]["date_shift_days"])
@@ -319,12 +321,18 @@ def _join_store_goods_in_transit(ctx: KPIContext, daily: DataFrame, scope_pairs:
             F.sum("sales_revenue").alias("sales_revenue"),
             F.sum("sales_quantity").alias("sales_quantity"),
             F.sum("inventory").alias("inventory"),
+            F.max("gross_only").alias("gross_only"),
         )
-        .withColumn("has_daily_row", F.lit(True))
+        .withColumn("has_daily_row", ~F.col("gross_only"))
     )
     joined = (
         pair_days.join(git, on=day_keys, how="full_outer")
         .filter(F.col("has_daily_row").isNotNull() | F.col("_removed").isNull())
+        # A gross-only day daily-data removed keeps its sales but not the goods in transit the removal dropped.
+        .withColumn(
+            "git_quantity",
+            F.when(F.col("_removed").isNotNull() & ~F.col("has_daily_row"), F.lit(0.0)).otherwise(F.col("git_quantity")),
+        )
         .drop("_removed")
     )
     for column in ("sales_revenue", "sales_quantity", "inventory"):
@@ -332,7 +340,8 @@ def _join_store_goods_in_transit(ctx: KPIContext, daily: DataFrame, scope_pairs:
             column, F.when(F.col("has_daily_row").isNull(), F.lit(0)).otherwise(F.col(column))
         )
     return (
-        joined.withColumn("has_daily_row", F.coalesce(F.col("has_daily_row"), F.lit(False)))
+        joined.withColumn("gross_only", F.coalesce(F.col("gross_only"), F.lit(False)))
+        .withColumn("has_daily_row", F.coalesce(F.col("has_daily_row"), F.lit(False)))
         .withColumn("git_quantity", F.coalesce(F.col("git_quantity"), F.lit(0.0)))
     )
 
@@ -341,7 +350,8 @@ def build_scoped_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs_in: D
     """Daily sales / inventory of the scoped pairs, with product cost / price and fiscal week attributes.
 
     Order: daily data -> scoped-pair semi-join -> store goods in transit (when a store metric is in
-    goods_in_transit.inventory_metrics; else has_daily_row True and git_quantity 0 on every row) ->
+    goods_in_transit.inventory_metrics; else has_daily_row True, except on sales_basis "gross" gross-only
+    days, and git_quantity 0 on every row) -> has_sales_row / has_stock_row ->
     blocked-day flag (is_blocked, kept for metrics.compute_kpis to gate per metric) -> calendar -> scope
     semi-join -> product attributes. week_days is the days of the row's fiscal week inside the window (7
     unless report_end="latest_day"); latest_day also adds day_index, which the YTD cut filters on.
@@ -352,15 +362,15 @@ def build_scoped_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs_in: D
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
     latest_day = s["REPORT_END_MODE"] == "latest_day"
     store_git = any(m in STORE_GIT_METRICS for m in s["GOODS_IN_TRANSIT"]["inventory_metrics"])
+    gross = s["SALES_BASIS"] == "gross"
     select_cols = ["product_id", "store_id", date_col, "sales_revenue", "sales_quantity", "inventory"]
     if not s["USE_FISCAL_CALENDAR"]:
         select_cols.append(week_col)
 
-    daily = (
-        get_daily_data_raw(ctx)
-        .select(*select_cols)
-        .withColumn(date_col, F.to_date(F.col(date_col)))
-    )
+    daily = get_daily_data_raw(ctx).select(*select_cols, *(["gross_only"] if gross else []))
+    if not gross:
+        daily = daily.withColumn("gross_only", F.lit(False))
+    daily = daily.withColumn(date_col, F.to_date(F.col(date_col)))
     daily = rename_column_or_fail(daily, date_col, "date", "fiscal_calendar.daily_time_columns.date")
     daily = daily.filter(F.col("date").between(F.lit(start), F.lit(end)))
     if has_store:
@@ -368,7 +378,14 @@ def build_scoped_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs_in: D
     if store_git:
         daily = _join_store_goods_in_transit(ctx, daily, scope_pairs_in if has_store else None)
     else:
-        daily = daily.withColumn("has_daily_row", F.lit(True)).withColumn("git_quantity", F.lit(0.0))
+        daily = daily.withColumn("has_daily_row", ~F.col("gross_only")).withColumn("git_quantity", F.lit(0.0))
+    # has_sales_row: the rows the sales metrics read (daily rows and gross-only days); has_stock_row: the rows
+    # that can be a day of stock (not a gross-only day without goods in transit).
+    daily = (
+        daily.withColumn("has_sales_row", F.col("has_daily_row") | F.col("gross_only"))
+        .withColumn("has_stock_row", ~(F.col("gross_only") & (F.col("git_quantity") == 0)))
+        .drop("gross_only")
+    )
     daily = _flag_blocked_days(daily, ctx.blocked_days, "store_id")
     if not s["USE_FISCAL_CALENDAR"]:
         # Year = calendar year of `date`, Week = the native week column (not the ISO week-year 'year').
@@ -861,7 +878,7 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
     # lost_sales_source.sales_filter narrows only the sales half of lost_sales_pct's denominator, for a
     # lost-sales table covering a narrower population than daily-data (e.g. no e-commerce).
     ls_sales_filter = ctx.settings["LOST_SALES_SALES_FILTER"]
-    daily_for_lost = scoped_daily.filter(F.col("has_daily_row"))
+    daily_for_lost = scoped_daily.filter(F.col("has_sales_row"))
     if "lost_sales_pct" in ctx.settings["BLOCKED_SCOPE"]["metrics"]:
         daily_for_lost = daily_for_lost.filter(~F.col("is_blocked"))
     daily_for_lost = apply_input_filters(

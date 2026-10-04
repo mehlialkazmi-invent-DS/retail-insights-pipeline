@@ -76,16 +76,21 @@ def _stock(measure: str, with_git: bool):
     return F.col((_WITH_GIT if with_git else _ON_HAND)[measure])
 
 
-def _day_stock(ctx: KPIContext, metric: str, measure: str, real_flag: str):
+def _day_stock(ctx: KPIContext, metric: str, measure: str, real_flag: str, stock_flag: str = None):
     """Per-day aggregates of one inventory metric for _day_avg: "<metric>_day", the day's stock over the rows
     the metric reads (+ goods in transit when named in goods_in_transit.inventory_metrics), and
-    "<metric>_has", whether the day counts: any read row with goods in transit, only a real (``real_flag``)
-    row without -- a GIT-only row has on-hand 0 and must not make a day of its own."""
+    "<metric>_has", whether the day counts: any read row (``stock_flag``, when given) with goods in transit,
+    only a real (``real_flag``) row without -- a GIT-only row has on-hand 0 and must not make a day of its
+    own, and neither must a gross-only sales row (has_stock_row)."""
     with_git = metric in ctx.settings["GOODS_IN_TRANSIT"]["inventory_metrics"]
     reads = _reads(ctx, metric)
+    if with_git:
+        counts = reads & F.col(stock_flag) if stock_flag else reads
+    else:
+        counts = reads & F.col(real_flag)
     return [
         F.sum(F.when(reads, _stock(measure, with_git))).alias(f"{metric}_day"),
-        F.max(reads if with_git else reads & F.col(real_flag)).alias(f"{metric}_has"),
+        F.max(counts).alias(f"{metric}_has"),
     ]
 
 
@@ -125,7 +130,7 @@ def _store_day_stock(ctx: KPIContext, daily_scoped: DataFrame, keys: Sequence[st
                     agg
                     for group in groups
                     for metric, measure in _STORE_DAY_STOCK[group]
-                    for agg in _day_stock(ctx, metric, measure, "has_daily_row")
+                    for agg in _day_stock(ctx, metric, measure, "has_daily_row", "has_stock_row")
                 ]
             )
         )
@@ -202,7 +207,7 @@ def collapse_frames(
         ["product_id", "store_id", "is_blocked", period_col, *sorted(filtered & set(framed["scoped_daily"].columns))]
     )
     collapsed["sales_pairs"] = (
-        framed["scoped_daily"].filter(F.col("has_daily_row")).select(*pair_cols).distinct().cache()
+        framed["scoped_daily"].filter(F.col("has_sales_row")).select(*pair_cols).distinct().cache()
     )
     return collapsed
 
@@ -247,8 +252,8 @@ def compute_kpis(
     inst = frames["inst_data"]
     dc_daily = frames["dc_daily"]
     dc_inst = frames["dc_inst"]
-    # Real daily-data rows (no GIT-only days): the sales metrics' rows.
-    real_daily = daily_scoped.filter(F.col("has_daily_row"))
+    # The sales metrics' rows: real daily-data rows, plus gross-only days under sales_basis "gross" (no GIT-only days).
+    real_daily = daily_scoped.filter(F.col("has_sales_row"))
 
     sales_pop = apply_group_population_filter(_sales_rows(ctx, real_daily), "sales", ctx.settings)
     sales = sales_pop.groupBy(*keys).agg(
@@ -294,7 +299,7 @@ def compute_kpis(
         day_aggs.append(F.sum(_read_only(ctx, metric, F.col(sales_col))).alias(f"{metric}_sales_day"))
         week_aggs.append(F.sum(f"{metric}_sales_day").alias(f"{metric}_sales"))
         if measure is not None:
-            day_aggs += _day_stock(ctx, metric, measure, "has_daily_row")
+            day_aggs += _day_stock(ctx, metric, measure, "has_daily_row", "has_stock_row")
             week_aggs.append(_day_avg(metric).alias(f"{metric}_store_stock"))
     daily_data_week = (
         wos_pop.groupBy(*week_keys, *period_extra, "date")
