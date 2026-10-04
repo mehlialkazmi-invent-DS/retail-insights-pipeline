@@ -110,6 +110,7 @@ CONFIG: Dict[str, Any] = {
         "daily_data": ["usable = 1"],
         "inventory_warehouse": [],
         "item_family": [],
+        "transactional_sales": ["sales_type != 'return'"],  # read only with sales_basis "gross"; return rows are stored positive
     },
     "item_family_source": {  # column names of path_segments.item_family (docs/CONFIG.md: item_family)
         "product_col": "product_id",
@@ -120,12 +121,13 @@ CONFIG: Dict[str, Any] = {
         "daily_data": True,
         "lost_sales": False,  # opt-in safety net
         "inventory_warehouse": True,
+        "transactional_sales": True,  # read only with sales_basis "gross"; must equal daily_data (checked)
     },
     # Which sales every sales metric reads (docs/CONFIG.md: sales_basis). "net": noob/daily-data as it is. "gross": its
-    # sales_revenue / sales_quantity are replaced by the non-return transactional_sales of the same product x store x
-    # day (0 where none). Gross is rolled to the family main by item_family_rollup.daily_data (no key of its own: it
-    # must share daily-data's id space). Changes what saved kpi_long means: use output.save_mode "full_refresh" when you
-    # change it.
+    # sales_revenue / sales_quantity are replaced by the transactional_sales of the same product x store x day that
+    # pass input_filters.transactional_sales (0 where none). Gross is rolled to the family main by
+    # item_family_rollup.transactional_sales, which must equal item_family_rollup.daily_data: gross shares daily-data's
+    # id space. Changes what saved kpi_long means: use output.save_mode "full_refresh" when you change it.
     "sales_basis": "net",
     # =============================================================================
     # 3. SCOPE -- which product x store pairs count, and on which days
@@ -416,6 +418,7 @@ _ENV_OVERRIDES = (
     ("KPI_ITEM_FAMILY_ROLLUP_DAILY_DATA", ("item_family_rollup", "daily_data"), _parse_bool),
     ("KPI_ITEM_FAMILY_ROLLUP_LOST_SALES", ("item_family_rollup", "lost_sales"), _parse_bool),
     ("KPI_ITEM_FAMILY_ROLLUP_INVENTORY_WAREHOUSE", ("item_family_rollup", "inventory_warehouse"), _parse_bool),
+    ("KPI_ITEM_FAMILY_ROLLUP_TRANSACTIONAL_SALES", ("item_family_rollup", "transactional_sales"), _parse_bool),
     ("KPI_SCOPE_ROLL_TO_FAMILY_MAIN", ("scope", "roll_to_family_main"), _parse_bool),
     ("KPI_SAVE_OUTPUTS", ("output", "save_outputs"), _parse_bool),
     ("KPI_OUTPUT_PATH", ("output", "path_segments"), _comma_list),
@@ -656,11 +659,19 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "daily_data": bool(item_family_rollup_cfg.get("daily_data", True)),
         "lost_sales": bool(item_family_rollup_cfg.get("lost_sales", False)),
         "inventory_warehouse": bool(item_family_rollup_cfg.get("inventory_warehouse", True)),
+        "transactional_sales": bool(
+            item_family_rollup_cfg.get("transactional_sales", item_family_rollup_cfg.get("daily_data", True))
+        ),
     }
 
     sales_basis = cfg["sales_basis"]
     if sales_basis not in SALES_BASES:
         raise ValueError(f"sales_basis must be one of {list(SALES_BASES)}; got {sales_basis!r}")
+    if sales_basis == "gross" and item_family_rollup["transactional_sales"] != item_family_rollup["daily_data"]:
+        raise ValueError(
+            "item_family_rollup.transactional_sales must equal item_family_rollup.daily_data when sales_basis is "
+            "'gross': gross sales are joined onto daily-data, which must share its product id space"
+        )
 
     dc_instock_cfg = cfg["dc_instock"]
     dc_instock_enabled = bool(dc_instock_cfg["enabled"])

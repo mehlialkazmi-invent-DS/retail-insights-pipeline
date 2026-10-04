@@ -86,7 +86,7 @@ kpi_pipeline/
                    calendar)
   inputs.py        cached Delta reads (daily_data_raw, lost_sales_weekly_base) + input_filters;
                    prints the source date range for daily_data/lost_sales on every read
-                   sales_basis="gross": get_daily_data_raw joins the non-return transactional_sales
+                   sales_basis="gross": get_daily_data_raw joins the transactional_sales rows passing input_filters.transactional_sales
                    onto daily-data (§3.9a); roll_to_item_family_parent (shared family roll-up)
   scope.py         scope table (daily / weekly), score scope (hybrid),
                    build_blocked_days (blocked_scope) — §3.2a/b;
@@ -760,7 +760,7 @@ Map raw lost-sales and instock table columns to canonical names, or read in-stoc
 Top-level, `"net"` (default) | `"gross"`, validated by `materialize()` (anything else raises), env `KPI_SALES_BASIS`. `config.py` and `tbretail_config.py` handle it identically; `path_segments.transactional_sales` (`operation/transactional_sales`) is read only for `"gross"`.
 
 - `"net"`: every sales metric reads `noob/daily-data` as it is (net of returns; days with net quantity <= 0 or net revenue < 0 already dropped upstream). `transactional_sales` is never read, no join, byte-identical to before.
-- `"gross"`: `inputs.get_daily_data_raw` replaces `sales_revenue` / `sales_quantity` by the non-return rows (`sales_type != "return"`; return rows are stored positive) of `transactional_sales`: read once, window filtered on the raw `date` column, narrow select, rolled to the family main (`item_family_rollup.daily_data`) BEFORE the sum, summed per product x store x date, LEFT-joined onto the daily-data rows on `(product_id, store_id, date)`, `coalesce(gross, 0)`, helper columns dropped. All of it sits inside the existing `daily_data_raw` cache.
+- `"gross"`: `inputs.get_daily_data_raw` replaces `sales_revenue` / `sales_quantity` by the rows of `transactional_sales` that pass `input_filters.transactional_sales` (default `sales_type != 'return'`; return rows are stored positive): read once, window filtered on the raw `date` column, config filters on the raw columns, narrow select, rolled to the family main (`item_family_rollup.transactional_sales`, must equal `daily_data`: `materialize()` raises otherwise; follows `daily_data` when absent) BEFORE the sum, summed per product x store x date, LEFT-joined onto the daily-data rows on `(product_id, store_id, date)`, `coalesce(gross, 0)`, helper columns dropped. All of it sits inside the existing `daily_data_raw` cache.
 - Everything downstream follows untouched: `sales_cost`, blocked scope, input / population filters, the product-level collapse, comparable pairs, WOS / AUR / AUC / turnover, weighted in-stock weights, the `lost_sales_pct` denominator and the scope diff. One Sales Revenue only; the Metric Details text and the printed run summary state the basis. `get_instock_daily_raw` reads inventory / `usable` only, so it ignores the basis.
 - Units are replaced with revenue on purpose: AUR, AUC and the WOS / turnover ratios divide by units.
 - Only days daily-data has a row for are reported. A transactional day with no daily-data row (or one `input_filters.daily_data` removed, e.g. `usable = 1`) is not added: its gross sales are lost.
@@ -794,7 +794,7 @@ Top-level, `"net"` (default) | `"gross"`, validated by `materialize()` (anything
 | Restrict/rename which values become their own root | `dimension_sources[].root_values` (omit for auto-discovery — see §3.4b) |
 | Narrow one metric's own population (e.g. instock without NON-COMP, WOS without NVROUT) | `metrics.population_filters` — see §3.4d |
 | Change a client's fiscal_cal upload column names | `fiscal_calendar.column_map` (`quarter_col`/`month_col`/`month_name_col`) |
-| Filter inputs | `input_filters.{scope,lost_sales,daily_data}` |
+| Filter inputs | `input_filters.{scope,lost_sales,daily_data,transactional_sales}` |
 | Blend fast/slow-mover lost-sales models by product velocity | `lost_sales_ensemble.enabled: True` (+ `slow_path_segments`, `speed_cluster_path_segments`, `speed_cluster_format`, `speed_cluster_attribute_name`/`speed_cluster_value_col`, `fast_mover_clusters`) |
 | Map lost-sales table columns to different names | `lost_sales_source` (week_col, product_col, store_col, lost_sales_col, in_stock_col, total_days_col) |
 | Match `lost_sales_pct`'s sales denominator to an ecom-excluding lost-sales source | `lost_sales_source.sales_filter` — see §8 |

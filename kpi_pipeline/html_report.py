@@ -289,11 +289,12 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
     "latest_day") and the DC goods-in-transit / DC blocked-days notes on DC In-Stock Rate (dc_instock)."""
     out: Dict[str, Dict[str, str]] = {}
     if settings["SALES_BASIS"] == "gross":
+        passing = " AND ".join((settings["INPUT_FILTERS"].get("transactional_sales") or [])) or "all rows"
         out["total_sales_revenue"] = {
             **DEFAULT_METRIC_DEFINITIONS["total_sales_revenue"],
             "definition": (
                 "Total gross sales revenue across all scoped stores for the period: operation/transactional_sales "
-                "rows that are not returns, on the days daily-data has a row for the product and store (no gross "
+                f"rows with {passing}, on the days daily-data has a row for the product and store (no gross "
                 "sales that day count 0). Not net of returns."
             ),
             "formula": "Σ(daily gross sales revenue)",
@@ -302,7 +303,7 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
             **DEFAULT_METRIC_DEFINITIONS["total_sales_quantity"],
             "definition": (
                 "Total gross units sold across all scoped stores for the period: operation/transactional_sales "
-                "rows that are not returns, on the days daily-data has a row for the product and store. "
+                f"rows with {passing}, on the days daily-data has a row for the product and store. "
                 "Not net of returns."
             ),
             "formula": "Σ(daily gross sales quantity)",

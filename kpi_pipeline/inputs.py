@@ -220,25 +220,28 @@ def read_daily_data_source(spark: SparkSession, settings: Dict[str, Any], quiet:
 
 def _gross_sales_by_day(ctx) -> DataFrame:
     """operation/transactional_sales as (product_id, store_id, _gross_date, gross_revenue, gross_quantity):
-    every row of the report window that is not a return (sales_type != "return"; return rows are stored
-    positive), rolled to the family main like daily-data and summed per product x store x day.
+    the rows of the report window that pass input_filters.transactional_sales (tbretail: sales_type != "return";
+    return rows are stored positive), rolled to the family main when ITEM_FAMILY_ROLLUP["transactional_sales"]
+    is True and summed per product x store x day.
 
-    The window filter is on the raw date column, so Delta file pruning applies; only the five columns it
-    needs are read. Rolled before the sum because daily-data is in the family-main id space.
+    The window filter is on the raw date column, so Delta file pruning applies; the configured filters run on
+    the raw columns before only the five needed ones are kept. Rolled before the sum because daily-data is in
+    the family-main id space.
     """
     s = ctx.settings
     day_after_end = s["REPORT_END_DATE"] + datetime.timedelta(days=1)
-    gross = (
+    windowed = (
         ctx.spark.read.format("delta")
         .load(s["PATH_TRANSACTIONAL_SALES"])
         .filter(
             (F.col("date") >= F.lit(s["EFFECTIVE_REPORT_START_DATE"].isoformat()))
             & (F.col("date") < F.lit(day_after_end.isoformat()))
         )
-        .filter(F.col("sales_type") != "return")
-        .select("product_id", "store_id", F.to_date(F.col("date")).alias("_gross_date"), "sales_revenue", "sales_quantity")
     )
-    if s["ITEM_FAMILY_ROLLUP"]["daily_data"]:
+    gross = apply_input_filters(
+        windowed, _input_filters(s, "transactional_sales"), "transactional_sales", quiet=True
+    ).select("product_id", "store_id", F.to_date(F.col("date")).alias("_gross_date"), "sales_revenue", "sales_quantity")
+    if s["ITEM_FAMILY_ROLLUP"]["transactional_sales"]:
         gross = roll_to_item_family_parent(gross, ctx)
     return gross.groupBy("product_id", "store_id", "_gross_date").agg(
         F.sum(F.col("sales_revenue").cast("double")).alias("gross_revenue"),
@@ -247,7 +250,7 @@ def _gross_sales_by_day(ctx) -> DataFrame:
 
 
 def _with_gross_sales(daily: DataFrame, ctx) -> DataFrame:
-    """``daily`` with sales_revenue / sales_quantity replaced by the gross (non-return) transactional sales of
+    """``daily`` with sales_revenue / sales_quantity replaced by the gross (filtered) transactional sales of
     the same product x store x day, 0 where the day has none. Daily rows stay as they are, and a transactional
     day with no daily row is not added.
 
@@ -274,8 +277,8 @@ def get_daily_data_raw(ctx) -> DataFrame:
     """Cached daily-data for the report window: input_filters.daily_data applied, rows dated outside
     [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] dropped, rolled to the family main when
     ITEM_FAMILY_ROLLUP["daily_data"] is True, and only the columns its readers use. With sales_basis "gross"
-    its sales_revenue / sales_quantity are the non-return transactional sales (_with_gross_sales), so every
-    reader follows the basis.
+    its sales_revenue / sales_quantity are the transactional sales that pass input_filters.transactional_sales
+    (_with_gross_sales), so every reader follows the basis.
 
     Every reader (build_scoped_daily, scope.read_daily_for_scope,
     fiscal.build_time_grain_from_daily_data) keeps only window dates itself, so the window filter and the

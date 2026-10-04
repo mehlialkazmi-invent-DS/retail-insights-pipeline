@@ -82,7 +82,7 @@ Folders under the datastore bucket, one list of segments per source:
 | `products` | `master-data/products` | Product attributes: slice dimensions, active flag |
 | `lost_sales` | `noob/lost-sales` | Add a `model_id=...` segment if partitioned by model |
 | `product_planning_level` | `operation/product_planning_level` | `product_agg_level` to `product_id` map |
-| `transactional_sales` | `operation/transactional_sales` | Read only with `sales_basis = "gross"`: one row per transaction line, `sales_type` regular / promo / return |
+| `transactional_sales` | `operation/transactional_sales` | Read only with `sales_basis = "gross"`: one row per transaction line, `sales_type` regular / promo / clearence / return |
 
 ## `input_filters`
 
@@ -96,10 +96,13 @@ The notebook reads the **scope table**, **lost sales**, and **daily data** separ
     ],
     "lost_sales": [],
     "daily_data": [],
+    "transactional_sales": ["sales_type != 'return'"],  # read only with sales_basis "gross"
 }
 ```
 
 Each entry is a Spark SQL expression passed to `.filter()`. You can also filter ad hoc in the notebook preview cell (e.g. `.filter("brand = 'NIKE'")`).
+
+`transactional_sales` is read only under [`sales_basis = "gross"`](#sales_basis); its filters run on the raw columns (after the window filter, before the five needed columns are kept), so any column of the table can be used. The default `sales_type != 'return'` is what makes it gross: return rows are stored positive, so a list without it counts them as sales. Add to the list to narrow further (e.g. `"store_id NOT IN (829, 639, 917)"`, `"sales_type != 'clearence'"`).
 
 Preview cells re-read the same tables with the same config filters. The pipeline caches daily data and lost-sales weekly aggregates within each run.
 
@@ -363,12 +366,14 @@ Parent/child product roll-up: a superseded/child product (`is_main = false`) rol
     "daily_data": True,
     "lost_sales": False,
     "inventory_warehouse": True,
+    "transactional_sales": True,
 },
 ```
 
 `item_family_source` renames columns to `product_id` / `parent_id` / `is_main` at read time (`read_item_family_source`, `ctx.item_family_raw`). `path_segments.item_family` must point at a real table whenever any rollup toggle is `True` or [`goods_in_transit.roll_to_family_main`](#goods_in_transit) is `True`; it is read whenever `inventory_warehouse` is configured.
 
-- `daily_data` (default `True`): without it `build_scoped_daily`'s join to the parent-rolled `scope_core` silently drops daily rows still carrying a child product_id. Can shift historical numbers for products with a supersede history. Under [`sales_basis = "gross"`](#sales_basis) it also rolls the transactional sales before they are summed.
+- `daily_data` (default `True`): without it `build_scoped_daily`'s join to the parent-rolled `scope_core` silently drops daily rows still carrying a child product_id. Can shift historical numbers for products with a supersede history.
+- `transactional_sales` (default `True`; env `KPI_ITEM_FAMILY_ROLLUP_TRANSACTIONAL_SALES` in `config.py`): rolls the transactional sales to the family main before they are summed; used only under [`sales_basis = "gross"`](#sales_basis). Gross is joined onto daily-data, so under `"gross"` it must equal `daily_data`: `materialize()` raises otherwise. When the key is absent it follows `daily_data`.
 - `lost_sales` (default `False`): `report_dfu` already substitutes upstream, so a second roll-up is likely a no-op; opt-in safety net.
 - `inventory_warehouse` (default `True`): see [`inventory_warehouse`](#inventory_warehouse).
 - The scope has its own toggle, `scope.roll_to_family_main`.
@@ -386,9 +391,9 @@ Which sales every sales metric reads. Top-level, validated by `materialize()` (a
 | Value | `sales_revenue` / `sales_quantity` |
 | --- | --- |
 | `"net"` | `noob/daily-data` as it is: net of returns, and product-store-days with net quantity <= 0 or net revenue < 0 are already dropped upstream. `transactional_sales` is never read and nothing is joined. |
-| `"gross"` | The non-return rows of `operation/transactional_sales` (`sales_type != "return"`; return rows are stored positive, types are `regular` / `promo` / `return`), summed per product x store x date and left-joined onto the daily-data rows. |
+| `"gross"` | The rows of `operation/transactional_sales` that pass `input_filters.transactional_sales` (default `sales_type != 'return'`: return rows are stored positive, types are `regular` / `promo` / `clearence` / `return`), summed per product x store x date and left-joined onto the daily-data rows. |
 
-**Mechanism** (`inputs.get_daily_data_raw`, inside its existing per-run cache): after `input_filters.daily_data`, the window filter and the family roll-up, `transactional_sales` is read once (window on the raw `date` column for file pruning, `sales_type != "return"`, only `product_id`, `store_id`, `date`, `sales_revenue`, `sales_quantity`), rolled to the family main when `item_family_rollup.daily_data` is on (before the sum, because daily-data is in the family-main id space), summed per product x store x date and left-joined on `(product_id, store_id, date)`. `sales_revenue` / `sales_quantity` are then **replaced** by `coalesce(gross, 0)` and the helper columns are dropped. Everything downstream reads the same two columns, so `sales_cost = sales_quantity * cogs`, blocked scope, input and population filters, the product-level collapse, comparable pairs, WOS / AUR / AUC / turnover, the weighted in-stock weights, the lost-sales denominator and the scope diff all follow the basis with no other change. There is still one Sales Revenue and one Sales Units metric, with unchanged labels; the Metric Details tab and the printed run summary state the basis.
+**Mechanism** (`inputs.get_daily_data_raw`, inside its existing per-run cache): after `input_filters.daily_data`, the window filter and the family roll-up, `transactional_sales` is read once (window on the raw `date` column for file pruning, then `input_filters.transactional_sales`, default `sales_type != 'return'`, then only `product_id`, `store_id`, `date`, `sales_revenue`, `sales_quantity`), rolled to the family main when `item_family_rollup.transactional_sales` is on (before the sum, because daily-data is in the family-main id space), summed per product x store x date and left-joined on `(product_id, store_id, date)`. `sales_revenue` / `sales_quantity` are then **replaced** by `coalesce(gross, 0)` and the helper columns are dropped. Everything downstream reads the same two columns, so `sales_cost = sales_quantity * cogs`, blocked scope, input and population filters, the product-level collapse, comparable pairs, WOS / AUR / AUC / turnover, the weighted in-stock weights, the lost-sales denominator and the scope diff all follow the basis with no other change. There is still one Sales Revenue and one Sales Units metric, with unchanged labels; the Metric Details tab and the printed run summary state the basis.
 
 **What gross does not do.**
 

@@ -34,11 +34,11 @@ Edit `CONFIG` in `config.py`. At minimum:
 
 - `reporting_window.as_of_date` — anchor date; `reporting_window.run_min_date` — optional narrow start (Sunday-aligned).
 - `scope` — `time`, `grain` and `columns` (the column mapping) for your scope Delta table; `path_segments.scope` — its path segments under the datastore bucket; `scope.use_hybrid_scope` — `False` (default) for the scope table alone, `True` for hybrid (covered weeks + score backfill on missing weeks).
-- `input_filters` — optional Spark SQL filters on the scope table, lost sales, daily data.
+- `input_filters` — optional Spark SQL filters on the scope table, lost sales, daily data, and (under `sales_basis = "gross"`) transactional sales.
 - `slices.dimensions` — product-master columns to cut by (e.g. `brand`), applied within every root.
 - `dimension_sources` — optional: each column becomes a root (e.g. NVROUT from `extended_product`).
 - `instock.method`, `blocked_scope.metrics`, `goods_in_transit` — all gated.
-- `sales_basis` — `"net"` (default, `noob/daily-data` sales, net of returns) or `"gross"` (non-return rows of `operation/transactional_sales`, joined onto daily-data). One Sales Revenue is shown either way; changing it changes what saved `kpi_long` means, so use `output.save_mode = "full_refresh"`. See [docs/CONFIG.md](docs/CONFIG.md#sales_basis).
+- `sales_basis` — `"net"` (default, `noob/daily-data` sales, net of returns) or `"gross"` (`operation/transactional_sales` rows that pass `input_filters.transactional_sales`, default non-return, joined onto daily-data). One Sales Revenue is shown either way; changing it changes what saved `kpi_long` means, so use `output.save_mode = "full_refresh"`. See [docs/CONFIG.md](docs/CONFIG.md#sales_basis).
 - `output.save_outputs` and `output.save_mode` — `initial`, `incremental`, or `full_refresh`.
 - `run.mode` — `full` (default) or `html_only`.
 

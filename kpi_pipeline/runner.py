@@ -211,7 +211,8 @@ class KPIRunner:
         )
         print("RUN_MODE:", s.get("RUN_MODE", "full"))
         if s["SALES_BASIS"] == "gross":
-            print(f"SALES_BASIS: gross (non-return rows of {s['PATH_TRANSACTIONAL_SALES']}, joined onto daily-data)")
+            filters = " AND ".join((s["INPUT_FILTERS"].get("transactional_sales") or [])) or "no filter"
+            print(f"SALES_BASIS: gross ({s['PATH_TRANSACTIONAL_SALES']} rows with {filters}, joined onto daily-data)")
         else:
             print("SALES_BASIS: net (noob/daily-data, net of returns)")
         if s["SAVE_OUTPUTS"] and s["OUTPUT_SAVE_MODE"] == "incremental":
