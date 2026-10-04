@@ -15,6 +15,7 @@ Every config section and key of `config.py` (the generic reference template) and
 | `path_segments` | Folders of each source table under the bucket | [`path_segments`](#path_segments) |
 | `input_filters` | Spark SQL filters applied when reading each source | [`input_filters`](#input_filters) |
 | `item_family_source`, `item_family_rollup` | Parent / child product map | [`item_family`](#item_family) |
+| `sales_basis` | Which sales the sales metrics read: net (daily-data) or gross (transactional sales) | [`sales_basis`](#sales_basis) |
 | `scope`, `score_scope` | Which product x store pairs count | [`scope`](#scope), [`score_scope`](#score_scope) |
 | `blocked_scope` | UI-blocked days, per metric | [`blocked_scope`](#blocked_scope) |
 | `instock`, `dc_instock`, `inventory_warehouse` | Where in-stock rates and DC inventory come from | [`instock`](#instock), [`dc_instock`](#dc_instock), [`inventory_warehouse`](#inventory_warehouse) |
@@ -81,6 +82,7 @@ Folders under the datastore bucket, one list of segments per source:
 | `products` | `master-data/products` | Product attributes: slice dimensions, active flag |
 | `lost_sales` | `noob/lost-sales` | Add a `model_id=...` segment if partitioned by model |
 | `product_planning_level` | `operation/product_planning_level` | `product_agg_level` to `product_id` map |
+| `transactional_sales` | `operation/transactional_sales` | Read only with `sales_basis = "gross"`: one row per transaction line, `sales_type` regular / promo / return |
 
 ## `input_filters`
 
@@ -306,7 +308,7 @@ DC/warehouse daily inventory table backing `dc_mean_stock`, `total_mean_stock`, 
 
 Read via `read_inventory_warehouse_source`; its window-filtered, family-rolled result is cached per run (`pipeline._get_inventory_warehouse_parent_rolled`). Built into `dc_daily` (`pipeline.build_dc_daily`), restricted by left-semi join to the SAME in-scope `(product_id, Year, Week)` population as every other frame, so under `scope.time = "weekly"` a product's DC inventory is kept only for the weeks it is in scope. DC data has no store dimension; filter unwanted warehouse rows via `input_filters.inventory_warehouse`.
 
-**Item-family rollup before restriction (unconditional, NOT gated by `dc_instock.enabled`).** `scope_core` (and the scope table's rows) is in **parent** id space (its producer maps `product_id -> coalesce(parent_id, product_id)` via `item_family`'s `is_main=false` rows), but `inventory_warehouse`'s `product_id` is raw. `build_dc_daily` therefore rolls it to parent id (`pipeline._roll_to_item_family_parent`, re-aggregating `F.sum("inventory")` at `(product_id, warehouse_id, date)`) **before** restricting to `scope_core`; otherwise DC inventory on a superseded/child `product_id` would be dropped. So `path_segments.item_family` must point at a real table **whenever `path_segments.inventory_warehouse` is configured**, and `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL` shift wherever a family had inventory split across old and current item codes.
+**Item-family rollup before restriction (unconditional, NOT gated by `dc_instock.enabled`).** `scope_core` (and the scope table's rows) is in **parent** id space (its producer maps `product_id -> coalesce(parent_id, product_id)` via `item_family`'s `is_main=false` rows), but `inventory_warehouse`'s `product_id` is raw. `build_dc_daily` therefore rolls it to parent id (`inputs.roll_to_item_family_parent`, re-aggregating `F.sum("inventory")` at `(product_id, warehouse_id, date)`) **before** restricting to `scope_core`; otherwise DC inventory on a superseded/child `product_id` would be dropped. So `path_segments.item_family` must point at a real table **whenever `path_segments.inventory_warehouse` is configured**, and `dc_mean_stock`/`WOS_DC`/`WOS_TOTAL` shift wherever a family had inventory split across old and current item codes.
 
 ## `dc_instock`
 
@@ -336,7 +338,7 @@ Read via `read_inventory_warehouse_source`; its window-filtered, family-rolled r
 
 - **Goods in transit**: [`goods_in_transit.dc_instock`](#goods_in_transit) `True` makes a grid day with GIT to the DC also stocked (union), shifted by `goods_in_transit.date_shift_days` (tbretail `-1`).
 - **DC blocked scope** ([`blocked_scope`](#blocked_scope)'s `dc_solution_id`): DC blocked days leave the stocked and available days only when `dc_in_stock_rate` is in `blocked_scope.metrics`.
-- **`item_family_source`** ([`item_family`](#item_family)) maps the parent/child table's columns; used by `build_dc_daily` and `build_dc_inst` via `pipeline._roll_to_item_family_parent`, and read whenever `inventory_warehouse` is configured.
+- **`item_family_source`** ([`item_family`](#item_family)) maps the parent/child table's columns; used by `build_dc_daily` and `build_dc_inst` via `inputs.roll_to_item_family_parent`, and read whenever `inventory_warehouse` is configured.
 - **Window start.** Each pair's grid runs from **its own first `inventory_warehouse` row** to `REPORT_END_DATE`, not from a scope `start_date` or a flat window: the same "first day with any history" signal `daily_data_expanded` uses for the **store-level** in-stock denominator (`customer-analysis-tbretail`'s `05_future_visibility_data_prep.py`), so both series share one definition.
 - **Trade-off:** a pair ranged at a DC but never stocked inside the window has no row and is **absent**, not 0%. A pair that *stops* being stocked is still covered: its grid continues to `REPORT_END_DATE` and every later day is a stockout.
 
@@ -348,7 +350,7 @@ Read via `read_inventory_warehouse_source`; its window-filtered, family-rolled r
 
 ## `item_family`
 
-Parent/child product roll-up: a superseded/child product (`is_main = false`) rolls onto its parent (`coalesce(parent_id, product_id)`, `pipeline._roll_to_item_family_parent`).
+Parent/child product roll-up: a superseded/child product (`is_main = false`) rolls onto its parent (`coalesce(parent_id, product_id)`, `inputs.roll_to_item_family_parent`).
 
 ```python
 "path_segments": {..., "item_family": ["operation", "item_family"]},
@@ -366,11 +368,37 @@ Parent/child product roll-up: a superseded/child product (`is_main = false`) rol
 
 `item_family_source` renames columns to `product_id` / `parent_id` / `is_main` at read time (`read_item_family_source`, `ctx.item_family_raw`). `path_segments.item_family` must point at a real table whenever any rollup toggle is `True` or [`goods_in_transit.roll_to_family_main`](#goods_in_transit) is `True`; it is read whenever `inventory_warehouse` is configured.
 
-- `daily_data` (default `True`): without it `build_scoped_daily`'s join to the parent-rolled `scope_core` silently drops daily rows still carrying a child product_id. Can shift historical numbers for products with a supersede history.
+- `daily_data` (default `True`): without it `build_scoped_daily`'s join to the parent-rolled `scope_core` silently drops daily rows still carrying a child product_id. Can shift historical numbers for products with a supersede history. Under [`sales_basis = "gross"`](#sales_basis) it also rolls the transactional sales before they are summed.
 - `lost_sales` (default `False`): `report_dfu` already substitutes upstream, so a second roll-up is likely a no-op; opt-in safety net.
 - `inventory_warehouse` (default `True`): see [`inventory_warehouse`](#inventory_warehouse).
 - The scope has its own toggle, `scope.roll_to_family_main`.
 - Goods in transit has its own toggle, `goods_in_transit.roll_to_family_main`.
+
+## `sales_basis`
+
+Which sales every sales metric reads. Top-level, validated by `materialize()` (anything but `"net"` or `"gross"` raises `ValueError`); env `KPI_SALES_BASIS` overrides it.
+
+```python
+"path_segments": {..., "transactional_sales": ["operation", "transactional_sales"]},  # read only for "gross"
+"sales_basis": "net",   # "net" (default) | "gross"
+```
+
+| Value | `sales_revenue` / `sales_quantity` |
+| --- | --- |
+| `"net"` | `noob/daily-data` as it is: net of returns, and product-store-days with net quantity <= 0 or net revenue < 0 are already dropped upstream. `transactional_sales` is never read and nothing is joined. |
+| `"gross"` | The non-return rows of `operation/transactional_sales` (`sales_type != "return"`; return rows are stored positive, types are `regular` / `promo` / `return`), summed per product x store x date and left-joined onto the daily-data rows. |
+
+**Mechanism** (`inputs.get_daily_data_raw`, inside its existing per-run cache): after `input_filters.daily_data`, the window filter and the family roll-up, `transactional_sales` is read once (window on the raw `date` column for file pruning, `sales_type != "return"`, only `product_id`, `store_id`, `date`, `sales_revenue`, `sales_quantity`), rolled to the family main when `item_family_rollup.daily_data` is on (before the sum, because daily-data is in the family-main id space), summed per product x store x date and left-joined on `(product_id, store_id, date)`. `sales_revenue` / `sales_quantity` are then **replaced** by `coalesce(gross, 0)` and the helper columns are dropped. Everything downstream reads the same two columns, so `sales_cost = sales_quantity * cogs`, blocked scope, input and population filters, the product-level collapse, comparable pairs, WOS / AUR / AUC / turnover, the weighted in-stock weights, the lost-sales denominator and the scope diff all follow the basis with no other change. There is still one Sales Revenue and one Sales Units metric, with unchanged labels; the Metric Details tab and the printed run summary state the basis.
+
+**What gross does not do.**
+
+- It reports only days daily-data has a row for. A transactional day with no daily-data row is **not** added, and the days `input_filters.daily_data` removes (tbretail: `usable = 1`) lose their gross sales along with the row. Gross can therefore be lower than all non-return transactions of the window, even though it is before returns.
+- A daily-data row with no non-return sales gets 0. With the daily-data roll-up on, a child and its parent on the same date are summed into one row first, so a day's gross attaches once.
+- Units come from the same table as revenue, so `AUR` (revenue / units), `AUC` (`sales_cost` / units), WOS (stock / weekly sales units; `wos_revenue` / `wos_cost` revenue and cost) and `inventory_turnover_rate` stay consistent. Replacing only revenue would put gross revenue over net units.
+- The daily in-stock frame (`get_instock_daily_raw`) reads inventory and `usable` only and does not depend on the basis. The notebook's Cell 2 preview reads `noob/daily-data` directly, so it shows net sales whatever the basis.
+- The basis changes what a saved `kpi_long` row means. An incremental save must not mix bases: use `output.save_mode = "full_refresh"` when you change it (the run prints a note under `incremental`).
+
+**Cost.** `"net"` is byte-identical to a build without the setting. `"gross"` adds one windowed, column-pruned read of `transactional_sales`, one aggregation before the join, and one join, all inside the cached daily-data frame built once per run (no extra cache, no extra pass per KPI table). With the daily-data roll-up on there is one more aggregation on the daily side.
 
 ## `blocked_scope`
 
@@ -575,3 +603,4 @@ Needs `run_min_date` spanning 2+ years. Population, kinds, `grain`, `pair_days` 
 | `KPI_OUTPUT_RUN_DATE`             | `output.run_date` partition (default: `as_of_date`)          |
 | `KPI_HTML_*`                      | HTML report overrides, listed under [HTML report](HTML_REPORT.md#html-report) |
 | `KPI_RUN_MODE`                    | `full` or `html_only` — skip pipeline and render HTML from saved outputs |
+| `KPI_SALES_BASIS`                 | `net` or `gross` — overrides `sales_basis` (any other value raises) |

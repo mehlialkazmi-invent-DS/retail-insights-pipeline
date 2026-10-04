@@ -210,6 +210,15 @@ class KPIRunner:
             s["USE_FISCAL_CALENDAR"],
         )
         print("RUN_MODE:", s.get("RUN_MODE", "full"))
+        if s["SALES_BASIS"] == "gross":
+            print(f"SALES_BASIS: gross (non-return rows of {s['PATH_TRANSACTIONAL_SALES']}, joined onto daily-data)")
+        else:
+            print("SALES_BASIS: net (noob/daily-data, net of returns)")
+        if s["SAVE_OUTPUTS"] and s["OUTPUT_SAVE_MODE"] == "incremental":
+            print(
+                "note: sales_basis changes what saved kpi_long means; an incremental save must not mix bases, "
+                "use output.save_mode 'full_refresh' when you change it"
+            )
         print("SCOPE MODE:", "hybrid" if s["SCOPE"]["use_hybrid_scope"] else "scope table only")
         print("RUN_SCOPE_DIFF:", s["SCOPE"]["run_scope_diff"])
         if s["SCOPE"]["use_hybrid_scope"] or s["SCOPE"]["run_scope_diff"]:

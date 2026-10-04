@@ -35,37 +35,38 @@ flowchart TD
 
 ## 1. Config to settings and the reporting window
 
-`CONFIG` is the only part you edit (`config.py:59`). `materialize()` (`config.py:563`) does five things:
+`CONFIG` is the only part you edit (`config.py:64`). `materialize()` (`config.py:574`) does five things:
 
-1. Applies optional `KPI_*` environment overrides (`config.py:368-435`). `KPI_BUCKET` overrides the datastore bucket (`config.py:573`).
-2. Builds every source path under the bucket `/mnt/invent-{customer}-datastore` from `path_segments` (`config.py:573-587`).
-3. Validates the config and raises on bad combinations (`config.py:605-859`).
+1. Applies optional `KPI_*` environment overrides (`config.py:378-446`). `KPI_BUCKET` overrides the datastore bucket (`config.py:584`).
+2. Builds every source path under the bucket `/mnt/invent-{customer}-datastore` from `path_segments` (`config.py:584-599`).
+3. Validates the config and raises on bad combinations (`config.py:617-875`).
 4. Resolves the reporting window (below).
-5. Returns the flat `settings` dict that `KPIRunner` reads (`config.py:987-1056`).
+5. Returns the flat `settings` dict that `KPIRunner` reads (`config.py:1003-1073`).
 
 Switches that `materialize()` enforces:
 
 | Config key | Rule | Line |
 |---|---|---|
-| `instock.method` | must be `daily`, `weekly_source` or `lost_sales_source` | `config.py:605` |
-| `reporting_window.report_end` | must be `as_of`, `complete_month` or `latest_day` | `config.py:653` |
-| `reporting_window.report_end = "latest_day"` | needs `instock.method = "daily"` | `config.py:824` |
-| `scope.time`, `scope.grain`, `scope.columns` | `time` is `daily` or `weekly`, `grain` is `product` or `product_store`; `product` and (for `product_store`) `store` columns are required; `weekly` needs `date` or `year` + `week` and no `start` / `end`; `daily` takes no `date` / `year` / `week` | `config.py:720-733` |
-| `instock.method = "daily"` | needs a store grain, no `lost_sales_ensemble`, and a valid `count_start` | `config.py:793-814` |
-| `scope.columns.solution` | needs `scope.solution_id` | `config.py:735` |
-| `blocked_scope.ui_parameters_path` | needs `scope.columns.start` and `scope.columns.store` | `config.py:754` |
-| `blocked_scope.dc_solution_id` | needs `scope.dc_solution_id` | `config.py:781` |
-| `scope.dc_solution_id` | needs `scope.columns.solution`, `start` and `store` | `config.py:739` |
-| `scope.instock_main_eligible_only` | needs `scope.columns.start`, `roll_to_family_main`, method `daily` | `config.py:815-821` |
-| `scope.instock_exclude_unsuperseded_sizes` | needs method `daily` | `config.py:823` |
-| `goods_in_transit.store_instock` | needs method `daily` | `config.py:857` |
-| `goods_in_transit.inventory_metrics` | needs `use_fiscal_calendar = True`; needs `date_shift_days` set | `config.py:849-859` |
-| `lost_sales_ensemble.enabled` | cannot combine with `weekly_source` or `daily` | `config.py:665-671`, `config.py:807` |
-| `comparable_pairs.kinds` has `half` | needs `fiscal_calendar.half_periods = True` | `config.py:936-937` |
+| `instock.method` | must be `daily`, `weekly_source` or `lost_sales_source` | `config.py:617` |
+| `sales_basis` | must be `net` or `gross` | `config.py:659-661` |
+| `reporting_window.report_end` | must be `as_of`, `complete_month` or `latest_day` | `config.py:669` |
+| `reporting_window.report_end = "latest_day"` | needs `instock.method = "daily"` | `config.py:840` |
+| `scope.time`, `scope.grain`, `scope.columns` | `time` is `daily` or `weekly`, `grain` is `product` or `product_store`; `product` and (for `product_store`) `store` columns are required; `weekly` needs `date` or `year` + `week` and no `start` / `end`; `daily` takes no `date` / `year` / `week` | `config.py:736-749` |
+| `instock.method = "daily"` | needs a store grain, no `lost_sales_ensemble`, and a valid `count_start` | `config.py:809-830` |
+| `scope.columns.solution` | needs `scope.solution_id` | `config.py:751` |
+| `blocked_scope.ui_parameters_path` | needs `scope.columns.start` and `scope.columns.store` | `config.py:770` |
+| `blocked_scope.dc_solution_id` | needs `scope.dc_solution_id` | `config.py:797` |
+| `scope.dc_solution_id` | needs `scope.columns.solution`, `start` and `store` | `config.py:755` |
+| `scope.instock_main_eligible_only` | needs `scope.columns.start`, `roll_to_family_main`, method `daily` | `config.py:831-837` |
+| `scope.instock_exclude_unsuperseded_sizes` | needs method `daily` | `config.py:839` |
+| `goods_in_transit.store_instock` | needs method `daily` | `config.py:873` |
+| `goods_in_transit.inventory_metrics` | needs `use_fiscal_calendar = True`; needs `date_shift_days` set | `config.py:865-875` |
+| `lost_sales_ensemble.enabled` | cannot combine with `weekly_source` or `daily` | `config.py:681-687`, `config.py:823` |
+| `comparable_pairs.kinds` has `half` | needs `fiscal_calendar.half_periods = True` | `config.py:952-953` |
 
 ### Reporting window
 
-Dates come from `_resolve_report_window` (`config.py:529-557`). All weeks run Sunday to Saturday.
+Dates come from `_resolve_report_window` (`config.py:540-568`). All weeks run Sunday to Saturday.
 
 | Setting | Rule | Config key |
 |---|---|---|
@@ -81,60 +82,61 @@ Report-end modes:
 - **`complete_month`**: after the first step, `apply_report_end_mode` cuts `REPORT_END_DATE` back to the last day of the most recent fully elapsed month (`fiscal.py:228-272`). On the fiscal calendar the month bounds come from the unclipped upload, which must extend past the end date (`fiscal.py:242-247`). On the civil calendar the cut is the previous month end and is usually mid-week (`fiscal.py:221-226`). It raises if no month ends inside the window or the cut month starts before the window (`fiscal.py:260-270`).
 - **`latest_day`**: the window ends on `as_of_date` itself. YTD covers fiscal days 1..K of every year, where K is the fiscal day number of the end date (`fiscal.py:275-332`). The other tabs show complete periods only. Lost sales stops at the last Saturday (see section 5).
 
-`as_of_date` is also the default `output.run_date` (`config.py:941-946`).
+`as_of_date` is also the default `output.run_date` (`config.py:957-962`).
 
 ## 2. Run order
 
-`KPIRunner.run()` (`runner.py:291-318`) runs these stages in order. In `html_only` mode it runs only `run_html_only` (`runner.py:278-287`). The notebook (`main.ipynb`) calls `run(save=True)`: with `output.save_outputs` on, each table is written as soon as its stage builds it (section 8), so an interrupted run keeps every table it finished.
+`KPIRunner.run()` (`runner.py:300-327`) runs these stages in order. In `html_only` mode it runs only `run_html_only` (`runner.py:288-298`). The notebook (`main.ipynb`) calls `run(save=True)`: with `output.save_outputs` on, each table is written as soon as its stage builds it (section 8), so an interrupted run keeps every table it finished.
 
-**Progress.** Once the scopes are built, `run()` plans the KPI tables of every stage (`runner.py:320-334`): kpi_long = one per period type, comparable = `comparable.PLANNED_BUILDS` per kind (ytd / yoy 1, quarter 4, half 2), scope_diff = 2. Each KPI table is one `metrics.build_kpi_table` call (one `toPandas`, the run's main cost) that covers every root × cut of that period type or comparable build. It prints `PLAN: N KPI tables (...)`, a header per stage, and one line per table, for example `[kpi_long 1/6 | run 1/11] annual · 3 roots x 3 cuts — took | elapsed | ~left` (`runner.py:79-152`, ticked in `kpi_long.kpi_rows` and `comparisons.build_scope_diff`). A comparable build that is skipped (fewer than 2 qualifying years, no common pair, a quarter / half number without data) is dropped from the plan with a printed line. The time left is the average per table so far, so it is rough; the first kpi_long table also pays for materializing the cached frames.
+**Progress.** Once the scopes are built, `run()` plans the KPI tables of every stage (`runner.py:329-343`): kpi_long = one per period type, comparable = `comparable.PLANNED_BUILDS` per kind (ytd / yoy 1, quarter 4, half 2), scope_diff = 2. Each KPI table is one `metrics.build_kpi_table` call (one `toPandas`, the run's main cost) that covers every root × cut of that period type or comparable build. It prints `PLAN: N KPI tables (...)`, a header per stage, and one line per table, for example `[kpi_long 1/6 | run 1/11] annual · 3 roots x 3 cuts — took | elapsed | ~left` (`runner.py:79-152`, ticked in `kpi_long.kpi_rows` and `comparisons.build_scope_diff`). A comparable build that is skipped (fewer than 2 qualifying years, no common pair, a quarter / half number without data) is dropped from the plan with a printed line. The time left is the average per table so far, so it is rough; the first kpi_long table also pays for materializing the cached frames.
 
 | # | Stage | Reads | Sets on `ctx` | Prints / displays |
 |---|---|---|---|---|
 | 0 | `materialize` | `CONFIG`, env | nothing (returns `settings`) | nothing |
-| 1 | `print_config_summary` (notebook Cell 1, `runner.py:191-239`) | `settings` | nothing | customer, as-of date, window, fiscal flag, scope mode, instock method, GIT, slices, comparisons, save plan settings |
-| 2 | `_reset_run_caches` (`runner.py:175-189`) | nothing | unpersists, then clears `daily_data_raw`, `daily_data_excluded_days`, `lost_sales_weekly_base`, `instock_weekly_base`, `item_family_raw`, `inventory_warehouse_rolled` | nothing |
-| 3 | `build_dimensions` (`runner.py:364-366`) | fiscal_cal upload (or daily-data on the civil calendar), products table, dimension sources | `fiscal_cal`, `fiscal_week`, `products_attr`, `product_dims`, `active_slice_dimensions`, `cut_dimensions`, `root_definitions`, `complete_fiscal_periods`; `available_fiscal_months` (not `latest_day`); `ytd_through_day`, `ytd_years`, `day_calendar`, `ytd_lost_sales_last_week` (`latest_day` only). It can also change `settings["REPORT_END_DATE"]` (`complete_month`). | `report_end=complete_month: ...` cut line, `time grain`, `fiscal weeks`, fully elapsed months, latest complete period per tab, `ROOTS`, `CUT_DIMENSIONS`, `ACTIVE_SLICE_DIMENSIONS`, dimension-source join lines, `latest_day` YTD line (`fiscal.py:327-332`, `fiscal.py:562-575`, `fiscal.py:634-652`) |
-| 4 | `build_scopes` (`runner.py:368-373`) | the scope table, item_family, products, blocked-scope parquet, daily-data (score scope) | `scope_keys`, `scope_table_keys`, `scope_pairs`, `blocked_days`, `dc_scope_pairs`, `dc_blocked_days`, `score_only_scope_keys`, `hybrid_scope_keys` | scope pair counts, blocked pair-days, DC scope pairs, scope mode and final scope size (`scope.py:146`, `scope.py:199`, `scope.py:218-221`, `scope.py:319`, `scope.py:333`, `scope.py:443-444`, `scope.py:457-459`) |
-| 5 | `build_kpis` (`runner.py:385-397`) | all frame sources (section 3) | `hybrid_frames`, `kpi_long` | `kpi_long shape`, slices, periods, then a table of the overall latest period of each period type |
-| 6 | `build_comparisons` (`runner.py:399-404`) | `kpi_long` | `comparison_yoy`, `comparison_ytd`, `yoy_display`, `ytd_display`, `kpi_long_display` (trimmed copy for HTML) | one table per selected kind (overall root and cut) |
-| 7 | `build_comparable_pairs` (`runner.py:406-413`) | `hybrid_frames` | `comparable_kpi_long`, `comparable_comparison_<kind>`, `comparable_<kind>_display` | one table per enabled kind (latest link, overall) |
-| 8 | `build_scope_comparison` (`runner.py:415-430`) | rebuilds frames for the scope table and the score scope | `scope_frames`, `score_frames`, `scope_diff` | `scope diff: skipped` when `scope.run_scope_diff` is off |
+| 1 | `print_config_summary` (notebook Cell 1, `runner.py:192-249`) | `settings` | nothing | customer, as-of date, window, fiscal flag, sales basis, scope mode, instock method, GIT, slices, comparisons, save plan settings |
+| 2 | `_reset_run_caches` (`runner.py:176-190`) | nothing | unpersists, then clears `daily_data_raw`, `daily_data_excluded_days`, `lost_sales_weekly_base`, `instock_weekly_base`, `item_family_raw`, `inventory_warehouse_rolled` | nothing |
+| 3 | `build_dimensions` (`runner.py:374-376`) | fiscal_cal upload (or daily-data on the civil calendar), products table, dimension sources | `fiscal_cal`, `fiscal_week`, `products_attr`, `product_dims`, `active_slice_dimensions`, `cut_dimensions`, `root_definitions`, `complete_fiscal_periods`; `available_fiscal_months` (not `latest_day`); `ytd_through_day`, `ytd_years`, `day_calendar`, `ytd_lost_sales_last_week` (`latest_day` only). It can also change `settings["REPORT_END_DATE"]` (`complete_month`). | `report_end=complete_month: ...` cut line, `time grain`, `fiscal weeks`, fully elapsed months, latest complete period per tab, `ROOTS`, `CUT_DIMENSIONS`, `ACTIVE_SLICE_DIMENSIONS`, dimension-source join lines, `latest_day` YTD line (`fiscal.py:327-332`, `fiscal.py:562-575`, `fiscal.py:634-652`) |
+| 4 | `build_scopes` (`runner.py:378-384`) | the scope table, item_family, products, blocked-scope parquet, daily-data (score scope) | `scope_keys`, `scope_table_keys`, `scope_pairs`, `blocked_days`, `dc_scope_pairs`, `dc_blocked_days`, `score_only_scope_keys`, `hybrid_scope_keys` | scope pair counts, blocked pair-days, DC scope pairs, scope mode and final scope size (`scope.py:145`, `scope.py:198`, `scope.py:217-220`, `scope.py:316`, `scope.py:330`, `scope.py:440-441`, `scope.py:454-456`) |
+| 5 | `build_kpis` (`runner.py:396-408`) | all frame sources (section 3) | `hybrid_frames`, `kpi_long` | `kpi_long shape`, slices, periods, then a table of the overall latest period of each period type |
+| 6 | `build_comparisons` (`runner.py:410-415`) | `kpi_long` | `comparison_yoy`, `comparison_ytd`, `yoy_display`, `ytd_display`, `kpi_long_display` (trimmed copy for HTML) | one table per selected kind (overall root and cut) |
+| 7 | `build_comparable_pairs` (`runner.py:417-424`) | `hybrid_frames` | `comparable_kpi_long`, `comparable_comparison_<kind>`, `comparable_<kind>_display` | one table per enabled kind (latest link, overall) |
+| 8 | `build_scope_comparison` (`runner.py:426-441`) | rebuilds frames for the scope table and the score scope | `scope_frames`, `score_frames`, `scope_diff` | `scope diff: skipped` when `scope.run_scope_diff` is off |
 | 9 | save, right after each of stages 5-8 (`OutputSaver`, `io.py:596-693`) | the table that stage built | `save_plan` (each written table's counts) | `Saving outputs` header before the run, then `saved <table>` lines (`io.py:467-470`) |
-| 10 | `build_html_report` (`runner.py:432-465`) | `kpi_long_display` and comparison tables | nothing | `HTML report written: ...` (`html_report.py:1820`); with `html_report.output_path_segments` set it also writes a copy to the datastore (`runner.py:453-463`) |
+| 10 | `build_html_report` (`runner.py:443-476`) | `kpi_long_display` and comparison tables | nothing | `HTML report written: ...` (`html_report.py:1849`); with `html_report.output_path_segments` set it also writes a copy to the datastore (`runner.py:464-474`) |
 
 Notebook cells around the runner (`main.ipynb`):
 
 - **Cell 2** previews scope, lost-sales and daily-data inputs with the same `input_filters`. It is read-only.
-- **Scope debug cell** runs `prepare_scopes` (reset caches, `build_dimensions`, `build_scopes`), then displays distinct product, store and pair counts overall and per slice (`runner.py:467-470`, `scope_debug.py:18-117`). The next `run()` reuses that scope instead of building it again (`runner.py:296-298`, `runner.py:357-363`).
+- **Scope debug cell** runs `prepare_scopes` (reset caches, `build_dimensions`, `build_scopes`), then displays distinct product, store and pair counts overall and per slice (`runner.py:478-481`, `scope_debug.py:18-117`). The next `run()` reuses that scope instead of building it again (`runner.py:305-307`, `runner.py:366-372`).
 - **Cell 3** binds `ctx = runner.ctx` first (so the later cells see what an interrupted run built), then runs `runner.run(save=True)`: progress lines per KPI table, and each table saved as soon as it is built.
-- **Scope summary cell** displays row counts by `scope_origin` in the final scope (`runner.py:472-473`, `scope.py:465-475`).
+- **Scope summary cell** displays row counts by `scope_origin` in the final scope (`runner.py:483-484`, `scope.py:462-472`).
 - **Cell 4** prints what Cell 3 wrote (`ctx.save_plan`). **Cell 5** re-saves every built table with `save_outputs` only when `RESAVE = True` (after `save=False`, after finishing a step an interrupted Cell 3 did not reach, or after changing `allow_overwrite_existing`).
 - **Cell 6** builds the HTML report.
 - Remaining cells display samples of `kpi_long`, comparisons, comparable pairs and the scope diff.
 
-`html_only` mode applies the report-end mode, loads the saved tables, infers roots and cuts from the saved `kpi_long`, loads the fiscal weeks and trims the display copy (`runner.py:278-287`).
+`html_only` mode applies the report-end mode, loads the saved tables, infers roots and cuts from the saved `kpi_long`, loads the fiscal weeks and trims the display copy (`runner.py:288-298`).
 
 ## 3. Data sources
 
-Every Delta read goes through the functions in `inputs.py`. `input_filters.<source>` is a list of Spark SQL expressions applied to that source (`inputs.py:46-54`). A filter listed twice is applied twice.
+Every Delta read goes through the functions in `inputs.py`. `input_filters.<source>` is a list of Spark SQL expressions applied to that source (`inputs.py:47-55`). A filter listed twice is applied twice.
 
 | Source | Config key | Columns used | Filters and windows | Roll-up |
 |---|---|---|---|---|
 | Fiscal calendar upload | `path_segments.fiscal` | `date`, `Year`, `Week`, plus the `column_map` quarter, month and month-name columns | clipped to the window for `fiscal_cal`; unclipped when period bounds are needed (`fiscal.py:93-111`) | none |
-| Daily data | `path_segments.daily_data` | `product_id`, `store_id`, date column, `sales_revenue`, `sales_quantity`, `inventory`; the week column on the civil calendar only (`inputs.py:237-238`) | `input_filters.daily_data`, then dates inside `[EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE]` (`inputs.py:239-243`) | `item_family_rollup.daily_data` (default True) |
-| Daily data, removed days | same table | `product_id`, `store_id`, date | the days `input_filters.daily_data` removes, window days only; empty without filters (`inputs.py:252-281`) | same roll-up |
-| Daily data, in-stock copy | same table | `product_id`, `store_id`, date, `inventory`, `usable` (null counts as unusable) | no `input_filters`; dates from `instock.daily.history_start` (else window start) to the report end (`inputs.py:437-461`) | not rolled (already family-main) |
-| Products | `path_segments.products` | `product_id`, `cogs`, `price_without_tax`, slice columns, `is_active`, `option_code` | `dropDuplicates(product_id)` (`fiscal.py:611-617`); active flag read separately (`inputs.py:382-388`) | none |
-| Item family | `path_segments.item_family`, `item_family_source` | `product_id`, `parent_id`, `is_main` | `input_filters.item_family` (`inputs.py:298-312`) | the map itself |
-| Scope table | `path_segments.scope`, `scope.columns` | the configured product, store, start, end, solution, run-date and (weekly) date / year / week columns | `input_filters.scope`, then `solution_id` in the list (`columns.solution`), `run_date` equal to the scope run date (`columns.run_date`), `end_date` null or on or after it (`columns.end`); fails when a solution / run-date filter leaves no row (`inputs.py:331-379`) | `scope.roll_to_family_main` |
-| Inventory warehouse (DC) | `path_segments.inventory_warehouse` | `product_id`, `warehouse_id`, `date`, `inventory` | `input_filters.inventory_warehouse`, then window dates (`pipeline.py:608-630`) | `item_family_rollup.inventory_warehouse` (default True), then re-summed per product, warehouse, date |
-| Goods in transit | `path_segments.goods_in_transit`, `goods_in_transit` | `product_id`, `destination_id`, `destination_type`, `date`, `quantity` | `quantity > 0`; `destination_type` 0 = store, 1 = warehouse; dates shifted by `date_shift_days` (`pipeline.py:563-585`) | `goods_in_transit.roll_to_family_main` |
-| Lost sales | `path_segments.lost_sales`, `lost_sales_source` | week, product or planning-level, optional store, `lost_sales`; `in_stock` and `total_days` only for method `lost_sales_source` | `input_filters.lost_sales`, then window weeks (`pipeline.py:82-109`) | `item_family_rollup.lost_sales` (default False) |
-| Planning-level map | `path_segments.product_planning_level` | `planning_level_id`, `product_id` | inner join: lost-sales or in-stock rows without a mapping drop (`inputs.py:98-126`) | none |
-| Weekly in-stock source | `instock.weekly_source` | week, product, optional store, in-stock days, total days | no config filter; `fallback_sources` fill only keys no earlier column set has (`inputs.py:147-179`) | `item_family_rollup.lost_sales` |
-| Speed cluster | `lost_sales_ensemble` | `product_id`, cluster | ensemble only (`inputs.py:182-204`) | none |
-| Blocked scope | `blocked_scope` | `product_id`, `destination_id`, `solution_id`, `start_date`, `end_date` | `solution_id` in the list; a row without `start_date` fails (`inputs.py:405-427`) | block product ids are not rolled |
+| Daily data | `path_segments.daily_data` | `product_id`, `store_id`, date column, `sales_revenue`, `sales_quantity`, `inventory`; the week column on the civil calendar only (`inputs.py:292-293`) | `input_filters.daily_data`, then dates inside `[EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE]` (`inputs.py:294-298`) | `item_family_rollup.daily_data` (default True) |
+| Transactional sales (only with `sales_basis = "gross"`) | `path_segments.transactional_sales` | `product_id`, `store_id`, `date`, `sales_type`, `sales_revenue`, `sales_quantity` | window dates on the raw `date` column (file pruning), then `sales_type != "return"`; summed per product, store, date, then left-joined onto the daily-data rows (`inputs.py:221-270`) | `item_family_rollup.daily_data`, before the sum |
+| Daily data, removed days | same table | `product_id`, `store_id`, date | the days `input_filters.daily_data` removes, window days only; empty without filters (`inputs.py:308-335`) | same roll-up |
+| Daily data, in-stock copy | same table | `product_id`, `store_id`, date, `inventory`, `usable` (null counts as unusable) | no `input_filters`; dates from `instock.daily.history_start` (else window start) to the report end (`inputs.py:504-528`) | not rolled (already family-main) |
+| Products | `path_segments.products` | `product_id`, `cogs`, `price_without_tax`, slice columns, `is_active`, `option_code` | `dropDuplicates(product_id)` (`fiscal.py:611-617`); active flag read separately (`inputs.py:449-455`) | none |
+| Item family | `path_segments.item_family`, `item_family_source` | `product_id`, `parent_id`, `is_main` | `input_filters.item_family` (`inputs.py:352-366`) | the map itself |
+| Scope table | `path_segments.scope`, `scope.columns` | the configured product, store, start, end, solution, run-date and (weekly) date / year / week columns | `input_filters.scope`, then `solution_id` in the list (`columns.solution`), `run_date` equal to the scope run date (`columns.run_date`), `end_date` null or on or after it (`columns.end`); fails when a solution / run-date filter leaves no row (`inputs.py:398-446`) | `scope.roll_to_family_main` |
+| Inventory warehouse (DC) | `path_segments.inventory_warehouse` | `product_id`, `warehouse_id`, `date`, `inventory` | `input_filters.inventory_warehouse`, then window dates (`pipeline.py:605-627`) | `item_family_rollup.inventory_warehouse` (default True), then re-summed per product, warehouse, date |
+| Goods in transit | `path_segments.goods_in_transit`, `goods_in_transit` | `product_id`, `destination_id`, `destination_type`, `date`, `quantity` | `quantity > 0`; `destination_type` 0 = store, 1 = warehouse; dates shifted by `date_shift_days` (`pipeline.py:564-586`) | `goods_in_transit.roll_to_family_main` |
+| Lost sales | `path_segments.lost_sales`, `lost_sales_source` | week, product or planning-level, optional store, `lost_sales`; `in_stock` and `total_days` only for method `lost_sales_source` | `input_filters.lost_sales`, then window weeks (`pipeline.py:83-110`) | `item_family_rollup.lost_sales` (default False) |
+| Planning-level map | `path_segments.product_planning_level` | `planning_level_id`, `product_id` | inner join: lost-sales or in-stock rows without a mapping drop (`inputs.py:99-127`) | none |
+| Weekly in-stock source | `instock.weekly_source` | week, product, optional store, in-stock days, total days | no config filter; `fallback_sources` fill only keys no earlier column set has (`inputs.py:148-180`) | `item_family_rollup.lost_sales` |
+| Speed cluster | `lost_sales_ensemble` | `product_id`, cluster | ensemble only (`inputs.py:183-205`) | none |
+| Blocked scope | `blocked_scope` | `product_id`, `destination_id`, `solution_id`, `start_date`, `end_date` | `solution_id` in the list; a row without `start_date` fails (`inputs.py:472-494`) | block product ids are not rolled |
 | Dimension sources | `dimension_sources` | the configured columns | CSV or Delta (`fiscal.py:425-505`) | none |
 
 Calendar:
@@ -142,15 +144,24 @@ Calendar:
 - **Fiscal calendar** (`use_fiscal_calendar = True`): `Year`, `Week`, quarter and month come from the upload. The month and quarter number is the digits of the upload value (`M01` becomes 1). `Fiscal_Half` is 1 for quarters 1-2 and 2 for 3-4. A fiscal week takes its month and quarter from the upload rows of that week (`fiscal.py:23-84`).
 - **Civil calendar** (`use_fiscal_calendar = False`): `Year` is the calendar year of the date and `Week` is the daily-data week column. A week that straddles Jan 1 becomes two partial weeks. Month is the calendar month of the week start and quarter is derived from it (`fiscal.py:1-6`, `fiscal.py:62-84`, `fiscal.py:374-395`).
 - Either way the pipeline raises if a date is missing between the window start and end (`fiscal.py:344-360`), or if a fiscal week has a null quarter or month (`fiscal.py:539-555`).
-- `goods_in_transit.inventory_metrics` needs the fiscal calendar (`config.py:859`).
+- `goods_in_transit.inventory_metrics` needs the fiscal calendar (`config.py:875`).
 
-Item-family roll-up (`pipeline.py:595-605`): a child product id becomes its parent id, using only the non-main rows of `item_family`. A product without a parent keeps its own id. The roll-up is one level.
+Item-family roll-up (`inputs.roll_to_item_family_parent`, `inputs.py:376-387`): a child product id becomes its parent id, using only the non-main rows of `item_family`. A product without a parent keeps its own id. The roll-up is one level.
+
+**Sales basis (`sales_basis`).** `net` (default) reads every sales column from `noob/daily-data` as it is: net of returns, with product-store-days whose net quantity is <= 0 or net revenue is < 0 already dropped upstream. `gross` replaces daily-data's `sales_revenue` and `sales_quantity` with the non-return rows of `operation/transactional_sales`, as the first step when daily-data is read (`get_daily_data_raw`, `inputs.py:302-303`):
+
+1. Read `transactional_sales` once, keep the report window on the raw `date` column and `sales_type != "return"` (return rows are stored positive; types are `regular`, `promo`, `return`), select only the five columns (`inputs.py:221-246`).
+2. Roll `product_id` to the family main when `item_family_rollup.daily_data` is on, before summing, because daily-data is in the family-main id space.
+3. Sum to one row per product x store x date: `gross_revenue`, `gross_quantity`.
+4. Left-join onto the daily-data rows on `(product_id, store_id, date)` (daily-data's date column is a string; both sides are cast with `to_date`). `sales_revenue` / `sales_quantity` become `coalesce(gross, 0)`, and the helper columns are dropped (`inputs.py:249-270`). With the daily-data roll-up on, a child and its parent on the same date are first summed into one row so the day's gross attaches once.
+
+Everything after that follows untouched, because it reads the same column names from the same cached frame: `sales_cost = sales_quantity * cogs`, `input_filters.daily_data`, blocked scope, population filters, the product-level collapse, comparable pairs, `WOS` / `AUR` / `AUC` / turnover, the weighted in-stock weights, the lost-sales denominator and the scope diff. Only the days daily-data has a row for are reported: a transactional day with no daily-data row is not added, and its gross sales are lost, as are the sales of days `input_filters.daily_data` removed (for example `usable = 1`). A daily-data row with no non-return sales gets 0. `net` never reads `transactional_sales` and does no join. The in-stock daily frame reads inventory and `usable` only (`get_instock_daily_raw`), so the basis does not touch it.
 
 ## 4. Scope
 
-Scope decides which pairs, and in which weeks, enter the frames. Steps run in the order below (`runner.py:368-373`).
+Scope decides which pairs, and in which weeks, enter the frames. Steps run in the order below (`runner.py:378-384`).
 
-### 4.1 Time, grain and weeks (`build_scope`, `scope.py:293-291`)
+### 4.1 Time, grain and weeks (`build_scope`, `scope.py:290-288`)
 
 | `scope.time` | `scope.grain` | Scope keys | Weeks |
 |---|---|---|---|
@@ -158,13 +169,13 @@ Scope decides which pairs, and in which weeks, enter the frames. Steps run in th
 | `daily` | `product_store` | product, store, Year, Week | every window week |
 | `weekly` | `product` / `product_store` | product[, store], Year, Week | only the weeks in the table (no `start` / `end` columns) |
 
-"Window weeks" are the fiscal weeks that overlap the window (`scope.py:25-30`). For `daily`, the pair list is cross-joined with every window week. So a pair is in scope for the whole window, including weeks before its scope start date. The scope start date matters only for blocks and the daily in-stock count start (sections 4.4 and 5).
+"Window weeks" are the fiscal weeks that overlap the window (`scope.py:26-31`). For `daily`, the pair list is cross-joined with every window week. So a pair is in scope for the whole window, including weeks before its scope start date. The scope start date matters only for blocks and the daily in-stock count start (sections 4.4 and 5).
 
 ### 4.2 Source of the pair list (`scope.columns`)
 
 **`time = "daily"`** (`scope._scope_pairs`):
 
-1. Read the scope table rows of `scope.solution_id` (when `columns.solution` is set) for the scope run date (when `columns.run_date` is set) that are still open (`columns.end` null or on or after the run date), then `input_filters.scope` (`inputs.py:331-379`). The run date is `scope.run_date`, or the latest Sunday on or before today when unset. It is not the report `as_of_date` (`inputs.py:322-328`).
+1. Read the scope table rows of `scope.solution_id` (when `columns.solution` is set) for the scope run date (when `columns.run_date` is set) that are still open (`columns.end` null or on or after the run date), then `input_filters.scope` (`inputs.py:398-446`). The run date is `scope.run_date`, or the latest Sunday on or before today when unset. It is not the report `as_of_date` (`inputs.py:389-395`).
 2. Roll each row to its family main if `roll_to_family_main`.
 3. With `columns.start`: group by product and store. `scope_start` is the earliest start. `main_eligible` is true when at least one row belongs to the main itself, not only to a sub-item. Without it, the distinct pairs are kept.
 4. If `active_only`, keep only products with `is_active = true`.
@@ -175,37 +186,37 @@ The DC scope is built the same way for `scope.dc_solution_id`, with warehouse as
 
 **`time = "weekly"`** (`scope._weekly_scope_keys`): the table's own (product[, store], week) rows, weeks from `columns.date` via the fiscal calendar or native `columns.year` / `columns.week` (civil calendar only), rolled to the family main if `roll_to_family_main`, limited to active products if `active_only`, kept inside the window, with the optional `backfill_leading_gap`. A scope with no keys in the window (either time) raises `ValueError`.
 
-### 4.3 Hybrid scope (`scope.use_hybrid_scope`) and score scope (`build_hybrid_scope`, `scope.py:421-459`)
+### 4.3 Hybrid scope (`scope.use_hybrid_scope`) and score scope (`build_hybrid_scope`, `scope.py:418-456`)
 
-Score scope is computed only when `scope.use_hybrid_scope` or `scope.run_scope_diff` is on (`scope.py:431-439`).
+Score scope is computed only when `scope.use_hybrid_scope` or `scope.run_scope_diff` is on (`scope.py:428-436`).
 
-Score rule (`scope.py:359-418`, `score_scope.min_percentile`, `score_scope.min_weeks_for_filter`):
+Score rule (`scope.py:356-415`, `score_scope.min_percentile`, `score_scope.min_weeks_for_filter`):
 
 - Per pair and week: weekly sales is the sum of sales units, weekly inventory is the last daily snapshot of the week.
 - A pair-week is in score scope when both values reach that pair's percentile threshold, or when the pair has at most `min_weeks_for_filter` weeks.
-- The score scope reads daily data with every store, after `input_filters.daily_data` (`scope.py:336-356`).
+- The score scope reads daily data with every store, after `input_filters.daily_data` (`scope.py:333-353`).
 
-Hybrid = scope table plus the score-scope keys for window weeks that the scope table does not cover at all (`scope.py:447-455`). Only `time = "weekly"` can leave weeks uncovered, so with `daily` hybrid adds nothing (`scope.py:422-424`).
+Hybrid = scope table plus the score-scope keys for window weeks that the scope table does not cover at all (`scope.py:444-452`). Only `time = "weekly"` can leave weeks uncovered, so with `daily` hybrid adds nothing (`scope.py:419-421`).
 
-### 4.4 Blocked scope (`blocked_scope`, `scope.py:68-146`)
+### 4.4 Blocked scope (`blocked_scope`, `scope.py:67-145`)
 
-Needs `scope.columns.start` and `store`. Off when `blocked_scope.ui_parameters_path` is None (`scope.py:141-142`).
+Needs `scope.columns.start` and `store`. Off when `blocked_scope.ui_parameters_path` is None (`scope.py:140-141`).
 
-1. Read `{ui_parameters_path}/blocked_scope/{kind}` for each kind in `blocked_scope.kinds` (`product`, `product_destination`, `destination`), filtered to `blocked_scope.solution_id` (`inputs.py:405-427`).
-2. Join each kind to `ctx.scope_pairs`: `product` matches every store of the product, `product_destination` one pair, `destination` every product of the store (`inputs.py:391-402`, `scope.py:90-100`).
-3. Apply `blocked_scope.rule` (`scope.py:101`):
+1. Read `{ui_parameters_path}/blocked_scope/{kind}` for each kind in `blocked_scope.kinds` (`product`, `product_destination`, `destination`), filtered to `blocked_scope.solution_id` (`inputs.py:472-494`).
+2. Join each kind to `ctx.scope_pairs`: `product` matches every store of the product, `product_destination` one pair, `destination` every product of the store (`inputs.py:458-469`, `scope.py:89-99`).
+3. Apply `blocked_scope.rule` (`scope.py:100`):
    - `after_scope_start`: a block counts only when `block.start_date >= pair scope_start`. The same day counts. An earlier block is dropped.
    - `all`: every matched block counts.
-4. A block covers `start_date` to `end_date` (null means the report end), clipped to the window (`scope.py:102-111`).
-5. Overlapping and adjacent blocks of a pair are merged into disjoint intervals, so a day matches at most one interval (`scope.py:112-121`).
+4. A block covers `start_date` to `end_date` (null means the report end), clipped to the window (`scope.py:101-110`).
+5. Overlapping and adjacent blocks of a pair are merged into disjoint intervals, so a day matches at most one interval (`scope.py:111-120`).
 
-Block product ids are not rolled to the family main: only blocks on the main's own id apply (`scope.py:76-78`).
+Block product ids are not rolled to the family main: only blocks on the main's own id apply (`scope.py:75-77`).
 
-**DC blocked scope** (`scope.py:202-221`): needs `scope.dc_solution_id`, `blocked_scope.ui_parameters_path` and `blocked_scope.dc_solution_id`. It reads `{ui_parameters_path}/dc_blocked_scope/{kind}` for `blocked_scope.dc_kinds` (`product`, `product_destination`; `destination_id` is the warehouse). It matches against the DC scope pairs with the same `rule`.
+**DC blocked scope** (`scope.py:201-220`): needs `scope.dc_solution_id`, `blocked_scope.ui_parameters_path` and `blocked_scope.dc_solution_id`. It reads `{ui_parameters_path}/dc_blocked_scope/{kind}` for `blocked_scope.dc_kinds` (`product`, `product_destination`; `destination_id` is the warehouse). It matches against the DC scope pairs with the same `rule`.
 
 Under `instock.method` `weekly_source` / `lost_sales_source` with `in_stock_rate` in `blocked_scope.metrics` and an in-stock source without a store column, `build_blocked_product_days` also builds `ctx.blocked_product_days` (`product_id, first_day, last_day`): only the `product` kind applies, matched to each product's earliest `scope_start` under the same `rule` (`product_destination` / `destination` name a store that source does not have, and the run prints this); every store-level frame (sales, WOS, turnover, inventory, the daily in-stock frame, a weekly in-stock source with a store column) still applies every kind in `blocked_scope.kinds`, `product_destination` and `destination` included. `in_stock_rate` and `weighted_instock_rate` are blocked together (`materialize()` adds the missing one with a note).
 
-Blocked days are not removed from the scope. They are flagged `is_blocked` on `scoped_daily` and `dc_daily`, and each metric decides whether to read them (section 6). The in-stock frames and the lost-sales sales denominator drop them when they are built (`pipeline.py:427`, `pipeline.py:876-878`). Under the weekly in-stock methods only a pair-week (product-week without a store column) with every window day blocked is dropped, from `inst_data` alone (`_drop_fully_blocked_weeks`); partly blocked weeks stay and lost sales / `lost_base` keep every week.
+Blocked days are not removed from the scope. They are flagged `is_blocked` on `scoped_daily` and `dc_daily`, and each metric decides whether to read them (section 6). The in-stock frames and the lost-sales sales denominator drop them when they are built (`pipeline.py:428`, `pipeline.py:864-866`). Under the weekly in-stock methods only a pair-week (product-week without a store column) with every window day blocked is dropped, from `inst_data` alone (`_drop_fully_blocked_weeks`); partly blocked weeks stay and lost sales / `lost_base` keep every week.
 
 ### 4.5 What each step removes
 
@@ -219,16 +230,16 @@ Blocked days are not removed from the scope. They are flagged `is_blocked` on `s
 
 ## 5. Frames
 
-`build_pipeline_frames` builds all frames for one scope table (`pipeline.py:768-922`). Each metric family is restricted to scope on its own. They only meet in the per-period join (`metrics.py:422-446`).
+`build_pipeline_frames` builds all frames for one scope table (`pipeline.py:756-910`). Each metric family is restricted to scope on its own. They only meet in the per-period join (`metrics.py:422-446`).
 
-**`scope_core`**: distinct scope keys (`pipeline.py:791`), also returned in the `build_pipeline_frames` dict so its cache can be released. `scope_pairs` is its distinct (product, store) pairs. `scope_pair_weeks` is `scope_core` itself with a store grain.
+**`scope_core`**: distinct scope keys (`pipeline.py:779`), also returned in the `build_pipeline_frames` dict so its cache can be released. `scope_pairs` is its distinct (product, store) pairs. `scope_pair_weeks` is `scope_core` itself with a store grain.
 
-### Lost sales (`read_lost_sales_weekly`, `pipeline.py:132-219`)
+### Lost sales (`read_lost_sales_weekly`, `pipeline.py:133-220`)
 
 - **Single model** (`lost_sales_ensemble.enabled = False`): read `PATH_LOST_SALES`, map planning level to product if `product_agg_level_col` is set, apply `input_filters.lost_sales`, keep window weeks, sum `lost_sales` per product (and store if the source has one) per week.
-- **Ensemble** (`lost_sales_ensemble.enabled = True`): read the fast model (`path_segments.lost_sales`) and the slow model (`slow_path_segments`), full-outer join them, and join the product speed cluster. Products whose cluster is in `fast_mover_clusters` take the fast model for all of `lost_sales`, `in_stock_days`, `total_days`. All other products, including those without a cluster, take the slow model. A pair-week exists only if the chosen model has a `total_days` value (`pipeline.py:201-202`). It cannot combine with `instock.method` `daily` or `weekly_source`.
-- Then the weeks are joined to the fiscal week table. A row whose week start is not a fiscal week start of the window drops (`pipeline.py:28-44`, `pipeline.py:215-218`).
-- Finally the weekly table is restricted to scope at its own grain: a source without `store_id` is semi-joined on product, Year, Week only, so it is never repeated per store (`pipeline.py:793-799`).
+- **Ensemble** (`lost_sales_ensemble.enabled = True`): read the fast model (`path_segments.lost_sales`) and the slow model (`slow_path_segments`), full-outer join them, and join the product speed cluster. Products whose cluster is in `fast_mover_clusters` take the fast model for all of `lost_sales`, `in_stock_days`, `total_days`. All other products, including those without a cluster, take the slow model. A pair-week exists only if the chosen model has a `total_days` value (`pipeline.py:202-203`). It cannot combine with `instock.method` `daily` or `weekly_source`.
+- Then the weeks are joined to the fiscal week table. A row whose week start is not a fiscal week start of the window drops (`pipeline.py:29-45`, `pipeline.py:216-219`).
+- Finally the weekly table is restricted to scope at its own grain: a source without `store_id` is semi-joined on product, Year, Week only, so it is never repeated per store (`pipeline.py:781-787`).
 
 ### In-stock frame `inst_data`
 
@@ -236,44 +247,44 @@ Every method produces rows with `stocked_pairs` (in-stock days) and `available_d
 
 | `instock.method` | Source of the two counts | Rule |
 |---|---|---|
-| `lost_sales_source` | `in_stock_days` and `total_days` of the weekly lost-sales table | `available_days = coalesce(total_days, fiscal_week_days)`; rows with `available_days <= 0` drop (`pipeline.py:833-852`) |
-| `weekly_source` | the separate weekly table, restricted to scope at its own grain | `available_days = total_days` as is; rows with `available_days <= 0` drop (`pipeline.py:807-812`, `pipeline.py:833-852`) |
+| `lost_sales_source` | `in_stock_days` and `total_days` of the weekly lost-sales table | `available_days = coalesce(total_days, fiscal_week_days)`; rows with `available_days <= 0` drop (`pipeline.py:821-840`) |
+| `weekly_source` | the separate weekly table, restricted to scope at its own grain | `available_days = total_days` as is; rows with `available_days <= 0` drop (`pipeline.py:795-800`, `pipeline.py:821-840`) |
 | `daily` | built from daily data (below) | see below |
 
-**Daily method** (`build_instock_daily`, `pipeline.py:400-546`):
+**Daily method** (`build_instock_daily`, `pipeline.py:401-547`):
 
-1. **Pairs**: the scope pairs, then `instock.daily.input_filters` (Spark SQL on `product_id` / `store_id`), then, when `scope.instock_main_eligible_only`, minus the pairs where `main_eligible` is false (`pipeline.py:432-435`), then, when `scope.instock_exclude_unsuperseded_sizes`, minus the unsuperseded sizes (`pipeline.py:436-438`). An unsuperseded size is a product that is in no `item_family` row, whose class color (`products.option_code`) has another size that is in `item_family` (`pipeline.py:549-560`).
-2. **Daily rows**: the in-stock copy of daily data (no `input_filters.daily_data`, no family roll-up), kept for those pairs. When `in_stock_rate` is in `blocked_scope.metrics`, blocked days are dropped here (`pipeline.py:440-441`). It raises if the latest daily date is before the report end, because later days would count as out of stock (`pipeline.py:443-449`).
-3. **Count start** per pair (`instock.daily.count_start`): `first_daily_row` is the first remaining daily row from `history_start`; `scope_start` is the scope table's start (first daily row when missing); `earliest` is the earlier of the two (`pipeline.py:451-466`). `require_daily_data` drops pairs with no daily row. The count start is clipped to the window start, and pairs that start after the window end drop (`pipeline.py:467-473`).
-4. **Counted store-days** per pair-week: days in the week from the count start to the window end. Then subtract blocked days (when `in_stock_rate` is gated; counted per pair-week by interval / week overlap, not one row per day) and unusable days (when `usable_only`) (`pipeline.py:526-542`). A day with no daily row stays counted and is out of stock.
-5. **In-stock days**: a counted day with `inventory > 0` (and usable, when `usable_only`). With `goods_in_transit.store_instock`, a day with store GIT also counts, united with on-hand days, never summed. GIT days outside the count start, blocked days (when gated) and unusable days are removed first (`pipeline.py:490-502`). Unusable means `usable != 1` or null (`inputs.py:459`).
-6. `available_days = counted_days - removed_days`; rows with `available_days <= 0` drop; the result is restricted to `scope_core` keys, so a pair only counts in weeks where it is in scope (`pipeline.py:544-555`).
-7. With `report_end = "latest_day"`, the week that contains day K is split into two rows (days up to K and after) so YTD keeps exactly days 1..K (`pipeline.py:55-70`).
+1. **Pairs**: the scope pairs, then `instock.daily.input_filters` (Spark SQL on `product_id` / `store_id`), then, when `scope.instock_main_eligible_only`, minus the pairs where `main_eligible` is false (`pipeline.py:433-436`), then, when `scope.instock_exclude_unsuperseded_sizes`, minus the unsuperseded sizes (`pipeline.py:437-439`). An unsuperseded size is a product that is in no `item_family` row, whose class color (`products.option_code`) has another size that is in `item_family` (`pipeline.py:550-561`).
+2. **Daily rows**: the in-stock copy of daily data (no `input_filters.daily_data`, no family roll-up), kept for those pairs. When `in_stock_rate` is in `blocked_scope.metrics`, blocked days are dropped here (`pipeline.py:441-442`). It raises if the latest daily date is before the report end, because later days would count as out of stock (`pipeline.py:444-450`).
+3. **Count start** per pair (`instock.daily.count_start`): `first_daily_row` is the first remaining daily row from `history_start`; `scope_start` is the scope table's start (first daily row when missing); `earliest` is the earlier of the two (`pipeline.py:452-467`). `require_daily_data` drops pairs with no daily row. The count start is clipped to the window start, and pairs that start after the window end drop (`pipeline.py:468-474`).
+4. **Counted store-days** per pair-week: days in the week from the count start to the window end. Then subtract blocked days (when `in_stock_rate` is gated; counted per pair-week by interval / week overlap, not one row per day) and unusable days (when `usable_only`) (`pipeline.py:527-543`). A day with no daily row stays counted and is out of stock.
+5. **In-stock days**: a counted day with `inventory > 0` (and usable, when `usable_only`). With `goods_in_transit.store_instock`, a day with store GIT also counts, united with on-hand days, never summed. GIT days outside the count start, blocked days (when gated) and unusable days are removed first (`pipeline.py:491-503`). Unusable means `usable != 1` or null (`inputs.py:526`).
+6. `available_days = counted_days - removed_days`; rows with `available_days <= 0` drop; the result is restricted to `scope_core` keys, so a pair only counts in weeks where it is in scope (`pipeline.py:545-556`).
+7. With `report_end = "latest_day"`, the week that contains day K is split into two rows (days up to K and after) so YTD keeps exactly days 1..K (`pipeline.py:56-71`).
 
-### `scoped_daily` (`build_scoped_daily`, `pipeline.py:339-397`)
+### `scoped_daily` (`build_scoped_daily`, `pipeline.py:340-398`)
 
 Order of steps:
 
-1. Cached daily data (`input_filters.daily_data`, window dates, family roll-up).
-2. Keep scoped pairs (semi-join on product and store) (`pipeline.py:365-366`).
-3. If any metric in `goods_in_transit.inventory_metrics` reads store stock (`context.STORE_GIT_METRICS`): full-outer join store GIT. Daily rows are first summed to one row per pair-day. A GIT-only day gets sales, revenue and inventory 0 and `has_daily_row = False`. GIT-only days whose daily row `input_filters.daily_data` removed (for example `usable = 1`) are dropped, so a removed day does not come back as a zero-sales stock day (`pipeline.py:300-336`). Otherwise every row has `has_daily_row = True` and `git_quantity = 0`.
-4. Flag `is_blocked` from the store block intervals (`pipeline.py:280-291`).
+1. Cached daily data (`input_filters.daily_data`, window dates, family roll-up, and with `sales_basis = "gross"` the gross sales join).
+2. Keep scoped pairs (semi-join on product and store) (`pipeline.py:366-367`).
+3. If any metric in `goods_in_transit.inventory_metrics` reads store stock (`context.STORE_GIT_METRICS`): full-outer join store GIT. Daily rows are first summed to one row per pair-day. A GIT-only day gets sales, revenue and inventory 0 and `has_daily_row = False`. GIT-only days whose daily row `input_filters.daily_data` removed (for example `usable = 1`) are dropped, so a removed day does not come back as a zero-sales stock day (`pipeline.py:301-337`). Otherwise every row has `has_daily_row = True` and `git_quantity = 0`.
+4. Flag `is_blocked` from the store block intervals (`pipeline.py:281-292`).
 5. Attach the calendar (inner join: dates not in the fiscal calendar drop). On the civil calendar, `Year` and `Week` come from the date and the week column.
-6. Keep rows whose (pair, Year, Week) is in `scope_core` (`pipeline.py:384-385`).
-7. Inner join the product table (products missing from it drop) and add `inventory_retail = round(inventory * price_without_tax, 2)`, `inventory_cost = round(inventory * cogs, 2)`, `sales_cost = round(sales_quantity * cogs, 2)` (`pipeline.py:386-391`).
-8. Attach fiscal week attributes and `week_days` (7, or fewer for a part week under `latest_day`) (`pipeline.py:73-79`).
+6. Keep rows whose (pair, Year, Week) is in `scope_core` (`pipeline.py:385-386`).
+7. Inner join the product table (products missing from it drop) and add `inventory_retail = round(inventory * price_without_tax, 2)`, `inventory_cost = round(inventory * cogs, 2)`, `sales_cost = round(sales_quantity * cogs, 2)` (`pipeline.py:387-392`).
+8. Attach fiscal week attributes and `week_days` (7, or fewer for a part week under `latest_day`) (`pipeline.py:74-80`).
 
 Rows kept: all real daily rows in scope. Rows flagged: `is_blocked`, `has_daily_row`, `git_quantity`.
 
-### `lost_base` (`pipeline.py:857-911`)
+### `lost_base` (`pipeline.py:845-899`)
 
 - Lost-sales rows restricted to scope (above), with each week's `sales_quantity_weekly` joined on.
-- Sales come from `scoped_daily` real rows (`has_daily_row`). Blocked days are removed when `lost_sales_pct` is in `blocked_scope.metrics`. `lost_sales_source.sales_filter` (Spark SQL) narrows the sales half (`pipeline.py:859-875`).
-- Sales are summed to the grain of the lost-sales source (product-week when it has no store). A week with no sales is 0 (`pipeline.py:879-905`).
-- `TY_sales_quantity_weekly_corrected_lost_sales = floor(sales_quantity_weekly + lost_sales)` per row (`pipeline.py:906-909`).
-- Under `latest_day`, only weeks that end on or before the last Saturday on or before the report end are kept (`pipeline.py:895-901`).
+- Sales come from `scoped_daily` real rows (`has_daily_row`). Blocked days are removed when `lost_sales_pct` is in `blocked_scope.metrics`. `lost_sales_source.sales_filter` (Spark SQL) narrows the sales half (`pipeline.py:847-863`).
+- Sales are summed to the grain of the lost-sales source (product-week when it has no store). A week with no sales is 0 (`pipeline.py:867-893`).
+- `TY_sales_quantity_weekly_corrected_lost_sales = floor(sales_quantity_weekly + lost_sales)` per row (`pipeline.py:894-897`).
+- Under `latest_day`, only weeks that end on or before the last Saturday on or before the report end are kept (`pipeline.py:883-889`).
 
-### `dc_daily` (`build_dc_daily`, `pipeline.py:638-680`)
+### `dc_daily` (`build_dc_daily`, `pipeline.py:626-668`)
 
 1. Rolled DC inventory per product, warehouse, date.
 2. If any DC metric is in `goods_in_transit.inventory_metrics` (`context.DC_GIT_METRICS`): full-outer join warehouse GIT. A GIT-only day has inventory 0 and `has_inventory_row = False`.
@@ -281,29 +292,30 @@ Rows kept: all real daily rows in scope. Rows flagged: `is_blocked`, `has_daily_
 4. Attach the calendar, keep product-weeks that are in `scope_core`, then keep only (product, warehouse) pairs in the DC scope when `scope.dc_solution_id` is set.
 5. Left join product dimensions (a product missing from the products table stays, with null dimensions).
 
-### `dc_inst` (`build_dc_inst`, `pipeline.py:683-765`)
+### `dc_inst` (`build_dc_inst`, `pipeline.py:671-753`)
 
-- With `dc_instock.enabled = False`: an empty frame, so `dc_in_stock_rate` stays null (`pipeline.py:697-713`).
-- Otherwise: each (product, warehouse) pair gets a daily grid from its first inventory row to the window end. Missing days count as 0 inventory. The grid is limited to scope product-weeks and to DC scope pairs (`pipeline.py:719-740`).
-- A day is stocked when `inventory > dc_instock.stock_threshold`, or with `goods_in_transit.dc_instock` when GIT goes to that warehouse (`pipeline.py:743-749`).
-- DC blocked days leave both counts only when `dc_in_stock_rate` is in `blocked_scope.metrics`. `dc_unblocked_days` counts unblocked days either way (`pipeline.py:750-760`).
-- A pair that was never stocked inside the window has no row (`pipeline.py:686-688`).
+- With `dc_instock.enabled = False`: an empty frame, so `dc_in_stock_rate` stays null (`pipeline.py:685-701`).
+- Otherwise: each (product, warehouse) pair gets a daily grid from its first inventory row to the window end. Missing days count as 0 inventory. The grid is limited to scope product-weeks and to DC scope pairs (`pipeline.py:707-728`).
+- A day is stocked when `inventory > dc_instock.stock_threshold`, or with `goods_in_transit.dc_instock` when GIT goes to that warehouse (`pipeline.py:731-737`).
+- DC blocked days leave both counts only when `dc_in_stock_rate` is in `blocked_scope.metrics`. `dc_unblocked_days` counts unblocked days either way (`pipeline.py:738-748`).
+- A pair that was never stocked inside the window has no row (`pipeline.py:674-676`).
 
-### Goods in transit (`pipeline.py:563-592`)
+### Goods in transit (`pipeline.py:564-593`)
 
-GIT is read for the window shifted by `goods_in_transit.date_shift_days`. A snapshot dated D - shift is taken to describe the end of day D (shift -1: the snapshot dated D+1 is the end of day D). It keeps `quantity > 0` of the destination type, rolls to the family main if `roll_to_family_main`, and sums per day. It reaches only `scoped_daily` and `dc_daily` (inventory metrics) and the two in-stock frames (`store_instock`, `dc_instock`). It never reaches lost sales (`pipeline.py:773-777`).
+GIT is read for the window shifted by `goods_in_transit.date_shift_days`. A snapshot dated D - shift is taken to describe the end of day D (shift -1: the snapshot dated D+1 is the end of day D). It keeps `quantity > 0` of the destination type, rolls to the family main if `roll_to_family_main`, and sums per day. It reaches only `scoped_daily` and `dc_daily` (inventory metrics) and the two in-stock frames (`store_instock`, `dc_instock`). It never reaches lost sales (`pipeline.py:761-765`).
 
 ## 6. Metrics
 
-All 23 metrics of `METRICS_ALL` (`config.py:42-48`). All are computed by `compute_kpis` and `build_kpi_table` (`metrics.py:220-446`). `metrics.metric_cols` decides which are written to `kpi_long` (`kpi_long.py:315-316`).
+All 23 metrics of `METRICS_ALL` (`config.py:43-49`). All are computed by `compute_kpis` and `build_kpi_table` (`metrics.py:220-446`). `metrics.metric_cols` decides which are written to `kpi_long` (`kpi_long.py:315-316`).
 
 How to read the table:
 
 - **Blocked-day gate**: if the metric is in `blocked_scope.metrics`, blocked rows are not read (`metrics.py:55-63`). If not, blocked rows are read. Under `blocked_scope.metrics = "all"` every metric is gated.
-- **GIT**: whether naming the metric in `goods_in_transit.inventory_metrics` changes it. Metrics not in `INVENTORY_GIT_METRICS_ALL` never use GIT (`config.py:51-54`).
+- **GIT**: whether naming the metric in `goods_in_transit.inventory_metrics` changes it. Metrics not in `INVENTORY_GIT_METRICS_ALL` never use GIT (`config.py:52-55`).
 - Dates: "daily rows" means the rows of that frame in the period.
 - Daily-stock averages: per day, add up the stock of every pair in the root and cut, then average that over days. A day counts when a real daily row exists. When the metric uses GIT, a day also counts when only GIT rows exist (`metrics.py:79-94`).
 - `_per_unit` returns null when units are 0 (`metrics.py:66-71`).
+- **Sales basis**: every `sales_quantity` / `sales_revenue` below is daily-data's net sales under `sales_basis = "net"` and the non-return transactional sales under `"gross"` (section 3). `total_sales_*`, `AUR`, `AUC`, the sales side of WOS, turnover and `weighted_instock_rate`, and the `lost_sales_pct` denominator all follow the same setting.
 
 | Metric | Formula | Frame | Rows read | Blocked-day gate | GIT effect | Notes |
 |---|---|---|---|---|---|---|
@@ -382,7 +394,7 @@ Each `kpi_long` period type, and each comparable build, is computed as one KPI t
 
 ### Comparisons (`comparisons.py`)
 
-- `comparisons.enabled` picks `yoy` and `ytd` (`config.py:896-900`).
+- `comparisons.enabled` picks `yoy` and `ytd` (`config.py:912-916`).
 - **YoY**: the latest two annual rows, per root and cut value (`comparisons.py:184-209`).
 - **YTD**: every consecutive pair of `ytd` years (`comparisons.py:212-239`).
 - **Change**: percent change = (current - prior) / abs(prior), or none when prior is 0. The WOS metrics (`WOS`, `wos_revenue`, `wos_cost`, `WOS_DC`, `WOS_TOTAL`) change between their floored (whole-week, displayed) values, so 23 vs 23 is `+0.0%`; stored values stay unfloored. Metrics in `metrics.pp_change_metrics` show a difference in percentage points instead. For `in_stock_rate`, `weighted_instock_rate`, `dc_in_stock_rate` the difference is x100 because they are fractions. `lost_sales_pct` is already in percent (`comparisons.py:60-73`).
@@ -418,17 +430,17 @@ Tables (`io.py:109-117`): `kpi_long`, `comparison_yoy` / `comparison_ytd` (per `
 | `incremental` | loads the latest partition on or before `run_date`, appends keys not yet saved, replaces overlapping keys only when `allow_overwrite_existing` is True. Under `latest_day`, `ytd` rows of `kpi_long` and `comparable_kpi_long` are always replaced | `io.py:213-271`, `io.py:449-462` |
 | `full_refresh` | writes only this run's rows and overwrites the partition | `io.py:426-434` |
 
-Merge keys per table are in `TABLE_ROW_KEYS` (`io.py:64-90`). With `incremental` and `recompute_comparisons_from_history`, and a prior `kpi_long` partition, the comparison tables are recomputed from the merged `kpi_long` and overwritten whole. The comparable comparison tables are recomputed the same way (`io.py:528-568`, `io.py:681-693`). `save=False` skips the save; `SAVE_OUTPUTS = False` also skips it (`runner.py:343-355`, `io.py:575-585`).
+Merge keys per table are in `TABLE_ROW_KEYS` (`io.py:64-90`). With `incremental` and `recompute_comparisons_from_history`, and a prior `kpi_long` partition, the comparison tables are recomputed from the merged `kpi_long` and overwritten whole. The comparable comparison tables are recomputed the same way (`io.py:528-568`, `io.py:681-693`). `save=False` skips the save; `SAVE_OUTPUTS = False` also skips it (`runner.py:352-364`, `io.py:575-585`).
 
 **When each table is written.** `run(save=True)` creates an `OutputSaver` (`io.py:596-661`) before any compute: it looks up the incremental history sources once, so this run's own `run_date` partition never counts as its own source, and under `initial` it raises if any table already exists, before the run computes anything. It then writes `kpi_long` after `build_kpis`, the comparison tables after `build_comparisons` (recomputed from the merged `kpi_long` first when merging onto history), the comparable tables after `build_comparable_pairs`, and `scope_diff` after `build_scope_comparison`. `save_outputs` (`io.py:571-593`) writes them all at once with the same saver: after a `run(save=False)`, or to save what an interrupted run built (`runner.ctx` keeps the finished tables; empty ones are skipped).
 
 ### HTML report (`html_report`, `html_report.py`)
 
 - Built from `kpi_long_display`: `kpi_long` trimmed to the most recent periods per tab, using `weekly_display_weeks`, `monthly_display_months`, `quarterly_display_quarters`, `half_display_halves`, `yearly_display_years` (`kpi_long.py:159-199`). Weekly counts fiscal weeks, and under `latest_day` the trailing partial week takes no slot.
-- Layout: one outer tab per root when there is more than one (`html_report.root_labels` renames them), period tabs (Annual, YTD, Quarter, Half, Monthly, Weekly), cut tabs (`html_report.dimension_labels` renames them), a metric table, YoY and YTD comparison tables on the Annual and YTD tabs, comparable tables, and a Metric Details tab (`html_report.py:1572-1581`, `html_report.py:1653-1688`, `html_report.py:1699-1782`).
-- The header shows client, window, scope mode (Hybrid, Scope table only) and, under `latest_day`, a "Period basis" card (`html_report.py:1511-1570`).
-- Metric Details text comes from `DEFAULT_METRIC_DEFINITIONS` plus settings notes: blocked days, GIT, daily in-stock, `latest_day` lost-sales and WOS notes. `html_report.metric_definitions` overrides it (`html_report.py:59-365`).
-- The file name is `html_report.filename` with `{customer}` and `{report_end}`. It is written to the local folder, and also to the datastore folder when `html_report.output_path_segments` is set (`runner.py:443-463`).
+- Layout: one outer tab per root when there is more than one (`html_report.root_labels` renames them), period tabs (Annual, YTD, Quarter, Half, Monthly, Weekly), cut tabs (`html_report.dimension_labels` renames them), a metric table, YoY and YTD comparison tables on the Annual and YTD tabs, comparable tables, and a Metric Details tab (`html_report.py:1601-1610`, `html_report.py:1682-1717`, `html_report.py:1728-1811`).
+- The header shows client, window, scope mode (Hybrid, Scope table only) and, under `latest_day`, a "Period basis" card (`html_report.py:1540-1599`).
+- Metric Details text comes from `DEFAULT_METRIC_DEFINITIONS` plus settings notes: the gross sales basis, blocked days, GIT, daily in-stock, `latest_day` lost-sales and WOS notes. `html_report.metric_definitions` overrides it (`html_report.py:60-394`).
+- The file name is `html_report.filename` with `{customer}` and `{report_end}`. It is written to the local folder, and also to the datastore folder when `html_report.output_path_segments` is set (`runner.py:453-474`).
 
 ---
 
@@ -440,13 +452,13 @@ Values below are the actual config values. Where a value differs from the generi
 
 | Setting | tbretail value | Line |
 |---|---|---|
-| `customer` | `tbretail` | `tbretail_config.py:67` |
-| `reporting_window.as_of_date` | `2026-10-02` | `tbretail_config.py:72` |
-| `reporting_window.run_min_date` | `2024-02-06`, resolves to Sunday `2024-02-04` | `tbretail_config.py:73` |
-| `reporting_window.report_end` | `latest_day` (default is `as_of`) | `tbretail_config.py:74` |
-| `fiscal_calendar.use_fiscal_calendar` | True, columns `Quarter`, `Month`, `month_name` | `tbretail_config.py:77-83` |
-| `fiscal_calendar.half_periods` | True (default is False) | `tbretail_config.py:78` |
-| `output.save_mode` | `full_refresh`; `output.run_date` `2026-10-02` | `tbretail_config.py:352-353` |
+| `customer` | `tbretail` | `tbretail_config.py:72` |
+| `reporting_window.as_of_date` | `2026-10-02` | `tbretail_config.py:77` |
+| `reporting_window.run_min_date` | `2024-02-06`, resolves to Sunday `2024-02-04` | `tbretail_config.py:78` |
+| `reporting_window.report_end` | `latest_day` (default is `as_of`) | `tbretail_config.py:79` |
+| `fiscal_calendar.use_fiscal_calendar` | True, columns `Quarter`, `Month`, `month_name` | `tbretail_config.py:82-88` |
+| `fiscal_calendar.half_periods` | True (default is False) | `tbretail_config.py:83` |
+| `output.save_mode` | `full_refresh`; `output.run_date` `2026-10-02` | `tbretail_config.py:362-363` |
 
 Effect: the window runs from 2024-02-04 to `as_of_date` itself. YTD is fiscal days 1..K of every year that lies in the window. Annual and weekly tabs show complete periods only. Lost sales and lost-sales YTD stop at the last Saturday. The Half tab and the `half` comparable kind are on.
 
@@ -464,6 +476,7 @@ Same stages as Part 1. Notes for tbretail:
 |---|---|---|---|
 | fiscal calendar | `one_time_uploads/fiscal_cal` | clipped to the window | none |
 | daily data | `noob/daily-data` | `input_filters.daily_data = ["usable = 1"]` (same as the default) | `daily_data` True |
+| transactional sales | `operation/transactional_sales` | read only with `sales_basis = "gross"` (deployed value `net`); `sales_type != "return"` | `daily_data` True, before the sum |
 | inventory warehouse | `operation/inventory_warehouse` | none | `inventory_warehouse` True |
 | item family | `operation/item_family` | none | the map |
 | scope table | `operation/scope` | solution 21 (store), 22 (DC) | `scope.roll_to_family_main` True |
@@ -472,62 +485,63 @@ Same stages as Part 1. Notes for tbretail:
 | lost sales | `reporting/future_visibility/reporting_inv_fc_dfu/report_dfu` | `input_filters.lost_sales` is empty | `lost_sales` False |
 | product planning level | `operation/product_planning_level` | inner join map | none |
 
-Lines: `tbretail_config.py:92-121`.
+Lines: `tbretail_config.py:97-127`.
 
-- The lost-sales table has no store column and is keyed by `product_agg_level`, mapped to `product_id` through the planning-level table (`tbretail_config.py:229-238`). Lost sales is therefore restricted to scope at product and week, not per store.
-- The weekly in-stock source (`instock.weekly_source`) is configured but unused, because `instock.method = "daily"` (`tbretail_config.py:184`).
-- The lost-sales ensemble is off (`tbretail_config.py:239-247`).
-- ECOM stores 829, 639 and 917 are not removed from `daily_data`, so they stay in every sales, inventory, WOS and distinct metric. They are removed only from the daily in-stock pairs (`instock.daily.input_filters`, `tbretail_config.py:190`) and from the sales half of the lost-sales denominator (`lost_sales_source.sales_filter`, `tbretail_config.py:237`).
+- The lost-sales table has no store column and is keyed by `product_agg_level`, mapped to `product_id` through the planning-level table (`tbretail_config.py:239-248`). Lost sales is therefore restricted to scope at product and week, not per store.
+- The weekly in-stock source (`instock.weekly_source`) is configured but unused, because `instock.method = "daily"` (`tbretail_config.py:194`).
+- The lost-sales ensemble is off (`tbretail_config.py:249-257`).
+- ECOM stores 829, 639 and 917 are not removed from `daily_data`, so they stay in every sales, inventory, WOS and distinct metric. They are removed only from the daily in-stock pairs (`instock.daily.input_filters`, `tbretail_config.py:200`) and from the sales half of the lost-sales denominator (`lost_sales_source.sales_filter`, `tbretail_config.py:247`).
 
 ## 4. Scope
 
 | Step | tbretail value | Line |
 |---|---|---|
-| time, columns | `daily`; `product_id`, `location_id`, `start_date`, `end_date`, `solution_id`, `run_date`; solution 21 | `tbretail_config.py:126-139` |
-| DC solution | 22 | `tbretail_config.py:140` |
-| run date | None: latest Sunday on or before today, not `as_of_date` | `tbretail_config.py:141` |
-| `roll_to_family_main`, `active_only` | True, True | `tbretail_config.py:142-143` |
-| `instock_main_eligible_only` | True | `tbretail_config.py:146` |
-| `instock_exclude_unsuperseded_sizes` | True | `tbretail_config.py:149` |
-| grain | `product_store` | `tbretail_config.py:127` |
-| hybrid and score scope | off | `tbretail_config.py:151-157` |
-| blocked scope | on, rule `after_scope_start`, store solution 21, DC solution 22, kinds `product`, `product_destination`, `destination`, DC kinds `product`, `product_destination` | `tbretail_config.py:161-174` |
+| time, columns | `daily`; `product_id`, `location_id`, `start_date`, `end_date`, `solution_id`, `run_date`; solution 21 | `tbretail_config.py:136-149` |
+| DC solution | 22 | `tbretail_config.py:150` |
+| run date | None: latest Sunday on or before today, not `as_of_date` | `tbretail_config.py:151` |
+| `roll_to_family_main`, `active_only` | True, True | `tbretail_config.py:152-153` |
+| `instock_main_eligible_only` | True | `tbretail_config.py:156` |
+| `instock_exclude_unsuperseded_sizes` | True | `tbretail_config.py:159` |
+| grain | `product_store` | `tbretail_config.py:137` |
+| hybrid and score scope | off | `tbretail_config.py:161-167` |
+| blocked scope | on, rule `after_scope_start`, store solution 21, DC solution 22, kinds `product`, `product_destination`, `destination`, DC kinds `product`, `product_destination` | `tbretail_config.py:171-184` |
 
 Result of the scope step: pairs of solution 21 on the scope run date, rolled to the family main, active products only, for every window week. NVROUT, COMP and NON-COMP are labels from `dimension_sources`, not scope. DC pairs of solution 22 are kept for the DC metrics, limited to products in the store scope.
 
 Blocked days (store and DC) are flagged, not removed. The metrics that skip them are in `blocked_scope.metrics`:
 
-- **Skip blocked days**: `in_stock_rate`, `weighted_instock_rate`, `dc_in_stock_rate`, `total_inventory`, `mean_stock`, `mean_stock_retail`, `mean_stock_cost`, `dc_mean_stock`, `total_mean_stock`, `WOS`, `wos_revenue`, `wos_cost`, `WOS_DC`, `WOS_TOTAL`, `inventory_turnover_rate` (`tbretail_config.py:169-173`).
-- **Keep blocked days**: `total_sales_quantity`, `total_sales_revenue`, `AUR`, `AUC`, `distinct_product_count`, `distinct_store_count`, `distinct_pair_count`, `lost_sales_pct`. The config comment says a blocked pair can still sell its existing stock (`tbretail_config.py:159-160`).
+- **Skip blocked days**: `in_stock_rate`, `weighted_instock_rate`, `dc_in_stock_rate`, `total_inventory`, `mean_stock`, `mean_stock_retail`, `mean_stock_cost`, `dc_mean_stock`, `total_mean_stock`, `WOS`, `wos_revenue`, `wos_cost`, `WOS_DC`, `WOS_TOTAL`, `inventory_turnover_rate` (`tbretail_config.py:179-183`).
+- **Keep blocked days**: `total_sales_quantity`, `total_sales_revenue`, `AUR`, `AUC`, `distinct_product_count`, `distinct_store_count`, `distinct_pair_count`, `lost_sales_pct`. The config comment says a blocked pair can still sell its existing stock (`tbretail_config.py:169-170`).
 
 ## 5. Frames
 
 - `scope_core`: scope pairs x every window week.
-- `scoped_daily`: daily rows with `usable = 1` for scope pairs. Store GIT is joined (inventory metrics name every GIT metric, `tbretail_config.py:219-222`), so GIT-only days exist with `has_daily_row = False`. A GIT-only day whose daily row has `usable != 1` (or null usable) is dropped. Blocked days are flagged.
-- `inst_data` (`instock.method = "daily"`): pairs are scope pairs, minus stores 829, 639, 917, minus sub-only stores (main item not eligible), minus unsuperseded sizes. Count start is `earliest` (earlier of scope start and first daily row), searched from `history_start` 2024-02-04. `require_daily_data` and `usable_only` are True. Blocked days leave the store-days (`in_stock_rate` is gated). Store GIT days count as in stock (`store_instock` True) (`tbretail_config.py:183-191`, `tbretail_config.py:217`).
+- `scoped_daily`: daily rows with `usable = 1` for scope pairs. Store GIT is joined (inventory metrics name every GIT metric, `tbretail_config.py:229-232`), so GIT-only days exist with `has_daily_row = False`. A GIT-only day whose daily row has `usable != 1` (or null usable) is dropped. Blocked days are flagged.
+- `inst_data` (`instock.method = "daily"`): pairs are scope pairs, minus stores 829, 639, 917, minus sub-only stores (main item not eligible), minus unsuperseded sizes. Count start is `earliest` (earlier of scope start and first daily row), searched from `history_start` 2024-02-04. `require_daily_data` and `usable_only` are True. Blocked days leave the store-days (`in_stock_rate` is gated). Store GIT days count as in stock (`store_instock` True) (`tbretail_config.py:193-201`, `tbretail_config.py:227`).
 - `lost_base`: `report_dfu` lost sales at product and week, with sales from `scoped_daily` real rows, ECOM stores removed from the sales, blocked days kept. Only weeks ending on or before the last Saturday.
 - `dc_daily`: rolled warehouse inventory plus warehouse GIT (shift -1), blocked DC days flagged, restricted to DC solution 22 pairs among store-scope products.
-- `dc_inst`: empty. `dc_instock.enabled` is False, so `dc_in_stock_rate` is null and is not in `metric_cols` (`tbretail_config.py:210-213`). `goods_in_transit.dc_instock = True` has no effect.
+- `dc_inst`: empty. `dc_instock.enabled` is False, so `dc_in_stock_rate` is null and is not in `metric_cols` (`tbretail_config.py:220-223`). `goods_in_transit.dc_instock = True` has no effect.
 
 ## 6. Roots, cuts, periods, comparisons
 
-- **Cuts**: `brand` (shown as "Banner") and the derived dimension `SMW` (`KNG` if brand is `KNG`, else `SMW`) (`tbretail_config.py:251-255`, `tbretail_config.py:369`).
-- **Roots**: `overall`, `nvrout` and `comp` (shown as "LFL"). `IS_NVROUT` comes from `operation/extended_product` (`program LIKE '%NVROUT%'`, absent products get `no`; only `yes` becomes a root). `IS_COMP` is `no` for products in the NON-COMP CSV and `yes` for all other products; only `yes` becomes a root (`tbretail_config.py:256-285`, `tbretail_config.py:368`).
+- **Cuts**: `brand` (shown as "Banner") and the derived dimension `SMW` (`KNG` if brand is `KNG`, else `SMW`) (`tbretail_config.py:261-265`, `tbretail_config.py:379`).
+- **Roots**: `overall`, `nvrout` and `comp` (shown as "LFL"). `IS_NVROUT` comes from `operation/extended_product` (`program LIKE '%NVROUT%'`, absent products get `no`; only `yes` becomes a root). `IS_COMP` is `no` for products in the NON-COMP CSV and `yes` for all other products; only `yes` becomes a root (`tbretail_config.py:266-295`, `tbretail_config.py:378`).
 - **Periods**: annual (complete fiscal years), quarter, half, monthly, weekly (complete periods only), ytd (days 1..K).
-- **Comparisons**: `comparisons.enabled = ["yoy"]`, so only YoY is built (`tbretail_config.py:338`). `pp_change_metrics` are `in_stock_rate` and `lost_sales_pct`.
-- **Comparable pairs**: on, kinds `ytd`, `yoy`, `quarter`, `half`, grain `product_store`, `pair_days = "unblocked"` (`tbretail_config.py:340-345`).
-- **Population filter**: `in_stock_rate` excludes `IS_COMP = "no"`, in every root including `overall` (`tbretail_config.py:328-332`).
-- **HTML**: title "TBretail KPI Report", weekly 5, monthly 5, quarterly 5, half 4, annual all (`tbretail_config.py:357-370`).
+- **Comparisons**: `comparisons.enabled = ["yoy"]`, so only YoY is built (`tbretail_config.py:348`). `pp_change_metrics` are `in_stock_rate` and `lost_sales_pct`.
+- **Comparable pairs**: on, kinds `ytd`, `yoy`, `quarter`, `half`, grain `product_store`, `pair_days = "unblocked"` (`tbretail_config.py:350-355`).
+- **Population filter**: `in_stock_rate` excludes `IS_COMP = "no"`, in every root including `overall` (`tbretail_config.py:338-342`).
+- **HTML**: title "TBretail KPI Report", weekly 5, monthly 5, quarterly 5, half 4, annual all (`tbretail_config.py:367-380`).
 
 ## 7. Per-metric table for tbretail
 
-The 20 reported metrics (`tbretail_config.py:291-297`). Not reported: `wos_revenue`, `weighted_instock_rate`, `dc_in_stock_rate`. They are still calculated inside `compute_kpis`, but they are not written to `kpi_long`.
+The 20 reported metrics (`tbretail_config.py:301-307`). Not reported: `wos_revenue`, `weighted_instock_rate`, `dc_in_stock_rate`. They are still calculated inside `compute_kpis`, but they are not written to `kpi_long`.
 
 Rules that apply to every row:
 
 - Scope is the scope table rows of solution 21.
 - Only daily rows with `usable = 1` exist in `scoped_daily`.
 - Daily data and DC inventory are rolled to the family main.
+- Sales are daily-data's net sales (`sales_basis = "net"`). With `"gross"` every sales column below reads the non-return transactional sales instead (section 3 of Part 1).
 - ECOM stores 829, 639, 917 are included, except where stated.
 - NON-COMP products (`IS_COMP = no`) are included, except in `in_stock_rate`.
 
@@ -562,36 +576,37 @@ Every filter and removal. "Default" is the generic `config.py`; "tbretail" is `t
 
 | Filter or removal | Where | Metrics affected | Default | tbretail |
 |---|---|---|---|---|
-| `input_filters.daily_data` | `inputs.py:215`, `inputs.py:239` | all store metrics, scope, time grain on the civil calendar | `usable = 1` (`config.py:104`) | `usable = 1` (`tbretail_config.py:108`) |
-| Daily data window (start to report end) | `inputs.py:239-243` | all store metrics | window | window |
-| Family roll-up of daily data | `inputs.py:244-247` | all store metrics (re-keys children) | on | on |
-| Dates not in the fiscal calendar | `pipeline.py:379-382` | all `scoped_daily` and `dc_daily` metrics | inner join | inner join |
-| Products not in the products table | `pipeline.py:388` | all `scoped_daily` metrics | inner join | inner join |
-| Pairs outside scope | `pipeline.py:365-366`, `pipeline.py:384-385` | all store metrics | scope | scope |
-| Scope rows ended before the run date | `inputs.py:361-362` | scope | only with `scope.columns.end` | on |
-| Scope run date = latest Sunday on or before today | `inputs.py:322-328` | scope | `None` | `None` |
-| `active_only` | `scope.py:58-59` | scope | True | True |
-| Hybrid score backfill | `scope.py:447-455` | scope | off | off |
-| Blocked days (store) | `pipeline.py:280-291`, `metrics.py:55-63` | metrics in `blocked_scope.metrics` | off (path None) | 15 metrics (section 4) |
-| Blocked days in the in-stock frame | `pipeline.py:427`, `pipeline.py:440-441`, `pipeline.py:517-526` | `in_stock_rate`, `weighted_instock_rate` | off | on |
-| Blocked days in the lost-sales sales denominator | `pipeline.py:876-878` | `lost_sales_pct` | off | not gated, so kept |
-| DC blocked days | `pipeline.py:665`, `pipeline.py:742`, `pipeline.py:750` | `dc_mean_stock`, `total_mean_stock`, `WOS_DC`, `WOS_TOTAL`, `dc_in_stock_rate` | off | on |
-| Block rule `after_scope_start` | `scope.py:101` | which blocks apply | `after_scope_start` | `after_scope_start` |
-| Unusable days in in-stock | `pipeline.py:482-488`, `pipeline.py:540-542`, `inputs.py:459` | `in_stock_rate`, `weighted_instock_rate` | `usable_only` True | True |
-| In-stock count start and `require_daily_data` | `pipeline.py:451-473` | `in_stock_rate`, `weighted_instock_rate` | `first_daily_row`, True | `earliest`, True |
-| In-stock pair filter (`instock.daily.input_filters`) | `pipeline.py:431` | `in_stock_rate`, `weighted_instock_rate` | none | stores 829, 639, 917 |
-| `instock_main_eligible_only` | `pipeline.py:432-435` | `in_stock_rate`, `weighted_instock_rate` | False | True |
-| `instock_exclude_unsuperseded_sizes` | `pipeline.py:436-438`, `pipeline.py:549-560` | `in_stock_rate`, `weighted_instock_rate` | False | True |
+| `input_filters.daily_data` | `inputs.py:216`, `inputs.py:294` | all store metrics, scope, time grain on the civil calendar | `usable = 1` (`config.py:110`) | `usable = 1` (`tbretail_config.py:114`) |
+| Daily data window (start to report end) | `inputs.py:294-298` | all store metrics | window | window |
+| Family roll-up of daily data | `inputs.py:299-300` | all store metrics (re-keys children) | on | on |
+| Gross sales join (`sales_basis = "gross"`) | `inputs.py:302-303`, `inputs.py:249-270` | every sales metric: sales units / revenue, `AUR`, `AUC`, WOS and turnover sales, weighted in-stock weights, lost-sales denominator | `net` (no join) | `net` |
+| Dates not in the fiscal calendar | `pipeline.py:380-383` | all `scoped_daily` and `dc_daily` metrics | inner join | inner join |
+| Products not in the products table | `pipeline.py:389` | all `scoped_daily` metrics | inner join | inner join |
+| Pairs outside scope | `pipeline.py:366-367`, `pipeline.py:385-386` | all store metrics | scope | scope |
+| Scope rows ended before the run date | `inputs.py:428-429` | scope | only with `scope.columns.end` | on |
+| Scope run date = latest Sunday on or before today | `inputs.py:389-395` | scope | `None` | `None` |
+| `active_only` | `scope.py:57-58` | scope | True | True |
+| Hybrid score backfill | `scope.py:444-452` | scope | off | off |
+| Blocked days (store) | `pipeline.py:281-292`, `metrics.py:55-63` | metrics in `blocked_scope.metrics` | off (path None) | 15 metrics (section 4) |
+| Blocked days in the in-stock frame | `pipeline.py:428`, `pipeline.py:441-442`, `pipeline.py:518-527` | `in_stock_rate`, `weighted_instock_rate` | off | on |
+| Blocked days in the lost-sales sales denominator | `pipeline.py:864-866` | `lost_sales_pct` | off | not gated, so kept |
+| DC blocked days | `pipeline.py:653`, `pipeline.py:730`, `pipeline.py:738` | `dc_mean_stock`, `total_mean_stock`, `WOS_DC`, `WOS_TOTAL`, `dc_in_stock_rate` | off | on |
+| Block rule `after_scope_start` | `scope.py:100` | which blocks apply | `after_scope_start` | `after_scope_start` |
+| Unusable days in in-stock | `pipeline.py:483-489`, `pipeline.py:541-543`, `inputs.py:526` | `in_stock_rate`, `weighted_instock_rate` | `usable_only` True | True |
+| In-stock count start and `require_daily_data` | `pipeline.py:452-474` | `in_stock_rate`, `weighted_instock_rate` | `first_daily_row`, True | `earliest`, True |
+| In-stock pair filter (`instock.daily.input_filters`) | `pipeline.py:432` | `in_stock_rate`, `weighted_instock_rate` | none | stores 829, 639, 917 |
+| `instock_main_eligible_only` | `pipeline.py:433-436` | `in_stock_rate`, `weighted_instock_rate` | False | True |
+| `instock_exclude_unsuperseded_sizes` | `pipeline.py:437-439`, `pipeline.py:550-561` | `in_stock_rate`, `weighted_instock_rate` | False | True |
 | Population filter on `IS_COMP` | `metrics.py:376`, `filters.py:109-113` | the filtered metric group | none | `in_stock_rate`: `IS_COMP` not `no` |
-| `lost_sales_source.sales_filter` | `pipeline.py:859-875` | `lost_sales_pct` denominator | none | stores 829, 639, 917 |
-| GIT-only days with a removed daily row | `pipeline.py:314-328` | metrics that read `scoped_daily` GIT days | applies if GIT is on | applies |
-| GIT with `quantity <= 0` | `pipeline.py:572` | GIT metrics | dropped | dropped |
-| DC scope pairs | `pipeline.py:673-675`, `pipeline.py:720-722` | DC metrics | off (`dc_solution_id` None) | solution 22 |
-| DC product-week limit to store scope | `pipeline.py:671` | DC metrics | on | on |
-| Lost-sales rows with no planning-level mapping | `inputs.py:126` | `lost_sales_pct` | when `product_agg_level_col` is set | on |
-| Lost-sales weeks not on a fiscal week start | `pipeline.py:28-44` | `lost_sales_pct` | on | on |
-| Lost-sales weeks past the last Saturday | `pipeline.py:895-901` | `lost_sales_pct` | `latest_day` only | on |
-| `available_days <= 0` in-stock rows | `pipeline.py:539`, `pipeline.py:849` | `in_stock_rate`, `weighted_instock_rate` | on | on |
+| `lost_sales_source.sales_filter` | `pipeline.py:847-863` | `lost_sales_pct` denominator | none | stores 829, 639, 917 |
+| GIT-only days with a removed daily row | `pipeline.py:315-329` | metrics that read `scoped_daily` GIT days | applies if GIT is on | applies |
+| GIT with `quantity <= 0` | `pipeline.py:573` | GIT metrics | dropped | dropped |
+| DC scope pairs | `pipeline.py:661-663`, `pipeline.py:708-710` | DC metrics | off (`dc_solution_id` None) | solution 22 |
+| DC product-week limit to store scope | `pipeline.py:659` | DC metrics | on | on |
+| Lost-sales rows with no planning-level mapping | `inputs.py:127` | `lost_sales_pct` | when `product_agg_level_col` is set | on |
+| Lost-sales weeks not on a fiscal week start | `pipeline.py:29-45` | `lost_sales_pct` | on | on |
+| Lost-sales weeks past the last Saturday | `pipeline.py:883-889` | `lost_sales_pct` | `latest_day` only | on |
+| `available_days <= 0` in-stock rows | `pipeline.py:540`, `pipeline.py:837` | `in_stock_rate`, `weighted_instock_rate` | on | on |
 | Incomplete quarter, half, month | `kpi_long.py:54-66`, `kpi_long.py:127-132` | all metrics on those tabs | on | on |
 | Incomplete annual year and weekly week | `kpi_long.py:119-122` | all metrics on those tabs | `latest_day` only | on |
 | Partial trailing week (civil, `complete_month`) | `kpi_long.py:69-79`, `kpi_long.py:125-126` | weekly tab | civil + `complete_month` | not applicable |
@@ -599,7 +614,7 @@ Every filter and removal. "Default" is the generic `config.py`; "tbretail" is `t
 | Root filter | `kpi_long.py:237-239` | all metrics inside a root | `overall` only | `overall`, `nvrout`, `comp` |
 | Slice value filters | `kpi_long.py:242-244`, `kpi_long.py:245` | all metrics inside a cut | none | none |
 | Comparable pair universe | `comparable.py:257-268` | comparable tables | off | on, `product_store`, `unblocked` |
-| `dc_inst` pairs never stocked | `pipeline.py:686-688`, `pipeline.py:759` | `dc_in_stock_rate` | off | off (frame empty) |
+| `dc_inst` pairs never stocked | `pipeline.py:674-676`, `pipeline.py:747` | `dc_in_stock_rate` | off | off (frame empty) |
 | HTML display trim | `kpi_long.py:159-199` | HTML report only, not saved tables | 5, 5, 5, 4, all | 5, 5, 5, 4, all |
 
 ---

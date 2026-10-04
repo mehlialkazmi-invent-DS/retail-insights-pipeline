@@ -38,6 +38,7 @@ Edit `CONFIG` in `config.py`. At minimum:
 - `slices.dimensions` — product-master columns to cut by (e.g. `brand`), applied within every root.
 - `dimension_sources` — optional: each column becomes a root (e.g. NVROUT from `extended_product`).
 - `instock.method`, `blocked_scope.metrics`, `goods_in_transit` — all gated.
+- `sales_basis` — `"net"` (default, `noob/daily-data` sales, net of returns) or `"gross"` (non-return rows of `operation/transactional_sales`, joined onto daily-data). One Sales Revenue is shown either way; changing it changes what saved `kpi_long` means, so use `output.save_mode = "full_refresh"`. See [docs/CONFIG.md](docs/CONFIG.md#sales_basis).
 - `output.save_outputs` and `output.save_mode` — `initial`, `incremental`, or `full_refresh`.
 - `run.mode` — `full` (default) or `html_only`.
 
@@ -47,8 +48,8 @@ Every key is explained in [docs/CONFIG.md](docs/CONFIG.md). Any key can also be 
 
 Open `main.ipynb` and run the cells top to bottom (Run All works). Each cell:
 
-1. **Cell 1 — config summary.** Loads the config (`%run ./config`), calls `materialize()`, creates `KPIRunner` and prints the resolved settings (paths, date window, slices).
-2. **Cell 2 — input previews.** Reads the scope table, lost sales and daily data separately with the same `input_filters` the pipeline uses, prints each source's date range and displays a sample. Add ad-hoc notebook filters here if needed. Skipped when `run.mode = html_only`.
+1. **Cell 1 — config summary.** Loads the config (`%run ./config`), calls `materialize()`, creates `KPIRunner` and prints the resolved settings (paths, date window, sales basis, slices).
+2. **Cell 2 — input previews.** Reads the scope table, lost sales and daily data separately with the same `input_filters` the pipeline uses, prints each source's date range and displays a sample. Add ad-hoc notebook filters here if needed. It shows `noob/daily-data` as stored, so under `sales_basis = "gross"` its sales columns are still the net ones. Skipped when `run.mode = html_only`.
 3. **Scope debug.** `runner.prepare_scopes()` builds the dimensions and scope once (Cell 3 reuses them), then `runner.scope_debug_summary()` shows distinct product, store and pair counts overall and per slice value at each removal stage. Read-only sanity check before the heavy computation.
 4. **Cell 3 — run.** `runner.run(fund_paste=fund.paste, save=True)` computes everything.
    - It prints the plan (`PLAN: N KPI tables ...`) once the scopes are built, then one progress line per KPI table, which is one period type with all its roots and cuts: `[kpi_long 1/6 | run 1/11] annual · 3 roots x 3 cuts — took | elapsed | ~left`.

@@ -19,6 +19,7 @@ from kpi_pipeline.inputs import (
     read_blocked_scope_source,
     read_scope_source,
     rename_column_or_fail,
+    roll_to_item_family_parent,
 )
 
 
@@ -45,9 +46,7 @@ def _scope_pairs(ctx: KPIContext, solution_ids: Optional[List[int]], location_co
     rows = read_scope_source(ctx.spark, ctx.settings, solution_ids, location_col)
     rows = rows.withColumn("scope_product_id", F.col("product_id")) if has_start else rows.distinct()
     if cfg["roll_to_family_main"]:
-        from kpi_pipeline.pipeline import _roll_to_item_family_parent
-
-        rows = _roll_to_item_family_parent(rows, ctx)
+        rows = roll_to_item_family_parent(rows, ctx)
     if has_start:
         pairs = rows.groupBy(*keys).agg(
             F.min("start_date").alias("scope_start"),
@@ -258,9 +257,7 @@ def _weekly_scope_keys(ctx: KPIContext, raw: DataFrame) -> Tuple[DataFrame, Data
         keyed = raw.select(*pair_keys, "Year", "Week").distinct()
 
     if cfg["roll_to_family_main"]:
-        from kpi_pipeline.pipeline import _roll_to_item_family_parent
-
-        keyed = _roll_to_item_family_parent(keyed, ctx).distinct()
+        keyed = roll_to_item_family_parent(keyed, ctx).distinct()
     if cfg["active_only"]:
         keyed = keyed.join(read_active_product_ids(ctx.spark, ctx.settings), on="product_id", how="inner")
 

@@ -14,6 +14,7 @@
 # What this config turns on:
 #   Scope       the platform scope table (solution 21, family mains, active products) at product_store grain,
 #               daily, nothing added or removed; NVROUT, COMP and NON-COMP are labels from dimension_sources
+#   Sales       sales_basis "net": noob/daily-data sales, net of returns ("gross" reads operation/transactional_sales)
 #   Window      report_end "latest_day": YTD runs to as_of_date, other views show complete periods; Half tab on
 #   In-stock    instock.method "daily" (on-hand or store GIT, count start "earliest", ECOM stores left out);
 #               metrics.population_filters leaves NON-COMP out of in_stock_rate only
@@ -60,6 +61,10 @@ INVENTORY_GIT_METRICS_ALL = (
 # Where in_stock_rate comes from: instock.method.
 INSTOCK_METHODS = ("daily", "weekly_source", "lost_sales_source")
 
+# Which sales the sales metrics read: sales_basis. "net" = noob/daily-data (net of returns); "gross" = the
+# non-return rows of operation/transactional_sales (docs/CONFIG.md: sales_basis).
+SALES_BASES = ("net", "gross")
+
 CONFIG: Dict[str, Any] = {
     # =============================================================================
     # 1. RUN & DATES -- whose data, which days, which calendar
@@ -99,6 +104,7 @@ CONFIG: Dict[str, Any] = {
         "products": ["master-data", "products"],  # product attributes: slice dimensions, active flag
         "lost_sales": ["reporting", "future_visibility", "reporting_inv_fc_dfu", "report_dfu"],  # report_dfu
         "product_planning_level": ["operation", "product_planning_level"],  # product_agg_level -> product_id map
+        "transactional_sales": ["operation", "transactional_sales"],  # read only with sales_basis "gross" (non-return rows)
     },
     # Spark SQL expressions applied when reading each source (docs/CONFIG.md: input_filters). To keep a store out of
     # every metric, filter it in daily_data here and, for the daily in-stock, in instock.daily.input_filters.
@@ -119,6 +125,10 @@ CONFIG: Dict[str, Any] = {
         "lost_sales": False,
         "inventory_warehouse": True,
     },
+    # Which sales every sales metric reads (docs/CONFIG.md: sales_basis). "net": noob/daily-data as it is. "gross": its
+    # sales_revenue / sales_quantity are replaced by the non-return transactional_sales of the same product x store x
+    # day (0 where none). Changes what saved kpi_long means: use output.save_mode "full_refresh" when you change it.
+    "sales_basis": "net",
     # =============================================================================
     # 3. SCOPE -- which product x store pairs count, and on which days
     # =============================================================================
@@ -409,6 +419,7 @@ _ENV_OVERRIDES = (
     ("KPI_REPORT_END", ("reporting_window", "report_end"), _strip_lower),
     ("KPI_USE_FISCAL_CALENDAR", ("fiscal_calendar", "use_fiscal_calendar"), _parse_bool),
     ("KPI_HALF_PERIODS", ("fiscal_calendar", "half_periods"), _parse_bool),
+    ("KPI_SALES_BASIS", ("sales_basis",), _strip_lower),
     ("KPI_SCOPE_MIN_PERCENTILE", ("score_scope", "min_percentile"), lambda raw: _as_fraction(float(raw))),
     ("KPI_SCOPE_MIN_WEEKS_FOR_FILTER", ("score_scope", "min_weeks_for_filter"), int),
     ("KPI_USE_HYBRID_SCOPE", ("scope", "use_hybrid_scope"), _parse_bool),
@@ -616,6 +627,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "PATH_PRODUCT_PLANNING_LEVEL": fund_paste(bucket, *path_segments["product_planning_level"]),
         "PATH_SCOPE": fund_paste(bucket, *path_segments["scope"]),
         "PATH_GOODS_IN_TRANSIT": fund_paste(bucket, *path_segments["goods_in_transit"]),
+        "PATH_TRANSACTIONAL_SALES": fund_paste(bucket, *path_segments["transactional_sales"]),
     }
 
     # --- Column maps: lost sales, weekly in-stock source, item family -------------
@@ -675,6 +687,10 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "lost_sales": bool(item_family_rollup_cfg.get("lost_sales", False)),
         "inventory_warehouse": bool(item_family_rollup_cfg.get("inventory_warehouse", True)),
     }
+
+    sales_basis = cfg["sales_basis"]
+    if sales_basis not in SALES_BASES:
+        raise ValueError(f"sales_basis must be one of {list(SALES_BASES)}; got {sales_basis!r}")
 
     dc_instock_cfg = cfg["dc_instock"]
     dc_instock_enabled = bool(dc_instock_cfg["enabled"])
@@ -1058,6 +1074,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "INSTOCK_SOURCE_COLUMN_MAP": instock_source_column_map,
         "ITEM_FAMILY_COLUMN_MAP": item_family_column_map,
         "ITEM_FAMILY_ROLLUP": item_family_rollup,
+        "SALES_BASIS": sales_basis,
         "SCOPE": scope,
         "BLOCKED_SCOPE": blocked_scope,
         "INSTOCK_DAILY": daily_instock,

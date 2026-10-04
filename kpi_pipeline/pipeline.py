@@ -22,6 +22,7 @@ from kpi_pipeline.inputs import (
     read_lost_sales_source,
     read_speed_cluster_source,
     rename_column_or_fail,
+    roll_to_item_family_parent,
 )
 
 
@@ -92,7 +93,7 @@ def _aggregate_lost_sales_pairweek(ctx: KPIContext, raw: DataFrame, start, end) 
         .filter(F.col("week_start_date").between(F.lit(start), F.lit(end)))
     )
     if ctx.settings["ITEM_FAMILY_ROLLUP"]["lost_sales"]:
-        filtered = _roll_to_item_family_parent(filtered, ctx)
+        filtered = roll_to_item_family_parent(filtered, ctx)
     agg_exprs = [F.sum(F.col(col_map["lost_sales_col"]).cast("double")).alias("lost_sales")]
     if ctx.settings["INSTOCK_METHOD"] == "lost_sales_source":
         agg_exprs.append(F.sum(F.col(col_map["in_stock_col"]).cast("double")).alias("in_stock_days"))
@@ -118,7 +119,7 @@ def _aggregate_instock_pairweek(ctx: KPIContext, raw: DataFrame, start, end) -> 
         .filter(F.col("week_start_date").between(F.lit(start), F.lit(end)))
     )
     if ctx.settings["ITEM_FAMILY_ROLLUP"]["lost_sales"]:
-        filtered = _roll_to_item_family_parent(filtered, ctx)
+        filtered = roll_to_item_family_parent(filtered, ctx)
     agg_exprs = [
         F.sum(F.col("in_stock").cast("double")).alias("in_stock_days"),
         F.sum(F.col("total_days").cast("double")).alias("total_days"),
@@ -587,7 +588,7 @@ def _goods_in_transit_quantity(ctx: KPIContext, destination_type: int, location_
         )
     )
     if ctx.settings["GOODS_IN_TRANSIT"]["roll_to_family_main"]:
-        git = _roll_to_item_family_parent(git, ctx)
+        git = roll_to_item_family_parent(git, ctx)
     return (
         git.groupBy("product_id", location_col, "date")
         .agg(F.sum("quantity").alias("git_quantity"))
@@ -598,19 +599,6 @@ def _goods_in_transit_days(ctx: KPIContext, destination_type: int, location_col:
     """The (product_id, <location_col>, date) days of _goods_in_transit_quantity, for the in-stock metrics."""
     return _goods_in_transit_quantity(ctx, destination_type, location_col, shift).select(
         "product_id", location_col, "date"
-    )
-
-
-def _roll_to_item_family_parent(df: DataFrame, ctx: KPIContext) -> DataFrame:
-    """product_id -> coalesce(parent_id, product_id) over item_family's non-main rows: rolls a frame onto the
-    family-main id space scope_core is in, so child-id rows are not dropped by its joins."""
-    child_to_parent = broadcast(
-        get_item_family_raw(ctx).filter(~F.col("is_main")).select("product_id", "parent_id")
-    )
-    return (
-        df.join(child_to_parent, on="product_id", how="left")
-        .withColumn("product_id", F.coalesce(F.col("parent_id"), F.col("product_id")))
-        .drop("parent_id")
     )
 
 
@@ -630,7 +618,7 @@ def _get_inventory_warehouse_parent_rolled(ctx: KPIContext) -> DataFrame:
         .filter(F.col("date").between(F.lit(start), F.lit(end)))
     )
     if s["ITEM_FAMILY_ROLLUP"]["inventory_warehouse"]:
-        base = _roll_to_item_family_parent(base, ctx)
+        base = roll_to_item_family_parent(base, ctx)
     ctx.inventory_warehouse_rolled = (
         base.groupBy("product_id", "warehouse_id", "date")
         .agg(F.sum("inventory").alias("inventory"))

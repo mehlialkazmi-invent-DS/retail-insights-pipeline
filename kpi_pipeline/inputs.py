@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.functions import broadcast
 
 def resolve_csv_path(path: str, location: str = "datastore") -> str:
     """CSV path for Spark: "datastore" (default) paths are used as-is; "workspace" paths (a Databricks
@@ -217,18 +218,72 @@ def read_daily_data_source(spark: SparkSession, settings: Dict[str, Any], quiet:
     return out
 
 
+def _gross_sales_by_day(ctx) -> DataFrame:
+    """operation/transactional_sales as (product_id, store_id, _gross_date, gross_revenue, gross_quantity):
+    every row of the report window that is not a return (sales_type != "return"; return rows are stored
+    positive), rolled to the family main like daily-data and summed per product x store x day.
+
+    The window filter is on the raw date column, so Delta file pruning applies; only the five columns it
+    needs are read. Rolled before the sum because daily-data is in the family-main id space.
+    """
+    s = ctx.settings
+    day_after_end = s["REPORT_END_DATE"] + datetime.timedelta(days=1)
+    gross = (
+        ctx.spark.read.format("delta")
+        .load(s["PATH_TRANSACTIONAL_SALES"])
+        .filter(
+            (F.col("date") >= F.lit(s["EFFECTIVE_REPORT_START_DATE"].isoformat()))
+            & (F.col("date") < F.lit(day_after_end.isoformat()))
+        )
+        .filter(F.col("sales_type") != "return")
+        .select("product_id", "store_id", F.to_date(F.col("date")).alias("_gross_date"), "sales_revenue", "sales_quantity")
+    )
+    if s["ITEM_FAMILY_ROLLUP"]["daily_data"]:
+        gross = roll_to_item_family_parent(gross, ctx)
+    return gross.groupBy("product_id", "store_id", "_gross_date").agg(
+        F.sum(F.col("sales_revenue").cast("double")).alias("gross_revenue"),
+        F.sum(F.col("sales_quantity").cast("double")).alias("gross_quantity"),
+    )
+
+
+def _with_gross_sales(daily: DataFrame, ctx) -> DataFrame:
+    """``daily`` with sales_revenue / sales_quantity replaced by the gross (non-return) transactional sales of
+    the same product x store x day, 0 where the day has none. Daily rows stay as they are, and a transactional
+    day with no daily row is not added.
+
+    With the daily-data family roll-up, a child and its parent on the same date are summed into one row first,
+    so the gross of that day attaches once instead of once per row.
+    """
+    s = ctx.settings
+    date_col = s["DAILY_TIME_COLUMNS"]["date"]
+    if s["ITEM_FAMILY_ROLLUP"]["daily_data"]:
+        measures = ("sales_revenue", "sales_quantity", "inventory")
+        daily = daily.groupBy(*[c for c in daily.columns if c not in measures]).agg(
+            *[F.sum(m).alias(m) for m in measures]
+        )
+    return (
+        daily.withColumn("_gross_date", F.to_date(F.col(date_col)))
+        .join(_gross_sales_by_day(ctx), on=["product_id", "store_id", "_gross_date"], how="left")
+        .withColumn("sales_revenue", F.coalesce(F.col("gross_revenue"), F.lit(0.0)))
+        .withColumn("sales_quantity", F.coalesce(F.col("gross_quantity"), F.lit(0.0)))
+        .drop("_gross_date", "gross_revenue", "gross_quantity")
+    )
+
+
 def get_daily_data_raw(ctx) -> DataFrame:
     """Cached daily-data for the report window: input_filters.daily_data applied, rows dated outside
     [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] dropped, rolled to the family main when
-    ITEM_FAMILY_ROLLUP["daily_data"] is True, and only the columns its readers use.
+    ITEM_FAMILY_ROLLUP["daily_data"] is True, and only the columns its readers use. With sales_basis "gross"
+    its sales_revenue / sales_quantity are the non-return transactional sales (_with_gross_sales), so every
+    reader follows the basis.
 
     Every reader (build_scoped_daily, scope.read_daily_for_scope,
     fiscal.build_time_grain_from_daily_data) keeps only window dates itself, so the window filter and the
     column selection drop nothing they read; they only keep the cache small.
 
     The roll-up matters because scope_core and products_attr are already in the family-main id space: a
-    child product_id would drop out of build_scoped_daily's joins. A child and its parent on the same date
-    are not re-aggregated here; every reader sums those rows, groups by date first or counts distinct.
+    child product_id would drop out of build_scoped_daily's joins. Under "net" a child and its parent on the
+    same date are not re-aggregated here; every reader sums those rows, groups by date first or counts distinct.
     """
     if ctx.daily_data_raw is None:
         s = ctx.settings
@@ -242,10 +297,11 @@ def get_daily_data_raw(ctx) -> DataFrame:
             )
         )
         if s["ITEM_FAMILY_ROLLUP"]["daily_data"]:
-            from kpi_pipeline.pipeline import _roll_to_item_family_parent
-
-            raw = _roll_to_item_family_parent(raw, ctx)
-        ctx.daily_data_raw = raw.select(*columns).cache()
+            raw = roll_to_item_family_parent(raw, ctx)
+        raw = raw.select(*columns)
+        if s["SALES_BASIS"] == "gross":
+            raw = _with_gross_sales(raw, ctx)
+        ctx.daily_data_raw = raw.cache()
     return ctx.daily_data_raw
 
 
@@ -274,9 +330,7 @@ def get_daily_data_excluded_days(ctx) -> DataFrame:
             .select("product_id", "store_id", F.to_date(F.col(date_col)).alias("date"))
         )
         if s["ITEM_FAMILY_ROLLUP"]["daily_data"]:
-            from kpi_pipeline.pipeline import _roll_to_item_family_parent
-
-            removed = _roll_to_item_family_parent(removed, ctx)
+            removed = roll_to_item_family_parent(removed, ctx)
         ctx.daily_data_excluded_days = removed.distinct().cache()
     return ctx.daily_data_excluded_days
 
@@ -317,6 +371,19 @@ def get_item_family_raw(ctx) -> DataFrame:
     if ctx.item_family_raw is None:
         ctx.item_family_raw = read_item_family_source(ctx.spark, ctx.settings, quiet=True).cache()
     return ctx.item_family_raw
+
+
+def roll_to_item_family_parent(df: DataFrame, ctx) -> DataFrame:
+    """product_id -> coalesce(parent_id, product_id) over item_family's non-main rows: rolls a frame onto the
+    family-main id space scope_core is in, so child-id rows are not dropped by its joins."""
+    child_to_parent = broadcast(
+        get_item_family_raw(ctx).filter(~F.col("is_main")).select("product_id", "parent_id")
+    )
+    return (
+        df.join(child_to_parent, on="product_id", how="left")
+        .withColumn("product_id", F.coalesce(F.col("parent_id"), F.col("product_id")))
+        .drop("parent_id")
+    )
 
 
 def scope_run_date(settings: Dict[str, Any]) -> datetime.date:

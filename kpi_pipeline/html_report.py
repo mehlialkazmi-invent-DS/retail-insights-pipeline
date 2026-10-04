@@ -263,6 +263,13 @@ _BLOCKED_DAY_METRICS = (
 _DC_BLOCKED_DAY_METRICS = ("dc_mean_stock", "total_mean_stock", "WOS_DC", "WOS_TOTAL")
 
 
+# Metrics that read daily-data's sales columns (the rest of them follow sales_basis): the Metric Details text of
+# each notes the gross basis.
+_SALES_BASIS_METRICS = (
+    "AUR", "AUC", "WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL", "inventory_turnover_rate",
+    "weighted_instock_rate", "lost_sales_pct",
+)
+
 # Inventory metrics that can count goods in transit (goods_in_transit.inventory_metrics) -> what they then count.
 _GIT_METRIC_NOTES: Dict[str, str] = {
     **{m: "store" for m in (
@@ -275,12 +282,34 @@ _GIT_METRIC_NOTES: Dict[str, str] = {
 
 
 def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
-    """Definition overrides that depend on the run's settings: the daily in-stock method
-    (instock.method "daily"), the blocked-days note on the metrics named in blocked_scope.metrics, the
-    goods-in-transit notes on the inventory metrics (goods_in_transit.inventory_metrics), the lost-sales
-    period and WOS part-week notes (report_end "latest_day") and the DC goods-in-transit / DC blocked-days
-    notes on DC In-Stock Rate (dc_instock)."""
+    """Definition overrides that depend on the run's settings: the gross sales basis (sales_basis "gross"),
+    the daily in-stock method (instock.method "daily"), the blocked-days note on the metrics named in
+    blocked_scope.metrics, the goods-in-transit notes on the inventory metrics
+    (goods_in_transit.inventory_metrics), the lost-sales period and WOS part-week notes (report_end
+    "latest_day") and the DC goods-in-transit / DC blocked-days notes on DC In-Stock Rate (dc_instock)."""
     out: Dict[str, Dict[str, str]] = {}
+    if settings["SALES_BASIS"] == "gross":
+        out["total_sales_revenue"] = {
+            **DEFAULT_METRIC_DEFINITIONS["total_sales_revenue"],
+            "definition": (
+                "Total gross sales revenue across all scoped stores for the period: operation/transactional_sales "
+                "rows that are not returns, on the days daily-data has a row for the product and store (no gross "
+                "sales that day count 0). Not net of returns."
+            ),
+            "formula": "Σ(daily gross sales revenue)",
+        }
+        out["total_sales_quantity"] = {
+            **DEFAULT_METRIC_DEFINITIONS["total_sales_quantity"],
+            "definition": (
+                "Total gross units sold across all scoped stores for the period: operation/transactional_sales "
+                "rows that are not returns, on the days daily-data has a row for the product and store. "
+                "Not net of returns."
+            ),
+            "formula": "Σ(daily gross sales quantity)",
+        }
+        for metric in _SALES_BASIS_METRICS:
+            base = DEFAULT_METRIC_DEFINITIONS[metric]
+            out[metric] = {**base, "definition": base["definition"] + " Sales are gross (before returns)."}
     blocked_metrics = settings["BLOCKED_SCOPE"]["metrics"]
     if settings["BLOCKED_SCOPE"]["path"] is not None:
         for metric in _BLOCKED_DAY_METRICS:
