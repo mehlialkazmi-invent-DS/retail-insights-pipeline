@@ -335,12 +335,15 @@ def build_scope_diff(ctx: KPIContext) -> None:
     from kpi_pipeline.metrics import build_kpi_table
 
     scope_diff_metrics = ctx.settings["SCOPE_DIFF_METRICS"]
+    ctx.progress.section = "annual"
     scope_annual = build_kpi_table(
         ctx, _period_frames(ctx, ctx.scope_frames, "annual"), "Year", [], F.lit(True)
     )[["Year"] + scope_diff_metrics]
+    ctx.progress.table_done("scope table only")
     score_annual = build_kpi_table(
         ctx, _period_frames(ctx, ctx.score_frames, "annual"), "Year", [], F.lit(True)
     )[["Year"] + scope_diff_metrics]
+    ctx.progress.table_done("score only")
     merged = scope_annual.merge(score_annual, on="Year", suffixes=("_scope", "_score"))
     records = []
     for _, r in merged.iterrows():

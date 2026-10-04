@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+#### Save each table as soon as it is built; run progress per KPI table (no change to any value) - 2026-10-04
+
+`run(save=True)` now writes each output table right after the step that builds it (`io.OutputSaver`):
+`kpi_long` after `build_kpis`, the comparison tables after `build_comparisons` (recomputed from the merged
+history first under incremental, as before), the comparable tables after `build_comparable_pairs`, and
+`scope_diff` last. A slow or interrupted later step no longer loses the tables already built. The incremental
+history sources are looked up once before the first write (as before, the run's own partition never counts as
+its own source), and `save_mode="initial"` checks every table before the run computes anything instead of
+failing at the end. `save_outputs` uses the same saver to write everything at once (after `save=False`, or to
+save what an interrupted run built; empty tables are still skipped). The notebook's Cell 3 runs `save=True` and
+binds `ctx = runner.ctx` first, Cell 4 prints what was written, and Cell 5 re-saves only with `RESAVE = True`.
+
+`KPIRunner.run` also prints progress (`runner.RunProgress`, `ctx.progress`). Once the scopes exist it plans the
+KPI tables of every stage: kpi_long = period types × roots × cuts, comparable = `comparable.PLANNED_BUILDS` per
+kind (ytd / yoy 1, quarter 4, half 2) × roots × cuts, scope_diff = 2. Each KPI table (one `build_kpi_table`, one
+`toPandas`) then prints `[stage n/N | run n/N] section · root · cut — took | elapsed | ~left`, and skipped comparable
+builds are dropped from the plan.
+
+**Affected:** `kpi_pipeline/io.py`, `kpi_pipeline/runner.py`, `kpi_pipeline/context.py`,
+`kpi_pipeline/kpi_long.py`, `kpi_pipeline/comparable.py`, `kpi_pipeline/comparisons.py`, `main.ipynb`,
+`README.md`, `docs/LOGIC_FLOW.md`, `.claude/commands/retail-insights-help.md`
+
 #### Blocked days on every in-stock method; in-stock metrics blocked together; empty scope fails; cache hygiene (no change to any tbretail value) - 2026-10-04
 
 `in_stock_rate` and `weighted_instock_rate` read one in-stock frame, so listing either in `blocked_scope.metrics`

@@ -113,6 +113,8 @@ class KPIContext:
     comparable_quarter_display: Optional[pd.DataFrame] = None
     comparable_half_display: Optional[pd.DataFrame] = None
     save_plan: Optional[Any] = None
+    # runner.RunProgress of the current run: planned vs built KPI tables, printed as each finishes.
+    progress: Optional[Any] = None
 
     # Per-run caches (runner._reset_run_caches).
     daily_data_raw: Optional[DataFrame] = None

@@ -47,10 +47,11 @@ config.py          → materialize(fund.paste) → settings dict
 main.ipynb         Cell 1: config summary
                    Cell 2: input previews (scope, lost_sales, daily_data)
                    (before Cell 3): scope debug — distinct product/store counts per slice
-                   Cell 3: runner.run() — full pipeline
+                   Cell 3: runner.run(save=True) — full pipeline; progress line per KPI table;
+                           each table saved as soon as it is built (when save_outputs=True)
                    (after Cell 3): scope summary display
-                   Cell 4: save plan preview (when save_outputs=True)
-                   Cell 5: Delta write
+                   Cell 4: what Cell 3 wrote (ctx.save_plan)
+                   Cell 5: re-save everything at once (RESAVE=True only)
                    (unnumbered): kpi_long sample, YoY / YTD comparisons,
                                  comparable pairs (ytd/yoy/quarter/half), scope diff
                    Cell 6: HTML report
@@ -555,7 +556,9 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — those are
 
 **Metadata:** every row gets `_run_as_of` (run's `as_of_date`) and `_saved_at` (UTC write time). On incremental saves, untouched existing rows keep their original metadata.
 
-**Notebook flow:** Cell 3 `run(save=False)` → Cell 4 `preview_save_plan()` → Cell 5 `save_outputs()`. Review the save plan before writing.
+**Notebook flow:** Cell 3 `run(save=True)` writes each table as soon as its step builds it (`io.OutputSaver`): `kpi_long` → comparison tables → comparable tables → `scope_diff`, so an interrupted run keeps every finished table; `initial` is checked against every table before any compute. Cell 4 prints what was written (`ctx.save_plan`); Cell 5 (`RESAVE = True`) re-saves everything with `save_outputs()` — after `save=False`, or after finishing a step an interrupted Cell 3 did not reach (`runner.build_comparable_pairs()`; empty tables are skipped). Cell 3 binds `ctx = runner.ctx` before `run()` so later cells see an interrupted run's tables.
+
+**Progress (Cell 3 output):** `runner.RunProgress` (`ctx.progress`) plans the KPI tables once the scopes exist — kpi_long = period types × roots × cuts; comparable = `comparable.PLANNED_BUILDS` (ytd / yoy 1, quarter 4, half 2) × roots × cuts; scope_diff = 2 — prints `PLAN: …`, a header per stage, and per KPI table `[stage n/N | run n/N] section · root · cut — took | elapsed | ~left`. Skipped comparable builds are dropped from the plan with a printed line. ETA = average per table so far (rough; the first kpi_long table includes materializing the cached frames). A step run on its own (e.g. `runner.build_comparable_pairs()` after an interrupt) gets a fresh plan of that stage only.
 
 **Typical workflows:**
 
@@ -995,7 +998,9 @@ build_comparable_pairs → comparable_kpi_long + comparable_comparison_{ytd,yoy,
                           computed once against the overall population, not per root; store-side
                           grain is comparable_pairs.grain — see §3.6)
 build_scope_diff → scope_diff pandas table (scope vs score; only when run_scope_diff=True)
-save_outputs → kpi_long (incremental) → recompute comparisons from merged history → save all
+saves (run(save=True), io.OutputSaver) → kpi_long after build_kpis (incremental merge) → comparisons after
+                  build_comparisons (recomputed from merged history first) → comparable tables after
+                  build_comparable_pairs → scope_diff last; save_outputs() = all at once
 render_kpi_html → standalone HTML file
 
 report_end="latest_day" adds (once per run, fiscal.build_latest_day_windows): K / ctx.ytd_years /
@@ -1105,7 +1110,8 @@ and YTD = days 1..K; lost_base keeps weeks up to the last Saturday (§3.1b).
 | `comparable_kpi_long` | like-for-like per-link rows for EVERY enabled `comparable_pairs.kinds` entry, tagged by `comparison_type` (`"ytd"`/`"yoy"`/`"quarter"`/`"half"`) + `link_prior_year`/`link_current_year` (+ `quarter_number` / `half_number` for those rows) (when `comparable_pairs.enabled=True`) |
 | `comparable_comparison_ytd` / `_yoy` / `_quarter` / `_half` | one comparison DataFrame per enabled kind (same shape as `comparison_ytd`/`comparison_yoy`; `quarter` additionally keyed on `quarter_number`). Populated only for kinds in `comparable_pairs.kinds`; the others stay `None`. |
 | `comparable_ytd_display` / `comparable_yoy_display` / `comparable_quarter_display` | display DataFrame per enabled kind (ytd/yoy: latest link; quarter: latest link per quarter number) |
-| `save_plan` | SavePlan from last save_outputs call |
+| `save_plan` | SavePlan of what the last run(save=True) / save_outputs call wrote (preview_save_plan sets a preview) |
+| `progress` | `runner.RunProgress` of the current run: planned vs built KPI tables per stage |
 
 For a quick distinct product/store count of the scope at each removal stage (overall + per slice) without running the KPI step, use `runner.scope_debug_summary()` — see §3.3a.
 
@@ -1196,7 +1202,7 @@ For a quick distinct product/store count of the scope at each removal stage (ove
 9. **YTD's elapsed window is fixed once per run, from the latest year** — `available_fiscal_months` (month-grain, not quarter-grain — a quarter in progress can still have already-closed months, see §24) only looks at whether each month's weeks are within `REPORT_END_DATE` for the latest year; it is not recomputed per year being compared, so every year sums the same month-set.
 10. **Speed-cluster table shape is config, not auto-detected** — `speed_cluster_format` must match the actual source table (`"long"` attribute_name/attribute_value vs `"wide"` a direct cluster column); pointing at the wrong shape fails loudly on read rather than silently returning nulls.
 11. **Comparisons recomputed from merged history** — under incremental, `comparison_*` tables reflect the full saved `kpi_long` history, not just the current run window.
-12. **`ctx.kpi_long` is never trimmed; only `ctx.kpi_long_display` is** — the HTML display trim (`*_display_*` settings) must only ever write to `kpi_long_display`. Trimming `ctx.kpi_long` itself would silently truncate what `save_outputs()` persists, since `main.ipynb` calls `runner.run(save=False)` then `save_outputs(ctx, ...)` separately in a later cell — this was a real, previously-shipped bug.
+12. **`ctx.kpi_long` is never trimmed; only `ctx.kpi_long_display` is** — the HTML display trim (`*_display_*` settings) must only ever write to `kpi_long_display`. Trimming `ctx.kpi_long` itself would silently truncate what `save_outputs()` persists, since `save_outputs(ctx, ...)` can run in a later cell (Cell 5 re-save) after `runner.run()` — this was a real, previously-shipped bug.
 13. **Comparable-pairs restriction is a single universe PER KIND, fixed across that kind's own qualifying years, shared by every consecutive-year link within it** — for `ytd`/`yoy` a pair/product must be present in EVERY year in the run window to count at all; for `quarter`, independently per quarter number, in every year where that quarter is fully elapsed. Each kind computes this once (not per link), so the same year's metric value is identical across every link it participates in **within that kind** — `yoy`/`quarter` and `ytd` do NOT share one universe with each other. `comparable_kpi_long` rows still carry `link_prior_year`/`link_current_year` (+ `quarter_number` for `quarter`), but only so incremental merge doesn't collide two links' rows for the same year under one key, not because the values differ by link. The store-side population's own grain (`(product_id, store_id)` vs `product_id` alone) is `comparable_pairs.grain`, independent of `scope.grain` — see §3.6/§22.
 14. **Dimension sources fail loudly** — unlike `slices.derived_dimensions` (skipped on error), an enabled `dimension_sources` entry always raises on bad path/column/expression.
 15. **`dimension_sources` columns are ALWAYS roots, never cuts** — mutually exclusive with `slices` by design. A dimension_source column is unconditionally excluded from `ctx.cut_dimensions` even if nothing lists it as a root explicitly (auto-discovery still applies); do not expect it to show up as a flat breakdown alongside brand/SMW.

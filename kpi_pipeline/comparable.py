@@ -70,6 +70,10 @@ _NUMBERED_KINDS: Dict[str, _NumberedKind] = {
     "half": _NumberedKind("half_key", "Fiscal_Half", "half_number", "H"),
 }
 
+# Builds per kind the run's progress plans (one per quarter / half number); each builds one KPI table per
+# root x cut. Builds that turn out to be skipped are taken off the plan (ctx.progress.skip).
+PLANNED_BUILDS: Dict[str, int] = {"ytd": 1, "yoy": 1, "quarter": 4, "half": 2}
+
 
 def _restrict_frames(
     period_frames: Dict[str, DataFrame],
@@ -221,6 +225,8 @@ def _build_comparable_kind(
     period_type, _, _ = _KIND_CTX_ATTRS[comparison_type]
     pair_keys = _GRAIN_PAIR_KEYS[ctx.settings["COMPARABLE_PAIRS_GRAIN"]]
     numbered = _NUMBERED_KINDS.get(comparison_type)
+    build_label = f"{comparison_type} {numbered.prefix}{number}" if numbered else comparison_type
+    ctx.progress.section = f"comparable {build_label}"
     period_col = numbered.period_col if numbered else "Year"
     pf = _period_frames(ctx, ctx.hybrid_frames, period_type)
 
@@ -244,6 +250,7 @@ def _build_comparable_kind(
         complete_years = set(_complete_period_years(ctx, comparison_type, number))
         years = [y for y in years if y in complete_years]
     if len(years) < 2:
+        ctx.progress.skip(1, f"{build_label}: fewer than 2 qualifying years")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     common_keys = _intersect_years(scoped_daily_pop, years, pair_keys)
@@ -251,6 +258,7 @@ def _build_comparable_kind(
     dc_inst_common_keys = _intersect_years(dc_inst_pop, years, _DC_PAIR_KEYS)
     pair_count = common_keys.count()
     if pair_count == 0:
+        ctx.progress.skip(1, f"{build_label}: no common pair")
         common_keys.unpersist()
         dc_common_keys.unpersist()
         dc_inst_common_keys.unpersist()
@@ -348,6 +356,7 @@ def build_comparable_pairs(ctx: KPIContext) -> None:
             r[numbered.number_col]
             for r in ctx.hybrid_frames["scoped_daily"].select(numbered.number_col).distinct().collect()
         )
+        ctx.progress.skip(PLANNED_BUILDS[kind] - len(numbers), f"{kind}: numbers without data")
         n_kpi_parts: List[pd.DataFrame] = []
         n_save_parts: List[pd.DataFrame] = []
         n_display = pd.DataFrame()

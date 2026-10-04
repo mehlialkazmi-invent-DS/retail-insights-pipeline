@@ -364,7 +364,7 @@ Results persist to Delta under one root:
 {bucket}/{output.path_segments}/{table_name}/run_date={run_date}/
 ```
 
-Default: `/mnt/invent-{customer}-datastore/analysis/kpi_reports/outputs/kpi_long/run_date=2026-06-15/`. `run_date` defaults to `reporting_window.as_of_date`; override with `output.run_date` / `KPI_OUTPUT_RUN_DATE` to load a specific snapshot (`html_only` uses the same partition). `output.save_outputs` defaults to `False`; the notebook runs with `save=False`, Cell 4 previews the save plan and Cell 5 writes.
+Default: `/mnt/invent-{customer}-datastore/analysis/kpi_reports/outputs/kpi_long/run_date=2026-06-15/`. `run_date` defaults to `reporting_window.as_of_date`; override with `output.run_date` / `KPI_OUTPUT_RUN_DATE` to load a specific snapshot (`html_only` uses the same partition). `output.save_outputs` defaults to `False`; when it is on, the notebook's `run(save=True)` writes each table as soon as its step builds it.
 
 **`kpi_long` is saved in full, never trimmed.** The HTML display limits (`weekly_display_weeks` etc., see [HTML report](#html-report)) only narrow a separate in-memory `ctx.kpi_long_display`; `ctx.kpi_long` and the save always hold every computed period.
 
@@ -409,11 +409,13 @@ Every saved row has `_run_as_of` (`as_of_date` of the run that wrote or last ove
 
 ### Notebook workflow
 
-1. **Cell 3** — `runner.run(fund_paste=fund.paste, save=False)` computes KPIs, no write (results display inline as steps finish, see [Programmatic use](#programmatic-use)).
-2. **Cell 4** — `runner.preview_save_plan(fund.paste)` prints append / overwrite / skip counts per table **before** writing.
-3. **Cell 5** — `save_outputs(ctx, fund.paste)` writes (only when `save_outputs: True`).
+1. **Cell 3** — `runner.run(fund_paste=fund.paste, save=True)` computes KPIs and, with `save_outputs: True`, writes each table **as soon as its step builds it**: `kpi_long` after the KPI step, the comparison tables after the comparisons, the comparable tables after the comparable step, `scope_diff` last. A slow or interrupted later step never loses a finished table. `save_mode='initial'` is checked against every table **before** anything is computed. Cell 3 binds `ctx = runner.ctx` first, so the later cells still see what an interrupted run built. Results and progress print inline as steps finish (see [Programmatic use](#programmatic-use)).
+2. **Cell 4** — prints what Cell 3 wrote (`ctx.save_plan`: append / overwrite / skip counts per table).
+3. **Cell 5** — `save_outputs(ctx, fund.paste)` re-saves every built table at once, only when `RESAVE = True`: after a `save=False` run, after finishing a step an interrupted Cell 3 did not reach (e.g. `runner.build_comparable_pairs()`), or after changing `allow_overwrite_existing`. Empty tables are skipped, never written empty.
 
-If Cell 4 shows `skipped_rows > 0` and you meant to replace those periods, set `allow_overwrite_existing=True` and re-run.
+If Cell 4 shows skipped rows and you meant to replace those periods, set `allow_overwrite_existing=True`, re-run Cell 1 and re-save with Cell 5.
+
+**Progress.** Once the scopes are built, Cell 3 prints the plan, `PLAN: N KPI tables (kpi_long … + comparable … + scope_diff …)`. A KPI table is one period type × root × cut (one Spark `toPandas`, the run's main cost); comparable plans ytd / yoy 1 build, quarter 4, half 2, each roots × cuts tables. Each stage prints a header, and each table a line `[stage n/N | run n/N] section · root · cut — took | elapsed | ~left`. A comparable build that is skipped (fewer than 2 qualifying years, no common pair) is dropped from the plan with a printed line. The time left is the average per table so far, so it is rough; the first kpi_long table also pays for building the cached frames.
 
 ### Typical workflows
 
@@ -1009,7 +1011,10 @@ runner = KPIRunner(spark, settings)
 runner.prepare_scopes()
 print(runner.scope_debug_summary())
 
-# Full run
+# Full run: each table is saved as soon as it is built (output.save_outputs=True), with progress lines
+ctx = runner.run(fund_paste=fund.paste, save=True)
+
+# Or compute only, preview, then write everything at once
 ctx = runner.run(fund_paste=fund.paste, save=False)
 runner.preview_save_plan(fund.paste)
 save_outputs(ctx, fund.paste)

@@ -224,6 +224,7 @@ def build_kpi_long(ctx: KPIContext, frames: Dict[str, DataFrame]) -> pd.DataFram
         if period_name == "half" and not ctx.settings["HALF_PERIODS"]:
             continue
         pf = _period_frames(ctx, frames, period_name)
+        ctx.progress.section = period_name
         rows.extend(kpi_rows(ctx, pf, period_name, period_col, F.lit(True)))
     return kpi_long_frame(ctx, rows)
 
@@ -251,6 +252,7 @@ def kpi_rows(
         for cut_name, gk in cuts:
             sf = _filter_frames_for_dimension(rf, gk[0], value_filters) if gk else rf
             tbl = build_kpi_table(ctx, sf, period_col, gk, period_filter)
+            ctx.progress.table_done(f"{root_name} · {cut_name}")
             for _, r in tbl.iterrows():
                 rec = {
                     "period_type": period_type,

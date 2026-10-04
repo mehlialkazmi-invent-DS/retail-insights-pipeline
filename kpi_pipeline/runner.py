@@ -2,22 +2,24 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 from IPython.display import display
 from pyspark.sql import SparkSession
 
 from kpi_pipeline.comparable import _KIND_CTX_ATTRS as COMPARABLE_KIND_ATTRS
+from kpi_pipeline.comparable import PLANNED_BUILDS as COMPARABLE_PLANNED_BUILDS
 from kpi_pipeline.comparable import build_comparable_pairs
 from kpi_pipeline.comparisons import _KIND_CTX_ATTRS as COMPARISON_KIND_ATTRS
 from kpi_pipeline.comparisons import _selected_comparison_kinds, build_comparisons, build_scope_diff
 from kpi_pipeline.context import KPIContext, release, release_frames
 from kpi_pipeline.fiscal import apply_report_end_mode, build_fiscal_and_products, build_fiscal_week_only
 from kpi_pipeline.html_report import render_kpi_html
-from kpi_pipeline.io import build_save_plan, load_saved_outputs, save_outputs
-from kpi_pipeline.kpi_long import build_kpi_long, trim_periods_to_recent
+from kpi_pipeline.io import OutputSaver, build_save_plan, load_saved_outputs
+from kpi_pipeline.kpi_long import PERIODS, build_kpi_long, trim_periods_to_recent
 from kpi_pipeline.pipeline import build_pipeline_frames
 from kpi_pipeline.scope import (
     build_blocked_days,
@@ -65,6 +67,92 @@ def _write_text_to_datastore(spark: SparkSession, path: str, content: str) -> No
     raise OSError(f"could not save HTML to datastore path {path!r}") from last_exc
 
 
+def _duration(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    if minutes >= 60:
+        return f"{minutes // 60}h {minutes % 60:02d}m"
+    if minutes:
+        return f"{minutes}m {int(seconds % 60):02d}s"
+    return f"{seconds:.0f}s"
+
+
+class RunProgress:
+    """How many KPI tables a run will build per stage ("kpi_long", "comparable", "scope_diff"), how many are
+    done, and roughly how long is left. Each KPI table is one metrics.build_kpi_table call (a period type x
+    root x cut, ending in a toPandas), the run's main cost; each prints a line as it finishes (ctx.progress).
+
+    The time left is the average time per built table times the tables still planned, so it is rough: a
+    comparable table reads only its kind's rows and is usually faster than a kpi_long one. A comparable build
+    that turns out to be skipped (fewer than 2 qualifying years, no common pair, a quarter / half number
+    without data) is taken off the plan with ``skip``.
+    """
+
+    def __init__(self, planned: Dict[str, int], tables_per_build: int):
+        self.planned = dict(planned)
+        self.done = {stage: 0 for stage in planned}
+        self.tables_per_build = tables_per_build
+        self.stage = ""
+        self.section = ""  # what the next tables belong to (period type, comparable kind / number)
+        self.start = time.monotonic()
+        self.last = self.start
+
+    @property
+    def total_planned(self) -> int:
+        return sum(self.planned.values())
+
+    @property
+    def total_done(self) -> int:
+        return sum(self.done.values())
+
+    def print_plan(self) -> None:
+        stages = " + ".join(f"{stage} {n}" for stage, n in self.planned.items() if n)
+        print(
+            f"PLAN: {self.total_planned} KPI tables ({stages}; {self.tables_per_build} per build = roots x cuts)",
+            flush=True,
+        )
+
+    def begin_stage(self, stage: str) -> None:
+        self.stage = stage
+        self.last = time.monotonic()
+        print(
+            f"=== {stage}: {self.planned[stage]} KPI tables | run {self.total_done}/{self.total_planned} done "
+            f"| elapsed {_duration(self.last - self.start)} ===",
+            flush=True,
+        )
+
+    def table_done(self, label: str) -> None:
+        """One KPI table of the current stage and section built; ``label`` names its root x cut."""
+        now = time.monotonic()
+        took = now - self.last
+        self.last = now
+        self.done[self.stage] += 1
+        left = (now - self.start) / self.total_done * (self.total_planned - self.total_done)
+        print(
+            f"[{self.stage} {self.done[self.stage]}/{self.planned[self.stage]} | "
+            f"run {self.total_done}/{self.total_planned}] {self.section} · {label} — {_duration(took)} | "
+            f"elapsed {_duration(now - self.start)} | ~{_duration(left)} left",
+            flush=True,
+        )
+
+    def skip(self, builds: int, reason: str) -> None:
+        """Take ``builds`` builds (``tables_per_build`` tables each) of the current stage off the plan."""
+        tables = builds * self.tables_per_build
+        if tables <= 0:
+            return
+        self.planned[self.stage] -= tables
+        print(
+            f"[{self.stage}] {reason}: {tables} planned KPI tables dropped, run now {self.total_planned}",
+            flush=True,
+        )
+
+    def print_summary(self) -> None:
+        print(
+            f"RUN DONE: {self.total_done}/{self.total_planned} KPI tables in "
+            f"{_duration(time.monotonic() - self.start)}",
+            flush=True,
+        )
+
+
 def _show(title: str, table: Optional[pd.DataFrame]) -> None:
     """Print ``title`` and display ``table`` inline (Databricks renders it mid-cell), or note it is empty."""
     print(f"=== {title} ===")
@@ -80,6 +168,7 @@ class KPIRunner:
     def __init__(self, spark: SparkSession, settings: Dict[str, Any]):
         self.ctx = KPIContext(spark=spark, settings=settings)
         self._scopes_ready = False
+        self._in_run = False
 
     @property
     def settings(self) -> Dict[str, Any]:
@@ -203,22 +292,72 @@ class KPIRunner:
     def run(self, fund_paste=None, save: bool = True) -> KPIContext:
         if self.settings.get("RUN_MODE", "full") == "html_only":
             return self.run_html_only(fund_paste=fund_paste)
+        self.ctx.save_plan = None
+        saver = self._output_saver(fund_paste) if save else None
         if not self._scopes_ready:
             self.prepare_scopes()
         self._scopes_ready = False
-        self.build_kpis()
-        self.build_comparisons()
-        self.build_comparable_pairs()
-        self.build_scope_comparison()
-        if save:
-            if fund_paste is not None:
-                save_outputs(self.ctx, fund_paste)
-            else:
-                print(
-                    "WARNING: save=True but fund_paste was not provided — "
-                    "output save skipped. Pass fund_paste=fund.paste or call save_outputs() separately."
-                )
+        self.ctx.progress = RunProgress(*self._planned_tables())
+        self.ctx.progress.print_plan()
+        self._in_run = True
+        try:
+            self.build_kpis()
+            if saver is not None:
+                saver.save_kpi_long()
+            self.build_comparisons()
+            if saver is not None:
+                saver.save_comparisons()
+            self.build_comparable_pairs()
+            if saver is not None:
+                saver.save_comparable()
+            self.build_scope_comparison()
+            if saver is not None:
+                saver.save_scope_diff()
+        finally:
+            self._in_run = False
+        self.ctx.progress.print_summary()
         return self.ctx
+
+    def _planned_tables(self) -> Tuple[Dict[str, int], int]:
+        """(KPI tables per stage, tables per build = roots x cuts) from the roots and cuts build_dimensions
+        resolved. Comparable plans comparable.PLANNED_BUILDS per kind; build_comparable_pairs drops the builds
+        that turn out to be skipped."""
+        per_build = (1 + len(self.ctx.root_definitions)) * (1 + len(self.ctx.cut_dimensions))
+        periods = [p for p, _ in PERIODS if p != "half" or self.settings["HALF_PERIODS"]]
+        comparable_kinds = self.settings.get("COMPARABLE_KINDS") or []
+        comparable_builds = (
+            sum(COMPARABLE_PLANNED_BUILDS[k] for k in comparable_kinds)
+            if self.settings.get("COMPARABLE_PAIRS_ENABLED", False)
+            else 0
+        )
+        planned = {
+            "kpi_long": len(periods) * per_build,
+            "comparable": comparable_builds * per_build,
+            "scope_diff": 2 if self.settings["SCOPE"]["run_scope_diff"] else 0,
+        }
+        return planned, per_build
+
+    def _begin_stage(self, stage: str) -> None:
+        """Start ``stage`` on ctx.progress; a step called on its own (outside run) gets a fresh plan of that
+        stage only."""
+        if not self._in_run:
+            planned, per_build = self._planned_tables()
+            self.ctx.progress = RunProgress({stage: planned[stage]}, per_build)
+        self.ctx.progress.begin_stage(stage)
+
+    def _output_saver(self, fund_paste) -> Optional[OutputSaver]:
+        """The saver run() writes each table with as soon as it is built (created before any compute, so an
+        initial save onto existing tables fails first); None, with a note, when nothing will be saved."""
+        if not self.settings["SAVE_OUTPUTS"]:
+            print("SAVE_OUTPUTS is False — nothing will be written.")
+            return None
+        if fund_paste is None:
+            print(
+                "WARNING: save=True but fund_paste was not provided — "
+                "output save skipped. Pass fund_paste=fund.paste or call save_outputs() separately."
+            )
+            return None
+        return OutputSaver(self.ctx, fund_paste)
 
     def prepare_scopes(self) -> None:
         """Reset the run caches, then build the dimensions and scopes. The next run() reuses them (the
@@ -251,6 +390,7 @@ class KPIRunner:
         ].reset_index(drop=True)
 
     def build_kpis(self) -> None:
+        self._begin_stage("kpi_long")
         release_frames(self.ctx.hybrid_frames)
         self.ctx.hybrid_frames = build_pipeline_frames(self.ctx, self.ctx.hybrid_scope_keys)
         self.ctx.kpi_long = build_kpi_long(self.ctx, self.ctx.hybrid_frames)
@@ -271,6 +411,8 @@ class KPIRunner:
             _show(f"{kind.upper()} — overall", getattr(self.ctx, COMPARISON_KIND_ATTRS[kind][1]))
 
     def build_comparable_pairs(self) -> None:
+        if self.settings.get("COMPARABLE_PAIRS_ENABLED", False) and self.settings.get("COMPARABLE_KINDS"):
+            self._begin_stage("comparable")
         build_comparable_pairs(self.ctx)
         if not self.settings.get("COMPARABLE_PAIRS_ENABLED", False):
             return
@@ -287,6 +429,7 @@ class KPIRunner:
                 "scope.run_scope_diff=True but score scope was not computed — "
                 "check build_hybrid_scope and the scope.run_scope_diff setting."
             )
+        self._begin_stage("scope_diff")
         release_frames(self.ctx.scope_frames)
         release_frames(self.ctx.score_frames)
         self.ctx.scope_frames = build_pipeline_frames(self.ctx, self.ctx.scope_table_keys)

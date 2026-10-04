@@ -99,20 +99,26 @@ COMPARABLE_COMPARISON_TABLES: Tuple[str, ...] = (
 )
 
 
-def _output_frames(ctx: KPIContext) -> Dict[str, pd.DataFrame]:
+def _comparable_save_kinds(ctx: KPIContext) -> List[str]:
+    """comparable_pairs.kinds when comparable_pairs is enabled, else none."""
+    if not ctx.settings.get("COMPARABLE_PAIRS_ENABLED", False):
+        return []
+    return list(ctx.settings.get("COMPARABLE_KINDS") or [])
+
+
+def _output_table_names(ctx: KPIContext) -> List[str]:
     """Tables to persist, in save order: the comparison kinds of comparisons.enabled, and the comparable
-    tables when comparable_pairs is on with at least one kind (the two settings are independent)."""
-    kinds = _selected_comparison_kinds(ctx)
-    frames: Dict[str, pd.DataFrame] = {"kpi_long": ctx.kpi_long}
-    for kind in kinds:
-        frames[f"comparison_{kind}"] = getattr(ctx, f"comparison_{kind}")
-    frames["scope_diff"] = ctx.scope_diff
-    comparable_kinds = ctx.settings.get("COMPARABLE_KINDS") or []
-    if ctx.settings.get("COMPARABLE_PAIRS_ENABLED", False) and comparable_kinds:
-        frames["comparable_kpi_long"] = ctx.comparable_kpi_long
-        for kind in comparable_kinds:
-            frames[f"comparable_comparison_{kind}"] = getattr(ctx, f"comparable_comparison_{kind}")
-    return frames
+    tables when comparable_pairs is on with at least one kind (the two settings are independent). Each name
+    is also the ctx attribute holding the table."""
+    names = ["kpi_long"] + [f"comparison_{kind}" for kind in _selected_comparison_kinds(ctx)] + ["scope_diff"]
+    comparable_kinds = _comparable_save_kinds(ctx)
+    if comparable_kinds:
+        names += ["comparable_kpi_long"] + [f"comparable_comparison_{kind}" for kind in comparable_kinds]
+    return names
+
+
+def _output_frames(ctx: KPIContext) -> Dict[str, pd.DataFrame]:
+    return {name: getattr(ctx, name) for name in _output_table_names(ctx)}
 
 
 def _table_path(output_root: str, name: str, run_date: str, fund_paste) -> str:
@@ -563,6 +569,9 @@ def _recompute_comparable_comparisons_from_saved_history(ctx: KPIContext, fund_p
 
 
 def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
+    """Write every output table at once: after a run(save=False), or to save what an interrupted run built
+    (runner.ctx keeps the finished tables; an empty or missing table is skipped, never written empty).
+    run(save=True) writes each table as it is built instead (OutputSaver)."""
     if not ctx.settings["SAVE_OUTPUTS"]:
         print(
             "SAVE_OUTPUTS is False — skipping writes. "
@@ -575,79 +584,110 @@ def save_outputs(ctx: KPIContext, fund_paste) -> SavePlan:
             run_date=ctx.settings["OUTPUT_RUN_DATE"],
         )
 
-    plan = build_save_plan(ctx, fund_paste)
-    plan.print_summary()
+    build_save_plan(ctx, fund_paste).print_summary()
+    saver = OutputSaver(ctx, fund_paste)
+    saver.save_kpi_long()
+    saver.save_comparisons()
+    saver.save_scope_diff()
+    saver.save_comparable()
+    return saver.plan
 
-    if plan.save_mode == "initial" and plan.warnings:
-        raise ValueError(
-            "Initial save blocked because output tables already exist. "
-            "See warnings above; switch to save_mode='incremental' or 'full_refresh'."
+
+class OutputSaver:
+    """Writes each output table as soon as its pipeline step has built it (KPIRunner.run with save=True),
+    so a long or interrupted run keeps every table it finished.
+
+    The incremental history sources are looked up once, before the first write, so this run's own run_date
+    partition never counts as its own source. save_mode="initial" checks every table up front, before the
+    run computes anything. ctx.save_plan collects each written table's counts.
+    """
+
+    def __init__(self, ctx: KPIContext, fund_paste):
+        settings = ctx.settings
+        self.ctx = ctx
+        self.fund_paste = fund_paste
+        self.output_root = settings["PATH_OUTPUT_ROOT"]
+        self.run_date = settings["OUTPUT_RUN_DATE"]
+        self.save_mode = settings["OUTPUT_SAVE_MODE"]
+        self.allow_overwrite = settings["ALLOW_OVERWRITE_EXISTING"]
+        self.run_as_of = str(settings["AS_OF_DATE"])
+        self.comparable_kinds = _comparable_save_kinds(ctx)
+
+        recompute_enabled = self.save_mode == "incremental" and settings.get("RECOMPUTE_COMPARISONS_FROM_HISTORY", True)
+        self.recompute = recompute_enabled and self._history_source("kpi_long") is not None
+        self.recompute_comparable = (
+            recompute_enabled
+            and bool(self.comparable_kinds)
+            and self._history_source("comparable_kpi_long") is not None
         )
 
-    if plan.has_skipped_overlaps and not plan.allow_overwrite_existing:
+        if self.save_mode == "initial":
+            existing = [name for name in _output_table_names(ctx) if self._exists(name)]
+            if existing:
+                raise ValueError(
+                    f"Initial save blocked because output tables already exist: {existing}. "
+                    "Switch to save_mode='incremental' or 'full_refresh'."
+                )
+
+        self.plan = SavePlan(
+            output_root=self.output_root,
+            save_mode=self.save_mode,
+            allow_overwrite_existing=self.allow_overwrite,
+            run_date=self.run_date,
+        )
+        ctx.save_plan = self.plan
         print(
-            "Overlapping periods detected. Existing rows were left unchanged. "
-            "Set output.allow_overwrite_existing=True and re-run save to replace them."
+            f"Saving outputs | mode: {self.save_mode} | run_date={self.run_date} | "
+            f"tables: {_output_table_names(ctx)}"
         )
 
-    output_root = ctx.settings["PATH_OUTPUT_ROOT"]
-    run_date = ctx.settings["OUTPUT_RUN_DATE"]
-    save_mode = ctx.settings["OUTPUT_SAVE_MODE"]
-    allow_overwrite = ctx.settings["ALLOW_OVERWRITE_EXISTING"]
-    run_as_of = str(ctx.settings["AS_OF_DATE"])
-    recompute_enabled = save_mode == "incremental" and ctx.settings.get("RECOMPUTE_COMPARISONS_FROM_HISTORY", True)
+    def _history_source(self, name: str) -> Optional[str]:
+        return _latest_run_date_on_or_before(self.ctx.spark, self.output_root, name, self.fund_paste, self.run_date)
 
-    # Decided before the write so the current run_date partition doesn't count as its own source.
-    kpi_long_history_source = _latest_run_date_on_or_before(ctx.spark, output_root, "kpi_long", fund_paste, run_date)
-    recompute = recompute_enabled and kpi_long_history_source is not None
+    def _exists(self, name: str) -> bool:
+        path = _table_path(self.output_root, name, self.run_date, self.fund_paste)
+        return self._history_source(name) is not None or _delta_exists(self.ctx.spark, path)
 
-    comparable_enabled = ctx.settings.get("COMPARABLE_PAIRS_ENABLED", False)
-    comparable_kpi_long_source = (
-        _latest_run_date_on_or_before(ctx.spark, output_root, "comparable_kpi_long", fund_paste, run_date)
-        if comparable_enabled
-        else None
-    )
-    recompute_comparable = recompute_enabled and comparable_kpi_long_source is not None
-
-    def _save(name: str, pdf: pd.DataFrame, mode: str) -> None:
+    def _save(self, name: str, pdf: Optional[pd.DataFrame], mode: str) -> None:
         table_plan = save_pandas_table(
-            ctx, name, pdf, output_root, run_date, fund_paste, mode, allow_overwrite, run_as_of
+            self.ctx, name, pdf, self.output_root, self.run_date, self.fund_paste, mode,
+            self.allow_overwrite, self.run_as_of,
         )
-        for existing in plan.tables:
-            if existing.name == name:
-                existing.append_rows = table_plan.append_rows
-                existing.overwrite_rows = table_plan.overwrite_rows
-                existing.skipped_rows = table_plan.skipped_rows
-                existing.merge_source_run_date = table_plan.merge_source_run_date
+        self.plan.tables.append(table_plan)
+        if table_plan.skipped_rows > 0 and not self.allow_overwrite:
+            print(
+                f"{name}: {table_plan.skipped_rows} overlapping row(s) left unchanged. "
+                "Set output.allow_overwrite_existing=True and re-save to replace them."
+            )
 
-    # 1. Save kpi_long first (accumulates onto the latest prior partition under incremental).
-    _save("kpi_long", ctx.kpi_long, save_mode)
+    def save_kpi_long(self) -> None:
+        """kpi_long (accumulates onto the latest prior partition under incremental)."""
+        self._save("kpi_long", self.ctx.kpi_long, self.save_mode)
 
-    # 2. Merging onto prior history: recompute the comparisons from the merged kpi_long and overwrite them.
-    comparison_mode = save_mode
-    if recompute:
-        _recompute_comparisons_from_saved_history(ctx, fund_paste)
-        comparison_mode = "full_refresh"
+    def save_comparisons(self) -> None:
+        """The comparisons.enabled tables. Merging onto prior history, they are first recomputed from the
+        merged kpi_long (save_kpi_long must have run) and overwritten whole."""
+        mode = self.save_mode
+        if self.recompute:
+            _recompute_comparisons_from_saved_history(self.ctx, self.fund_paste)
+            mode = "full_refresh"
+        for kind in _selected_comparison_kinds(self.ctx):
+            name = f"comparison_{kind}"
+            self._save(name, getattr(self.ctx, name), mode)
 
-    # 3. Save the selected comparison tables + scope_diff.
-    selected_kinds = _selected_comparison_kinds(ctx)
-    for kind in selected_kinds:
-        _save(f"comparison_{kind}", getattr(ctx, f"comparison_{kind}"), comparison_mode)
-    _save("scope_diff", ctx.scope_diff, save_mode)
+    def save_scope_diff(self) -> None:
+        self._save("scope_diff", self.ctx.scope_diff, self.save_mode)
 
-    # 4. Comparable tables: comparable_kpi_long merges like kpi_long; each kind's comparison is recomputed.
-    comparable_kinds = ctx.settings.get("COMPARABLE_KINDS") or []
-    if comparable_enabled and comparable_kinds:
-        _save("comparable_kpi_long", ctx.comparable_kpi_long, save_mode)
-
-        comparable_comp_mode = save_mode
-        if recompute_comparable:
-            _recompute_comparable_comparisons_from_saved_history(ctx, fund_paste)
-            comparable_comp_mode = "full_refresh"
-
-        for kind in comparable_kinds:
+    def save_comparable(self) -> None:
+        """comparable_kpi_long (merges like kpi_long), then each kind's comparison, recomputed from the merged
+        comparable_kpi_long when merging onto prior history. A no-op while comparable_pairs is off."""
+        if not self.comparable_kinds:
+            return
+        self._save("comparable_kpi_long", self.ctx.comparable_kpi_long, self.save_mode)
+        mode = self.save_mode
+        if self.recompute_comparable:
+            _recompute_comparable_comparisons_from_saved_history(self.ctx, self.fund_paste)
+            mode = "full_refresh"
+        for kind in self.comparable_kinds:
             name = f"comparable_comparison_{kind}"
-            _save(name, getattr(ctx, name), comparable_comp_mode)
-
-    ctx.save_plan = plan
-    return plan
+            self._save(name, getattr(self.ctx, name), mode)
