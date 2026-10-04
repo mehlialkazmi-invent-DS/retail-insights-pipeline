@@ -12,6 +12,7 @@ from __future__ import annotations
 import calendar
 import datetime
 import html as _html
+import math
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -759,7 +760,7 @@ def _dim_label(dimension: str, dimension_labels: Dict[str, str]) -> str:
         return dimension_labels[dimension]
     if dimension == "overall":
         return "Overall"
-    return dimension.replace("_", " ").title()
+    return _tab_label(dimension.replace("_", " "))
 
 
 def _infer_dimensions(kpi_long: pd.DataFrame, configured_slices: List[str]) -> List[str]:
@@ -884,7 +885,9 @@ def _fmt(metric: str, value: Any) -> str:
         return f"{v:.1f}%"
     if metric in ("distinct_product_count", "distinct_store_count", "distinct_pair_count"):
         return f"{int(v):,}"
-    if metric in ("WOS", "wos_revenue", "wos_cost", "inventory_turnover_rate", "WOS_DC", "WOS_TOTAL"):
+    if metric in ("WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL"):
+        return f"{math.floor(v)}"
+    if metric == "inventory_turnover_rate":
         return f"{v:.1f}"
     return f"{v:,.2f}"
 

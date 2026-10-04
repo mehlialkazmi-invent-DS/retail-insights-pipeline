@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+#### WOS shown as whole weeks; slice tab labels keep their capitals (SMW) - 2026-10-04
+
+The weeks-of-supply metrics (`WOS`, `wos_revenue`, `wos_cost`, `WOS_DC`, `WOS_TOTAL`) are now displayed floored to a whole number of weeks in the HTML report and in the comparison tables' `prior_display` / `current_display`, instead of one decimal. Only the display changes: stored values, the `%` change and `inventory_turnover_rate` (still one decimal) are unchanged. Slice tab labels no longer go through `str.title()`, so an upper-case slice such as `SMW` stays `SMW` instead of `Smw` (all-lowercase words are still capitalised).
+
 #### KPI tables computed on product-level rows, all roots × cuts in one aggregation; docs restructured (no change to any value) - 2026-10-04
 
 Each KPI table used to re-aggregate the product × store × day rows from scratch, once per period type × root ×

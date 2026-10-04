@@ -7,6 +7,7 @@ reporting_window.report_end ("latest_day": complete fiscal years, and days 1..K 
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Sequence, Tuple
 
 import pandas as pd
@@ -38,7 +39,9 @@ def _format_metric_value(metric: str, value) -> str:
         return f"{value:.1f}%"
     if metric in _DISTINCT_METRICS:
         return f"{int(value):,}"
-    if metric in ("WOS", "wos_revenue", "wos_cost", "inventory_turnover_rate", "WOS_DC", "WOS_TOTAL"):
+    if metric in ("WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL"):
+        return f"{math.floor(value)}"
+    if metric == "inventory_turnover_rate":
         return f"{value:.1f}"
     return f"{value:,.2f}"
 
