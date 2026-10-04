@@ -20,11 +20,11 @@ Environment override: `KPI_RUN_MODE=html_only`
 | Section | Description |
 | ------- | ----------- |
 | **Executive header** | Client, reporting window, as-of date, scope mode, slice dimensions, generated timestamp; with `report_end = "latest_day"` also a **Period basis** card (YTD to the report end, complete periods elsewhere, lost sales through the last Saturday) |
-| **Period tabs** | Annual / **YTD** / Quarter / Half / Monthly / Weekly (horizontal; Half only with `fiscal_calendar.half_periods`) |
+| **Period tabs** | Annual / **YTD** / Quarter / Half / Monthly / Weekly (horizontal; Half only with `fiscal_calendar.half_periods`); every tab label renders upper case (ANNUAL, YTD, ..., METRIC DETAILS) |
 | **Slice dimension tabs** | Overall + every slice column in `kpi_long` (inferred from data and config) |
 | **Value tabs** | Vertical sidebar within each slice dimension, one panel per value (e.g. each brand) |
 | **KPI tables** | Metrics as rows (colour-coded), periods as columns; inventory turnover is labelled **Annual** / **YTD** / **Quarterly** / **Half-Yearly** / **Monthly** / **Weekly** per tab |
-| **Comparison** | YoY / YTD per value panel, on the Annual/YTD tabs only: one wide value+delta table (the KPI table's period columns plus one delta column per consecutive-year link; YoY exactly one) in place of the plain value table. Quarter/Half/Monthly/Weekly tabs show the plain value-trend table. |
+| **Comparison** | YoY / YTD per value panel, on the Annual/YTD tabs only: one wide value+delta table (the KPI table's period columns plus one delta column per consecutive-year link; YoY exactly one) in place of the plain value table. Quarter/Half/Monthly/Weekly tabs show the plain value-trend table. The change of a WOS metric is computed from the displayed whole-week (floored) values, so 23 vs 23 shows `+0.0%`. |
 | **Comparable (Like-for-Like)** | With `comparable_pairs.enabled=True`, a separated section under the comparison table per enabled kind (see [Comparable pairs](LOGIC_FLOW.md#comparable-pairs-like-for-like-ytd--yoy--quarter--half)). |
 | **Metric Details tab** | Definition, store scope and formula for every active metric. In-Stock Rate is described from `instock.daily` when `instock.method = "daily"`; blocked-day exclusion is mentioned only for metrics named in `blocked_scope.metrics`, and a metric named in `goods_in_transit.inventory_metrics` states that it counts store / DC goods in transit; Lost Sales % states the last-Saturday basis under `latest_day`. |
 
@@ -49,7 +49,7 @@ Slice dimensions and values are **inferred from `kpi_long`**, so a different sli
 }
 ```
 
-`filename` may use only `{customer}` and `{report_end}` (validated in `materialize()`; `KPIRunner.build_html_report` formats the template `HTML_REPORT_FILENAME_TEMPLATE` with the final `REPORT_END_DATE`); `output_path_segments` is the datastore **folder** (`HTML_REPORT_OUTPUT_DIR`; the filename is appended). `root_labels` renames root tabs (unlisted roots fall back to `Overall` / the root id; tbretail: `comp` -> `LFL`, `nvrout` -> `NVROUT`). `dimension_labels` renames a slice dimension wherever shown (dimension tabs, header card; tbretail: `brand` -> `Banner`), display only (`kpi_long` and saved outputs keep the raw key); `materialize()` raises unless it is a `str -> str` dict. Table cells are center-aligned and every tab label has its all-lowercase words capitalized (`_tab_label`: `annual` -> `Annual`, `jab` -> `Jab`; `YTD`, `SMW` kept) for every client.
+`filename` may use only `{customer}` and `{report_end}` (validated in `materialize()`; `KPIRunner.build_html_report` formats the template `HTML_REPORT_FILENAME_TEMPLATE` with the final `REPORT_END_DATE`); `output_path_segments` is the datastore **folder** (`HTML_REPORT_OUTPUT_DIR`; the filename is appended). `root_labels` renames root tabs (unlisted roots fall back to `Overall` / the root id; tbretail: `comp` -> `LFL`, `nvrout` -> `NVROUT`). `dimension_labels` renames a slice dimension wherever shown (dimension tabs, header card; tbretail: `brand` -> `Banner`), display only (`kpi_long` and saved outputs keep the raw key); `materialize()` raises unless it is a `str -> str` dict. Table cells are center-aligned and every tab label (root, period, dimension, value and Metric Details tabs) is upper-cased (`html_report._tab_label`: `annual` -> `ANNUAL`, `jab` -> `JAB`, `Metric Details` -> `METRIC DETAILS`) for every client; display only, the header's slice-dimensions card and other text keep their case.
 
 ## Environment variable overrides
 

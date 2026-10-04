@@ -1,10 +1,10 @@
 """Standalone offline HTML KPI report from a KPIContext (render_kpi_html).
 
 Executive header; period tabs (Annual / YTD / Quarter / Half / Monthly / Weekly) and Metric Details; inside
-each period tab, dimension tabs (Overall + each cut found in kpi_long) and vertical value tabs. KPI tables
-are colored by metric category. Annual and YTD panels add the YoY / YTD comparison; Quarter / Half /
-Monthly / Weekly show the most recent N periods' values only. An outer root tab level appears with more
-than one root.
+each period tab, dimension tabs (Overall + each cut found in kpi_long) and vertical value tabs, every tab
+label upper case (_tab_label). KPI tables are colored by metric category. Annual and YTD panels add the
+YoY / YTD comparison; Quarter / Half / Monthly / Weekly show the most recent N periods' values only. An
+outer root tab level appears with more than one root.
 """
 
 from __future__ import annotations
@@ -60,7 +60,10 @@ _CAT: Dict[str, str] = {
 DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
     "total_sales_revenue": {
         "label": "Sales Revenue",
-        "definition": "Total net sales revenue across all scoped stores for the period.",
+        "definition": (
+            "Total sales revenue across all scoped stores for the period, from daily-data: net of returns, "
+            "and a product-store-day whose net quantity is <= 0 or net revenue is < 0 is not counted."
+        ),
         "store_scope": "All scoped stores",
         "formula": "Σ(daily_sales_revenue)",
     },
@@ -740,9 +743,15 @@ _CSS_BASE = """\
 """
 
 
-def _tab_label(text: Any) -> str:
-    """Capitalize each all-lowercase word of a tab label; words with capitals (LFL, YTD, SMW) stay as they are."""
+def _capitalize_words(text: Any) -> str:
+    """Capitalize each all-lowercase word; words with capitals (LFL, YTD, SMW) stay as they are."""
     return " ".join(w[:1].upper() + w[1:] if w.islower() else w for w in str(text).split(" "))
+
+
+def _tab_label(text: Any) -> str:
+    """A tab label (root, period, dimension, value or Metric Details tab) in upper case: OVERALL, ANNUAL,
+    BANNER, LFL, METRIC DETAILS. Display only."""
+    return str(text).upper()
 
 
 def _root_display_label(root: str, root_display_labels: Dict[str, str]) -> str:
@@ -760,7 +769,7 @@ def _dim_label(dimension: str, dimension_labels: Dict[str, str]) -> str:
         return dimension_labels[dimension]
     if dimension == "overall":
         return "Overall"
-    return _tab_label(dimension.replace("_", " "))
+    return _capitalize_words(dimension.replace("_", " "))
 
 
 def _infer_dimensions(kpi_long: pd.DataFrame, configured_slices: List[str]) -> List[str]:
@@ -1522,7 +1531,7 @@ def _report_info_html(
       </div>"""
     slice_dims = inferred_dimensions or active_slice_dimensions or settings.get("SLICE_DIMENSIONS") or []
     slice_labels = ", ".join(
-        _tab_label(_dim_label(d, settings["HTML_REPORT_DIMENSION_LABELS"])) for d in slice_dims if d != "overall"
+        _capitalize_words(_dim_label(d, settings["HTML_REPORT_DIMENSION_LABELS"])) for d in slice_dims if d != "overall"
     ) or "Overall only"
     generated = datetime.datetime.now().strftime("%d %b %Y, %H:%M")
 
@@ -1739,7 +1748,7 @@ def render_kpi_html(
             f"{_esc(_tab_label(_root_display_label(root, root_display_labels)))}</label>"
             for root, _ in root_panels
         )
-        root_labels_html += "<label for='kpi-root-details' class='top-tab'>Metric Details</label>"
+        root_labels_html += f"<label for='kpi-root-details' class='top-tab'>{_esc(_tab_label('Metric Details'))}</label>"
         root_tab_bar = f"<div class='top-tab-bar'>{root_labels_html}</div>"
 
         root_panels_html = "".join(

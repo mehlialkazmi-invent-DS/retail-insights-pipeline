@@ -101,7 +101,7 @@ Report-end modes:
 | 7 | `build_comparable_pairs` (`runner.py:406-413`) | `hybrid_frames` | `comparable_kpi_long`, `comparable_comparison_<kind>`, `comparable_<kind>_display` | one table per enabled kind (latest link, overall) |
 | 8 | `build_scope_comparison` (`runner.py:415-430`) | rebuilds frames for the scope table and the score scope | `scope_frames`, `score_frames`, `scope_diff` | `scope diff: skipped` when `scope.run_scope_diff` is off |
 | 9 | save, right after each of stages 5-8 (`OutputSaver`, `io.py:596-693`) | the table that stage built | `save_plan` (each written table's counts) | `Saving outputs` header before the run, then `saved <table>` lines (`io.py:467-470`) |
-| 10 | `build_html_report` (`runner.py:432-465`) | `kpi_long_display` and comparison tables | nothing | `HTML report written: ...` (`html_report.py:1808`); with `html_report.output_path_segments` set it also writes a copy to the datastore (`runner.py:453-463`) |
+| 10 | `build_html_report` (`runner.py:432-465`) | `kpi_long_display` and comparison tables | nothing | `HTML report written: ...` (`html_report.py:1820`); with `html_report.output_path_segments` set it also writes a copy to the datastore (`runner.py:453-463`) |
 
 Notebook cells around the runner (`main.ipynb`):
 
@@ -383,9 +383,9 @@ Each `kpi_long` period type, and each comparable build, is computed as one KPI t
 ### Comparisons (`comparisons.py`)
 
 - `comparisons.enabled` picks `yoy` and `ytd` (`config.py:896-900`).
-- **YoY**: the latest two annual rows, per root and cut value (`comparisons.py:174-199`).
-- **YTD**: every consecutive pair of `ytd` years (`comparisons.py:202-229`).
-- **Change**: percent change = (current - prior) / abs(prior), or none when prior is 0. Metrics in `metrics.pp_change_metrics` show a difference in percentage points instead. For `in_stock_rate`, `weighted_instock_rate`, `dc_in_stock_rate` the difference is x100 because they are fractions. `lost_sales_pct` is already in percent (`comparisons.py:55-63`).
+- **YoY**: the latest two annual rows, per root and cut value (`comparisons.py:184-209`).
+- **YTD**: every consecutive pair of `ytd` years (`comparisons.py:212-239`).
+- **Change**: percent change = (current - prior) / abs(prior), or none when prior is 0. The WOS metrics (`WOS`, `wos_revenue`, `wos_cost`, `WOS_DC`, `WOS_TOTAL`) change between their floored (whole-week, displayed) values, so 23 vs 23 is `+0.0%`; stored values stay unfloored. Metrics in `metrics.pp_change_metrics` show a difference in percentage points instead. For `in_stock_rate`, `weighted_instock_rate`, `dc_in_stock_rate` the difference is x100 because they are fractions. `lost_sales_pct` is already in percent (`comparisons.py:60-73`).
 - Comparisons read `kpi_long` annual and ytd rows, so they follow `report_end`.
 - A one-year window gives no comparison.
 
@@ -402,7 +402,7 @@ Like-for-like comparison. Off unless `comparable_pairs.enabled`. For each kind i
 7. A kind needs at least 2 qualifying years, otherwise it is skipped (`comparable.py:253-255`).
 8. Results carry `comparable_pair_count`, `link_prior_year`, `link_current_year` (`comparable.py:294-300`).
 
-### Scope diff (`scope.run_scope_diff`, `comparisons.py:329-367`)
+### Scope diff (`scope.run_scope_diff`, `comparisons.py:339-377`)
 
 Annual `metrics.scope_diff_metrics` under the scope table alone versus the score-only scope, in the columns `scope` and `score`, with `abs_diff` and `pct_diff`.
 
@@ -425,9 +425,9 @@ Merge keys per table are in `TABLE_ROW_KEYS` (`io.py:64-90`). With `incremental`
 ### HTML report (`html_report`, `html_report.py`)
 
 - Built from `kpi_long_display`: `kpi_long` trimmed to the most recent periods per tab, using `weekly_display_weeks`, `monthly_display_months`, `quarterly_display_quarters`, `half_display_halves`, `yearly_display_years` (`kpi_long.py:159-199`). Weekly counts fiscal weeks, and under `latest_day` the trailing partial week takes no slot.
-- Layout: one outer tab per root when there is more than one (`html_report.root_labels` renames them), period tabs (Annual, YTD, Quarter, Half, Monthly, Weekly), cut tabs (`html_report.dimension_labels` renames them), a metric table, YoY and YTD comparison tables on the Annual and YTD tabs, comparable tables, and a Metric Details tab (`html_report.py:1560-1569`, `html_report.py:1641-1676`, `html_report.py:1687-1770`).
-- The header shows client, window, scope mode (Hybrid, Scope table only) and, under `latest_day`, a "Period basis" card (`html_report.py:1499-1558`).
-- Metric Details text comes from `DEFAULT_METRIC_DEFINITIONS` plus settings notes: blocked days, GIT, daily in-stock, `latest_day` lost-sales and WOS notes. `html_report.metric_definitions` overrides it (`html_report.py:59-362`).
+- Layout: one outer tab per root when there is more than one (`html_report.root_labels` renames them), period tabs (Annual, YTD, Quarter, Half, Monthly, Weekly), cut tabs (`html_report.dimension_labels` renames them), a metric table, YoY and YTD comparison tables on the Annual and YTD tabs, comparable tables, and a Metric Details tab (`html_report.py:1572-1581`, `html_report.py:1653-1688`, `html_report.py:1699-1782`).
+- The header shows client, window, scope mode (Hybrid, Scope table only) and, under `latest_day`, a "Period basis" card (`html_report.py:1511-1570`).
+- Metric Details text comes from `DEFAULT_METRIC_DEFINITIONS` plus settings notes: blocked days, GIT, daily in-stock, `latest_day` lost-sales and WOS notes. `html_report.metric_definitions` overrides it (`html_report.py:59-365`).
 - The file name is `html_report.filename` with `{customer}` and `{report_end}`. It is written to the local folder, and also to the datastore folder when `html_report.output_path_segments` is set (`runner.py:443-463`).
 
 ---

@@ -16,6 +16,8 @@ from kpi_pipeline.context import KPIContext
 
 _DISTINCT_METRICS = frozenset({"distinct_product_count", "distinct_store_count", "distinct_pair_count"})
 _FRACTIONAL_RATE_METRICS = frozenset({"in_stock_rate", "weighted_instock_rate", "dc_in_stock_rate"})
+# Weeks-of-supply metrics, displayed floored to whole weeks: their change is computed from the floored values.
+_WOS_METRICS = frozenset({"WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL"})
 
 
 def _format_metric_value(metric: str, value) -> str:
@@ -39,7 +41,7 @@ def _format_metric_value(metric: str, value) -> str:
         return f"{value:.1f}%"
     if metric in _DISTINCT_METRICS:
         return f"{int(value):,}"
-    if metric in ("WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL"):
+    if metric in _WOS_METRICS:
         return f"{math.floor(value)}"
     if metric == "inventory_turnover_rate":
         return f"{value:.1f}"
@@ -56,9 +58,14 @@ def _format_change(change_pct, change_pp) -> str:
 
 
 def _metric_change_values(metric: str, current, prior, pp_change_metrics):
+    """(change_pct, change_pp) of one metric, None where it has none. A WOS metric changes between its floored
+    values, the whole weeks displayed (23.9 vs 23.1 shows 23 vs 23: no change); its stored values stay
+    unfloored. A zero prior has no % change."""
     change_pct, change_pp = None, None
     if current is None or prior is None or pd.isna(current) or pd.isna(prior):
         return change_pct, change_pp
+    if metric in _WOS_METRICS:
+        current, prior = math.floor(current), math.floor(prior)
     if metric in pp_change_metrics:
         change_pp = (current - prior) * 100 if metric in _FRACTIONAL_RATE_METRICS else current - prior
     elif prior != 0:

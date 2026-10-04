@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-#### WOS shown as whole weeks; slice tab labels keep their capitals (SMW) - 2026-10-04
+#### WOS shown as whole weeks, change taken between the whole weeks; all tab labels upper case; Sales Revenue definition documented - 2026-10-04
 
-The weeks-of-supply metrics (`WOS`, `wos_revenue`, `wos_cost`, `WOS_DC`, `WOS_TOTAL`) are now displayed floored to a whole number of weeks in the HTML report and in the comparison tables' `prior_display` / `current_display`, instead of one decimal. Only the display changes: stored values, the `%` change and `inventory_turnover_rate` (still one decimal) are unchanged. Slice tab labels no longer go through `str.title()`, so an upper-case slice such as `SMW` stays `SMW` instead of `Smw` (all-lowercase words are still capitalised).
+The weeks-of-supply metrics (`WOS`, `wos_revenue`, `wos_cost`, `WOS_DC`, `WOS_TOTAL`) are now displayed floored to a whole number of weeks in the HTML report and in the comparison tables' `prior_display` / `current_display`, instead of one decimal. The `%` change of those metrics (comparison tables, comparable comparison tables, HTML) is computed between the floored values (`comparisons._metric_change_values`): 23.9 vs 23.1 shows `23` vs `23` and `+0.0%`; a floored prior of 0 gives `—`. Stored values, `kpi_long` and `inventory_turnover_rate` (still one decimal) are unchanged. Every HTML tab label (root, period, dimension, value, Metric Details) renders upper case (OVERALL, ANNUAL, BANNER, LFL, SMW, METRIC DETAILS; `html_report._tab_label`), which also fixes `SMW` showing as `Smw` (`str.title()`). Display only: the executive header's slice list keeps the word capitalisation (`_capitalize_words`) and all other text keeps its case. Documentation only: Sales Revenue (daily-data) is net of returns, and daily-data does not count product-store-days with net quantity <= 0 or net revenue < 0 (about -2.42M, -7% over 2026-09-14..18); the Metric Details text of Sales Revenue says so (`docs/METRICS.md`).
 
 #### KPI tables computed on product-level rows, all roots × cuts in one aggregation; docs restructured (no change to any value) - 2026-10-04
 

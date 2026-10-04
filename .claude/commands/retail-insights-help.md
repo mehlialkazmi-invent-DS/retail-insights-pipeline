@@ -148,7 +148,7 @@ kpi_pipeline/
                    Dimensions inferred from kpi_long via ctx.cut_dimensions. All table cells
                    centered; html_report.root_labels renames root tabs and
                    html_report.dimension_labels renames dimension tabs (display only);
-                   _tab_label capitalizes every tab label; Metric Details text for in_stock_rate / blocked days is built
+                   _tab_label upper-cases every tab label (OVERALL, ANNUAL, LFL, METRIC DETAILS); Metric Details text for in_stock_rate / blocked days is built
                    from settings (_settings_metric_definitions).
 ```
 
@@ -715,7 +715,7 @@ Within each period tab, navigation is three levels:
 
 The executive header shows client, reporting window, scope mode (Hybrid / Scope table only), cut dimensions, and generated timestamp.
 
-**Style (global, every client):** all table cells are centered; every tab label has its all-lowercase words capitalized by `_tab_label` (`annual` -> `Annual`, a value tab `jab` -> `Jab`; words with capitals such as `YTD`/`SMW` are kept), so a root without a `root_labels` entry (e.g. `nvrout`) shows as `Nvrout`. `html_report.root_labels` renames root tabs (tbretail: `comp` -> `LFL`, `nvrout` -> `NVROUT`). `html_report.dimension_labels` renames a slice dimension wherever its name is shown (the dimension tabs and the header's slice-dimensions card; tbretail: `brand` -> `Banner`), still capitalized by `_tab_label`; it is display only, so `kpi_long` and the saved outputs keep the raw dimension key (`brand`).
+**Style (global, every client):** all table cells are centered; every tab label (root, period, dimension, value and Metric Details tabs) is upper-cased by `_tab_label` (`annual` -> `ANNUAL`, a value tab `jab` -> `JAB`, `Metric Details` -> `METRIC DETAILS`), so a root without a `root_labels` entry (e.g. `nvrout`) shows as `NVROUT`; display only, the header's slice-dimensions card and other text keep their case. `html_report.root_labels` renames root tabs (tbretail: `comp` -> `LFL`, `nvrout` -> `NVROUT`). `html_report.dimension_labels` renames a slice dimension wherever its name is shown (the dimension tabs and the header's slice-dimensions card; tbretail: `brand` -> `Banner`), still upper-cased by `_tab_label` on the tabs; it is display only, so `kpi_long` and the saved outputs keep the raw dimension key (`brand`).
 
 **Metric Details are partly settings-driven:** with `instock.method='daily'` the In-Stock Rate row describes the daily method (on-hand or goods-in-transit, count start, blocked days only when `blocked_scope` is on and `in_stock_rate` is in `blocked_scope.metrics`, plus unusable days) and shows `instock.daily.input_filters` as store scope; with `blocked_scope` on, the sales / inventory / WOS / turnover rows note that blocked days are excluded, only on the metrics named in `blocked_scope.metrics`; a metric named in `goods_in_transit.inventory_metrics` states that its store / DC part counts goods in transit on top of on-hand (`html_report._GIT_METRIC_NOTES`); under `report_end="latest_day"` the Lost Sales % row states the last-Saturday basis, the WOS rows (`WOS`, `wos_revenue`, `wos_cost`, `WOS_DC`, `WOS_TOTAL`) state that YTD's last week counts only its elapsed days, and the header gets a **Period basis** card. `html_report.metric_definitions` still overrides any row.
 
@@ -847,7 +847,7 @@ For a genuinely new source table (not just a new column off an existing frame) t
 
 | Metric | Label | Scope | Notes |
 |--------|-------|-------|-------|
-| `total_sales_revenue` | Sales Revenue | All stores | Sum of daily sales revenue |
+| `total_sales_revenue` | Sales Revenue | All stores | Sum of daily-data sales revenue: net of returns; product-store-days with net quantity <= 0 or net revenue < 0 are not counted (5-day check 2026-09-14..18: 38,299 days, -2.42M, about -7%) |
 | `total_sales_quantity` | Sales Units | All stores | Sum of daily sales quantity |
 | `AUR` | AUR | All stores | Revenue ÷ Units |
 | `AUC` | AUC | All stores | Cost ÷ Units |
