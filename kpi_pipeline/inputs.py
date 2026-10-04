@@ -256,7 +256,8 @@ def _with_gross_sales(daily: DataFrame, ctx) -> DataFrame:
     Every transactional day is kept: a day with no daily row (none exists, or input_filters.daily_data
     removed it, e.g. usable = 1) becomes a row of its own with inventory 0 and gross_only True, so the
     sales metrics see all gross sales while the inventory metrics still read only the daily-data days
-    (build_scoped_daily turns the flag into has_daily_row / has_sales_row / has_stock_row).
+    (build_scoped_daily turns the flag into has_daily_row / has_sales_row / has_stock_row). On the civil calendar
+    a sales-only day takes its native week from the daily-data rows of the same date.
 
     With the daily-data family roll-up, a child and its parent on the same date are summed into one row first,
     so the gross of that day attaches once instead of once per row.
@@ -270,11 +271,24 @@ def _with_gross_sales(daily: DataFrame, ctx) -> DataFrame:
         )
     date_type = daily.schema[date_col].dataType
     no_inventory = F.lit(0.0).cast(daily.schema["inventory"].dataType)
-    return (
+    gross = _gross_sales_by_day(ctx)
+    civil = not s["USE_FISCAL_CALENDAR"]
+    week_col = s["DAILY_TIME_COLUMNS"]["week"]
+    if civil:
+        # A sales-only day takes the native week of its date from the daily-data rows of that date.
+        week_by_date = daily.groupBy(F.to_date(F.col(date_col)).alias("_gross_date")).agg(
+            F.max(week_col).alias("_gross_week")
+        )
+        gross = gross.join(F.broadcast(week_by_date), on="_gross_date", how="left")
+    joined = (
         daily.withColumn("_gross_date", F.to_date(F.col(date_col)))
-        .join(_gross_sales_by_day(ctx), on=["product_id", "store_id", "_gross_date"], how="full_outer")
+        .join(gross, on=["product_id", "store_id", "_gross_date"], how="full_outer")
         .withColumn("gross_only", F.col(date_col).isNull())
-        .withColumn(date_col, F.coalesce(F.col(date_col), F.col("_gross_date").cast(date_type)))
+    )
+    if civil:
+        joined = joined.withColumn(week_col, F.coalesce(F.col(week_col), F.col("_gross_week"))).drop("_gross_week")
+    return (
+        joined.withColumn(date_col, F.coalesce(F.col(date_col), F.col("_gross_date").cast(date_type)))
         .withColumn("sales_revenue", F.coalesce(F.col("gross_revenue"), F.lit(0.0)))
         .withColumn("sales_quantity", F.coalesce(F.col("gross_quantity"), F.lit(0.0)))
         .withColumn("inventory", F.coalesce(F.col("inventory"), no_inventory))

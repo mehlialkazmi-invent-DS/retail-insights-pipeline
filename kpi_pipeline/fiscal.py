@@ -380,8 +380,12 @@ def build_time_grain_from_daily_data(
     date_col, week_col = time_cols["date"], time_cols["week"]
     # Year = calendar year of `date` (not the ISO week-year 'year'). get_daily_data_raw, so
     # input_filters.daily_data applies to the period labels too.
+    daily_rows = get_daily_data_raw(ctx)
+    if ctx.settings["SALES_BASIS"] == "gross":
+        # Sales-only days borrow their week from these rows, so they cannot also be what completes the grain.
+        daily_rows = daily_rows.filter(~F.col("gross_only"))
     daily_time = (
-        get_daily_data_raw(ctx)
+        daily_rows
         .select(date_col, week_col)
         .withColumn(date_col, F.to_date(F.col(date_col)))
         .filter(F.col(date_col).between(F.lit(report_start_date), F.lit(report_end_date)))

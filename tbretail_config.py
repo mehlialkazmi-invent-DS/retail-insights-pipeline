@@ -704,11 +704,6 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
             "item_family_rollup.transactional_sales must equal item_family_rollup.daily_data when sales_basis is "
             "'gross': gross sales are joined onto daily-data, which must share its product id space"
         )
-    if sales_basis == "gross" and not cfg["fiscal_calendar"]["use_fiscal_calendar"]:
-        raise ValueError(
-            "sales_basis 'gross' requires fiscal_calendar.use_fiscal_calendar=True: days daily-data has no row for "
-            "carry no native week column"
-        )
 
     dc_instock_cfg = cfg["dc_instock"]
     dc_instock_enabled = bool(dc_instock_cfg["enabled"])
