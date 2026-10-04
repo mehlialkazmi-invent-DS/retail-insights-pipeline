@@ -123,7 +123,9 @@ CONFIG: Dict[str, Any] = {
     },
     # Which sales every sales metric reads (docs/CONFIG.md: sales_basis). "net": noob/daily-data as it is. "gross": its
     # sales_revenue / sales_quantity are replaced by the non-return transactional_sales of the same product x store x
-    # day (0 where none). Changes what saved kpi_long means: use output.save_mode "full_refresh" when you change it.
+    # day (0 where none). Gross is rolled to the family main by item_family_rollup.daily_data (no key of its own: it
+    # must share daily-data's id space). Changes what saved kpi_long means: use output.save_mode "full_refresh" when you
+    # change it.
     "sales_basis": "net",
     # =============================================================================
     # 3. SCOPE -- which product x store pairs count, and on which days
