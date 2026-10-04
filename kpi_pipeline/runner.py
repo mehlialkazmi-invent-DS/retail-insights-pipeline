@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import pandas as pd
 from IPython.display import display
@@ -78,8 +78,9 @@ def _duration(seconds: float) -> str:
 
 class RunProgress:
     """How many KPI tables a run will build per stage ("kpi_long", "comparable", "scope_diff"), how many are
-    done, and roughly how long is left. Each KPI table is one metrics.build_kpi_table call (a period type x
-    root x cut, ending in a toPandas), the run's main cost; each prints a line as it finishes (ctx.progress).
+    done, and roughly how long is left. Each KPI table is one metrics.build_kpi_table call (a period type, or
+    a comparable build, with every root x cut in one aggregation ending in a toPandas; a scope_diff side), the
+    run's main cost; each prints a line as it finishes (ctx.progress).
 
     The time left is the average time per built table times the tables still planned, so it is rough: a
     comparable table reads only its kind's rows and is usually faster than a kpi_long one. A comparable build
@@ -87,10 +88,9 @@ class RunProgress:
     without data) is taken off the plan with ``skip``.
     """
 
-    def __init__(self, planned: Dict[str, int], tables_per_build: int):
+    def __init__(self, planned: Dict[str, int]):
         self.planned = dict(planned)
         self.done = {stage: 0 for stage in planned}
-        self.tables_per_build = tables_per_build
         self.stage = ""
         self.section = ""  # what the next tables belong to (period type, comparable kind / number)
         self.start = time.monotonic()
@@ -107,7 +107,7 @@ class RunProgress:
     def print_plan(self) -> None:
         stages = " + ".join(f"{stage} {n}" for stage, n in self.planned.items() if n)
         print(
-            f"PLAN: {self.total_planned} KPI tables ({stages}; {self.tables_per_build} per build = roots x cuts)",
+            f"PLAN: {self.total_planned} KPI tables ({stages}; a kpi_long / comparable one: every root x cut)",
             flush=True,
         )
 
@@ -121,7 +121,7 @@ class RunProgress:
         )
 
     def table_done(self, label: str) -> None:
-        """One KPI table of the current stage and section built; ``label`` names its root x cut."""
+        """One KPI table of the current stage and section built; ``label`` says what it covers."""
         now = time.monotonic()
         took = now - self.last
         self.last = now
@@ -135,13 +135,12 @@ class RunProgress:
         )
 
     def skip(self, builds: int, reason: str) -> None:
-        """Take ``builds`` builds (``tables_per_build`` tables each) of the current stage off the plan."""
-        tables = builds * self.tables_per_build
-        if tables <= 0:
+        """Take ``builds`` builds (one KPI table each) of the current stage off the plan."""
+        if builds <= 0:
             return
-        self.planned[self.stage] -= tables
+        self.planned[self.stage] -= builds
         print(
-            f"[{self.stage}] {reason}: {tables} planned KPI tables dropped, run now {self.total_planned}",
+            f"[{self.stage}] {reason}: {builds} planned KPI tables dropped, run now {self.total_planned}",
             flush=True,
         )
 
@@ -297,7 +296,7 @@ class KPIRunner:
         if not self._scopes_ready:
             self.prepare_scopes()
         self._scopes_ready = False
-        self.ctx.progress = RunProgress(*self._planned_tables())
+        self.ctx.progress = RunProgress(self._planned_tables())
         self.ctx.progress.print_plan()
         self._in_run = True
         try:
@@ -318,11 +317,9 @@ class KPIRunner:
         self.ctx.progress.print_summary()
         return self.ctx
 
-    def _planned_tables(self) -> Tuple[Dict[str, int], int]:
-        """(KPI tables per stage, tables per build = roots x cuts) from the roots and cuts build_dimensions
-        resolved. Comparable plans comparable.PLANNED_BUILDS per kind; build_comparable_pairs drops the builds
-        that turn out to be skipped."""
-        per_build = (1 + len(self.ctx.root_definitions)) * (1 + len(self.ctx.cut_dimensions))
+    def _planned_tables(self) -> Dict[str, int]:
+        """KPI tables per stage: one per kpi_long period type, comparable.PLANNED_BUILDS per comparable kind
+        (build_comparable_pairs drops the builds that turn out to be skipped), two for scope_diff."""
         periods = [p for p, _ in PERIODS if p != "half" or self.settings["HALF_PERIODS"]]
         comparable_kinds = self.settings.get("COMPARABLE_KINDS") or []
         comparable_builds = (
@@ -330,19 +327,17 @@ class KPIRunner:
             if self.settings.get("COMPARABLE_PAIRS_ENABLED", False)
             else 0
         )
-        planned = {
-            "kpi_long": len(periods) * per_build,
-            "comparable": comparable_builds * per_build,
+        return {
+            "kpi_long": len(periods),
+            "comparable": comparable_builds,
             "scope_diff": 2 if self.settings["SCOPE"]["run_scope_diff"] else 0,
         }
-        return planned, per_build
 
     def _begin_stage(self, stage: str) -> None:
         """Start ``stage`` on ctx.progress; a step called on its own (outside run) gets a fresh plan of that
         stage only."""
         if not self._in_run:
-            planned, per_build = self._planned_tables()
-            self.ctx.progress = RunProgress({stage: planned[stage]}, per_build)
+            self.ctx.progress = RunProgress({stage: self._planned_tables()[stage]})
         self.ctx.progress.begin_stage(stage)
 
     def _output_saver(self, fund_paste) -> Optional[OutputSaver]:

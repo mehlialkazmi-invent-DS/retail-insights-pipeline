@@ -9,7 +9,7 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 from kpi_pipeline.context import KPIContext
-from kpi_pipeline.kpi_long import _apply_value_filter
+from kpi_pipeline.filters import apply_value_filter
 from kpi_pipeline.pipeline import instock_daily_pairs
 
 _PAIR_KEYS = ["product_id", "store_id"]
@@ -91,7 +91,7 @@ def scope_universe_counts(ctx: KPIContext) -> pd.DataFrame:
     for dim in ctx.active_slice_dimensions:
         df = enriched
         if dim in value_filters:
-            df = _apply_value_filter(df, dim, value_filters[dim])
+            df = apply_value_filter(df, dim, value_filters[dim])
         by_value = (
             df.groupBy("stage", F.coalesce(F.col(dim).cast("string"), F.lit("NULL")).alias("dimension_value"))
             .agg(*count_exprs())

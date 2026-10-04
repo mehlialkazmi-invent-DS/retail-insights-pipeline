@@ -1,12 +1,12 @@
 # Retail-insights-pipeline config: the generic TEMPLATE for a new customer, not any customer's deployed values.
-# Copy it and replace the placeholders. README.md documents every key in depth.
+# Copy it and replace the placeholders. docs/CONFIG.md documents every key in depth.
 #
 # How to use (Databricks, next to main.ipynb):
 #     %run ./config
 #     settings = materialize(fund.paste)
 #
 # Layout: reference lists -> CONFIG (the only part you edit) -> helpers -> materialize(). materialize() checks
-# CONFIG, applies any KPI_* environment overrides (README: Environment variable overrides) and returns the flat
+# CONFIG, applies any KPI_* environment overrides (docs/CONFIG.md: Environment variable overrides) and returns the flat
 # settings dict the pipeline reads. Every section and key stays in the file; unused ones are switched off.
 #
 # First edits: customer, path_segments (scope, daily_data, products, lost_sales at minimum),
@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, List, Optional
 # Period-over-period comparison kinds, in canonical order: comparisons.enabled.
 COMPARISON_KINDS_ALL = ("yoy", "ytd")
 
-# Like-for-like kinds, in canonical order: comparable_pairs.kinds (README: Comparable pairs).
+# Like-for-like kinds, in canonical order: comparable_pairs.kinds (docs/LOGIC_FLOW.md: Comparable pairs).
 COMPARABLE_KINDS_ALL = ("ytd", "yoy", "quarter", "half")
 
 # Every metric the pipeline reports, in canonical order: metrics.metric_cols, metrics.scope_diff_metrics and
@@ -64,12 +64,12 @@ CONFIG: Dict[str, Any] = {
     "run": {
         "mode": "full",  # "full" computes from the source tables; "html_only" renders saved outputs
     },
-    "reporting_window": {  # README: Reporting window
+    "reporting_window": {  # docs/LOGIC_FLOW.md: Reporting window and report end
         "as_of_date": "2026-09-01",  # last day of data to report; update before each run
         "run_min_date": None,  # None = YTD from Jan 1; "2024-01-01" for multi-year
         "report_end": "as_of",  # "as_of" | "complete_month" | "latest_day" ("latest_day" needs instock.method "daily")
     },
-    "fiscal_calendar": {  # README: Fiscal calendar vs native time grain
+    "fiscal_calendar": {  # docs/LOGIC_FLOW.md: Fiscal calendar vs native time grain
         "use_fiscal_calendar": True,  # True = periods from the fiscal_cal upload; False = from daily-data dates
         "half_periods": False,  # True adds the Half tab and the "half" comparable kind
         "column_map": {  # fiscal_cal upload columns; set month_name_col when the fiscal year is offset
@@ -96,7 +96,7 @@ CONFIG: Dict[str, Any] = {
         "lost_sales": ["noob", "lost-sales"],  # add a model_id=... segment if partitioned by model
         "product_planning_level": ["operation", "product_planning_level"],  # product_agg_level -> product_id map
     },
-    # Spark SQL expressions applied when reading each source (README: input_filters). To keep a store out of
+    # Spark SQL expressions applied when reading each source (docs/CONFIG.md: input_filters). To keep a store out of
     # every metric, filter it in daily_data here and, for the daily in-stock, in instock.daily.input_filters.
     "input_filters": {
         "scope": [],
@@ -105,7 +105,7 @@ CONFIG: Dict[str, Any] = {
         "inventory_warehouse": [],
         "item_family": [],
     },
-    "item_family_source": {  # column names of path_segments.item_family (README: item_family)
+    "item_family_source": {  # column names of path_segments.item_family (docs/CONFIG.md: item_family)
         "product_col": "product_id",
         "parent_col": "parent_id",
         "is_main_col": "is_main",
@@ -118,7 +118,7 @@ CONFIG: Dict[str, Any] = {
     # =============================================================================
     # 3. SCOPE -- which product x store pairs count, and on which days
     # =============================================================================
-    "scope": {  # which product x store pairs count, from one table (README: scope)
+    "scope": {  # which product x store pairs count, from one table (docs/CONFIG.md: scope)
         "time": "daily",  # "daily": every pair counts on every day of the window; "weekly": rows carry their own week
         "grain": "product_store",  # "product" | "product_store"; daily in-stock needs stores
         "columns": {  # column names of path_segments.scope; None = column not used
@@ -151,7 +151,7 @@ CONFIG: Dict[str, Any] = {
         "min_percentile": 0.2,  # a pair-week counts when sales and inventory reach this percentile (20 = 0.2)
         "min_weeks_for_filter": 2,  # pairs with this many weeks or fewer skip the filter
     },
-    # UI blocked days, dropped from the metrics named here (README: blocked_scope).
+    # UI blocked days, dropped from the metrics named here (docs/CONFIG.md: blocked_scope).
     # Needs scope.columns.start and store.
     "blocked_scope": {
         "ui_parameters_path": None,  # path under the datastore root; None = blocked scope off
@@ -165,7 +165,7 @@ CONFIG: Dict[str, Any] = {
     # =============================================================================
     # 4. IN-STOCK & INVENTORY
     # =============================================================================
-    # Where in_stock_rate comes from (README: instock). Both sub-sections stay; only the method's one is used.
+    # Where in_stock_rate comes from (docs/CONFIG.md: instock). Both sub-sections stay; only the method's one is used.
     #   "daily"              built from daily-data over the scope pairs (store-level scope grain)
     #   "weekly_source"      read from a separate weekly table (weekly_source below)
     #   "lost_sales_source"  read from lost_sales_source's in_stock_col / total_days_col
@@ -189,14 +189,14 @@ CONFIG: Dict[str, Any] = {
             "fallback_sources": [],  # extra column-sets of the same table filling weeks the main set lacks
         },
     },
-    # dc_in_stock_rate from an expanded inventory_warehouse grid (README: dc_instock). DC metrics read
+    # dc_in_stock_rate from an expanded inventory_warehouse grid (docs/CONFIG.md: dc_instock). DC metrics read
     # path_segments.inventory_warehouse for the store scope's products; with scope.dc_solution_id set,
     # only the DC scope's product x warehouse pairs among them count (None = every warehouse).
     "dc_instock": {
         "enabled": False,
         "stock_threshold": 0,  # a day is stocked when inventory > stock_threshold
     },
-    "goods_in_transit": {  # add goods in transit (GIT) to on-hand (README: goods_in_transit)
+    "goods_in_transit": {  # add goods in transit (GIT) to on-hand (docs/CONFIG.md: goods_in_transit)
         "date_shift_days": None,  # None = GIT off everywhere; -1 = snapshot dated D+1 is the end of day D
         "roll_to_family_main": True,  # roll every GIT read onto the family main
         "store_instock": False,  # a daily in-stock day also counts store GIT (needs instock.method "daily")
@@ -206,7 +206,7 @@ CONFIG: Dict[str, Any] = {
     # =============================================================================
     # 5. LOST SALES
     # =============================================================================
-    # Column mapping of path_segments.lost_sales (README: lost_sales_source).
+    # Column mapping of path_segments.lost_sales (docs/CONFIG.md: lost_sales_source).
     # Configure exactly one of product_col / product_agg_level_col.
     "lost_sales_source": {
         "week_col": "week_start_date",
@@ -218,7 +218,7 @@ CONFIG: Dict[str, Any] = {
         "product_agg_level_col": None,
         "sales_filter": [],  # Spark SQL narrowing the daily-data sales in lost_sales_pct's denominator
     },
-    "lost_sales_ensemble": {  # blend a fast and a slow lost-sales model (README: lost_sales_ensemble)
+    "lost_sales_ensemble": {  # blend a fast and a slow lost-sales model (docs/CONFIG.md: lost_sales_ensemble)
         "enabled": False,
         "slow_path_segments": ["noob", "lost-sales"],  # e.g. a longer-lookback model variant
         "speed_cluster_path_segments": ["noob", "product-cluster-attributes-snapshot"],
@@ -230,12 +230,12 @@ CONFIG: Dict[str, Any] = {
     # =============================================================================
     # 6. BREAKDOWNS -- slice dimensions and root tabs
     # =============================================================================
-    "slices": {  # breakdown dimensions from the products table (README: Roots and cuts)
+    "slices": {  # breakdown dimensions from the products table (docs/LOGIC_FLOW.md: Roots and cuts)
         "dimensions": ["brand"],
         "derived_dimensions": {"example_derived": "CASE WHEN brand = 'A' THEN 'Group A' ELSE 'Other' END"},
-        "value_filters": {},  # per-dimension include / exclude of values (README: Value filters)
+        "value_filters": {},  # per-dimension include / exclude of values (docs/LOGIC_FLOW.md: Value filters)
     },
-    "dimension_sources": [  # external tables that add slice dimensions and root tabs (README: Dimension sources)
+    "dimension_sources": [  # external tables that add slice dimensions and root tabs (docs/LOGIC_FLOW.md: Dimension sources)
         {
             "enabled": False,
             "label": "example_dimension_source",
@@ -292,15 +292,15 @@ CONFIG: Dict[str, Any] = {
         },
         # Rate metrics whose change is shown in percentage points, not percent.
         "pp_change_metrics": ["in_stock_rate", "weighted_instock_rate", "dc_in_stock_rate", "lost_sales_pct"],
-        "population_filters": {},  # {metric: {dim_col: value filter}} narrows one metric (README: Population filters)
+        "population_filters": {},  # {metric: {dim_col: value filter}} narrows one metric (docs/METRICS.md: Population filters)
     },
     # =============================================================================
     # 8. COMPARISONS
     # =============================================================================
-    "comparisons": {  # README: Selecting which comparisons to run
+    "comparisons": {  # docs/CONFIG.md: Selecting which comparisons to run
         "enabled": ["yoy", "ytd"],  # any of COMPARISON_KINDS_ALL
     },
-    "comparable_pairs": {  # like-for-like; needs run_min_date spanning 2+ years (README: Comparable pairs)
+    "comparable_pairs": {  # like-for-like; needs run_min_date spanning 2+ years (docs/LOGIC_FLOW.md: Comparable pairs)
         "enabled": False,
         "kinds": ["ytd"],  # any of COMPARABLE_KINDS_ALL
         "grain": "product_store",  # or "product"
@@ -309,7 +309,7 @@ CONFIG: Dict[str, Any] = {
     # =============================================================================
     # 9. OUTPUT & HTML REPORT
     # =============================================================================
-    "output": {  # Delta saves (README: Output saves)
+    "output": {  # Delta saves (docs/OUTPUTS.md: Output saves)
         "save_outputs": True,
         "path_segments": ["analysis", "kpi_reports", "outputs"],  # output folder under the bucket
         "run_date": None,  # run_date partition written; None = as_of_date
@@ -317,7 +317,7 @@ CONFIG: Dict[str, Any] = {
         "allow_overwrite_existing": True,  # incremental: replace periods already saved
         "recompute_comparisons_from_history": True,  # incremental: rebuild comparisons from the merged history
     },
-    "html_report": {  # README: HTML report
+    "html_report": {  # docs/HTML_REPORT.md: HTML report
         "enabled": True,
         "filename": "kpi_report_{customer}_{report_end}.html",  # placeholders {customer} and {report_end} only
         "report_title": "KPI Report",
@@ -363,7 +363,7 @@ def _optional_int(raw: str) -> Optional[int]:
     return int(raw) if raw else None
 
 
-# Optional KPI_* environment overrides (README: Environment variable overrides):
+# Optional KPI_* environment overrides (docs/CONFIG.md: Environment variable overrides):
 # (variable, CONFIG key path, how the text is parsed).
 _ENV_OVERRIDES = (
     ("KPI_CUSTOMER", ("customer",), str),
@@ -876,7 +876,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         dimension_sources.append(resolved)
 
     # Every column an enabled dimension source contributes (columns + derived) defines roots, never a cut
-    # (README: Dimension sources). root_values maps values to root names; a column without an entry gets one
+    # (docs/LOGIC_FLOW.md: Dimension sources). root_values maps values to root names; a column without an entry gets one
     # root per distinct value (fiscal._resolve_root_definitions). A root_values key that is not one of the
     # source's own columns raises here instead of silently never applying.
     root_specs = []
@@ -897,7 +897,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         for dim_col in contributed:
             root_specs.append({"dim_col": dim_col, "root_values": root_values_cfg.get(dim_col) or {}})
 
-    # Applied to a slice's own breakdown (kpi_pipeline/kpi_long._filter_frames_for_dimension).
+    # Applied to a slice's own breakdown (kpi_pipeline/kpi_long._stack_roots_and_cuts).
     slice_value_filters = dict(cfg["slices"].get("value_filters", {}) or {})
     _validate_value_filters(slice_value_filters)
 

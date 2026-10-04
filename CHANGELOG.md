@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+#### KPI tables computed on product-level rows, all roots × cuts in one aggregation; docs restructured (no change to any value) - 2026-10-04
+
+Each KPI table used to re-aggregate the product × store × day rows from scratch, once per period type × root ×
+cut (54 kpi_long tables, plus 9 per comparable build), with about 12 shuffles each. Every row filter still runs
+on the store rows first: scope, input filters, the comparable pair restriction, period framing and
+`period_filter`. After that, `metrics.collapse_frames` sums each period type's frames across stores /
+warehouses to product level once. It groups by every column except the location and the measures, so
+`is_blocked`, `has_daily_row` / `has_inventory_row`, the calendar and the product attributes stay as keys. Every
+per-metric gate, population filter, root and cut then reads the same rows as before. Goods in transit valued at
+retail / cost is rounded per store row before the sum, as before. `distinct_store_count` / `distinct_pair_count`
+come from a distinct `sales_pairs` frame of the same rows. A frame whose root / cut / population filter reads a
+store, warehouse or measure column is left uncollapsed. `kpi_long._stack_roots_and_cuts` then labels each
+product-level row once for every root × cut that keeps it (the same three-valued filter logic as filtering on the
+root and then the cut). The unchanged `compute_kpis` runs once per period type, grouped by those labels: one
+aggregation and one `toPandas` instead of one per root × cut. kpi_long rows keep the same values, nulls, row set
+and order. A slice (cut) column must now be a string, or the run raises `ValueError` (cast it in
+`slices.derived_dimensions`). Before, a non-string cut could not be saved anyway. A new additive per-store column
+must be listed in `metrics._COLLAPSE`. Run progress now prints one line per period type / comparable build.
+Verified by code review only; not yet run on Spark.
+
+Docs: `README.md` is now a short setup-and-run guide. The detail moved to `docs/` (`CONFIG.md`, `LOGIC_FLOW.md`,
+`METRICS.md`, `MODULES.md`, `OUTPUTS.md`, `HTML_REPORT.md`, `TBRETAIL.md`, `TROUBLESHOOTING.md`,
+`ORBIT_METRICS_COMPARISON.md`). The `(README: …)` pointers in the config files, the notebook and the skill doc
+now point there.
+
+**Affected:** `kpi_pipeline/metrics.py`, `kpi_pipeline/kpi_long.py`, `kpi_pipeline/filters.py`,
+`kpi_pipeline/comparable.py`, `kpi_pipeline/comparisons.py`, `kpi_pipeline/runner.py`, `kpi_pipeline/scope_debug.py`,
+`config.py`, `tbretail_config.py` (comments), `main.ipynb`, `README.md`, `docs/`, `.claude/commands/retail-insights-help.md`
+
 #### Save each table as soon as it is built; run progress per KPI table (no change to any value) - 2026-10-04
 
 `run(save=True)` now writes each output table right after the step that builds it (`io.OutputSaver`):

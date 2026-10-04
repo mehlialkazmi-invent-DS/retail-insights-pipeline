@@ -33,7 +33,7 @@ from pyspark.sql import functions as F
 
 from kpi_pipeline.comparisons import _comparison_dimensions, _comparison_roots, _series_groups, build_comparison_long
 from kpi_pipeline.context import KPIContext
-from kpi_pipeline.kpi_long import _METRIC_FRAMES, _period_frames, kpi_long_frame, kpi_rows
+from kpi_pipeline.kpi_long import _period_frames, kpi_long_frame, kpi_rows
 
 _PAIR_KEYS = ["product_id", "store_id"]
 _PRODUCT_KEYS = ["product_id"]
@@ -70,8 +70,8 @@ _NUMBERED_KINDS: Dict[str, _NumberedKind] = {
     "half": _NumberedKind("half_key", "Fiscal_Half", "half_number", "H"),
 }
 
-# Builds per kind the run's progress plans (one per quarter / half number); each builds one KPI table per
-# root x cut. Builds that turn out to be skipped are taken off the plan (ctx.progress.skip).
+# Builds per kind the run's progress plans (one per quarter / half number); each builds one KPI table
+# covering every root x cut. Builds that turn out to be skipped are taken off the plan (ctx.progress.skip).
 PLANNED_BUILDS: Dict[str, int] = {"ytd": 1, "yoy": 1, "quarter": 4, "half": 2}
 
 
@@ -137,7 +137,8 @@ def _comparable_period_rows(
     period_type: str,
     period_col: str,
 ) -> pd.DataFrame:
-    """kpi_long rows (every root x cut) of the ``period_filter`` rows, tagged ``period_type``."""
+    """kpi_long rows (every root x cut) of the ``period_filter`` rows, tagged ``period_type`` (kpi_long.kpi_rows
+    collapses them to product level after the pair restriction)."""
     return kpi_long_frame(ctx, kpi_rows(ctx, frames, period_type, period_col, period_filter))
 
 
@@ -271,15 +272,18 @@ def _build_comparable_kind(
     display = pd.DataFrame()
 
     # Every year of the kind computed once: each aggregation groups by period_col or a finer key holding Year,
-    # so a year's metrics read only its own rows, and a link takes its two years' rows. The restricted rows
-    # are cached once, so every root x cut aggregation reads them instead of re-joining the full frames to
-    # the comparable keys; compute_kpis / build_kpi_table apply period_filter again, a no-op on them.
+    # so a year's metrics read only its own rows, and a link takes its two years' rows. kpi_rows collapses the
+    # restricted period_filter rows to product level once and aggregates every root x cut in one pass;
+    # scoped_daily's are cached here as it reads them twice (the product rows and sales_pairs), and its
+    # period_filter is then a no-op.
     period_filter = F.col("Year").isin(years)
     if numbered:
         period_filter = period_filter & (F.col(numbered.number_col) == number)
-    kind_frames = {key: restricted[key].filter(period_filter).cache() for key in _METRIC_FRAMES}
-    rows = _comparable_period_rows(ctx, {**restricted, **kind_frames}, period_filter, period_type, period_col)
-    for frame in [*kind_frames.values(), common_keys, dc_common_keys, dc_inst_common_keys]:
+    kind_daily = restricted["scoped_daily"].filter(period_filter).cache()
+    rows = _comparable_period_rows(
+        ctx, {**restricted, "scoped_daily": kind_daily}, period_filter, period_type, period_col
+    )
+    for frame in [kind_daily, common_keys, dc_common_keys, dc_inst_common_keys]:
         frame.unpersist()
 
     period_key_fn, display_label_fn, change_label_fn = _period_key_fns(comparison_type, number)

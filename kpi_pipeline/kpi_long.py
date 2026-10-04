@@ -10,11 +10,12 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
+from pyspark.sql.types import StringType
 
-from kpi_pipeline.context import KPIContext
-from kpi_pipeline.filters import apply_value_filter as _apply_value_filter
+from kpi_pipeline.context import KPIContext, release_frames
+from kpi_pipeline.filters import value_filter_condition
 from kpi_pipeline.fiscal import _period_key_columns, last_saturday_on_or_before, week_day_counts
-from kpi_pipeline.metrics import build_kpi_table
+from kpi_pipeline.metrics import KPI_FRAMES, build_kpi_table, collapse_frames
 
 PERIODS: List[Tuple[str, str]] = [
     ("annual", "Year"),
@@ -45,8 +46,8 @@ def _with_ytd_filter(df: DataFrame, available_months: List[int]) -> DataFrame:
     return df.filter(F.col("Fiscal_Month").isin(available_months))
 
 
-# The frames build_kpi_table reads, period-framed and value-filtered alike (scope_pairs /
-# scope_pair_weeks feed no metric).
+# The metric frames, period-framed alike before metrics.collapse_frames (scope_pairs / scope_pair_weeks feed
+# no metric).
 _METRIC_FRAMES = ("scoped_daily", "inst_data", "lost_base", "dc_daily", "dc_inst")
 
 
@@ -198,18 +199,68 @@ def trim_periods_to_recent(kpi_long: pd.DataFrame, ctx: KPIContext) -> pd.DataFr
     return pd.concat(parts, ignore_index=True) if parts else kpi_long.iloc[0:0].copy()
 
 
-def _filter_frames_for_dimension(
-    frames: Dict[str, DataFrame], dim: str, value_filters: Dict[str, object]
+# kpi_rows' group keys besides the period column: the root's and the cut's position in its roots / cuts
+# lists, and the cut's value as a string ("ALL" on the "overall" cut).
+_COMBO_KEYS = ["_root", "_dimension", "_dimension_value"]
+
+
+def _stack_roots_and_cuts(
+    ctx: KPIContext,
+    frames: Dict[str, DataFrame],
+    roots: List[Optional[Dict[str, str]]],
+    cuts: List[Optional[str]],
 ) -> Dict[str, DataFrame]:
-    """Restrict the metric frames to ``value_filters[dim]`` (list = include-only, or a dict with include /
-    exclude / keep_null; filters.normalize_value_filter); unchanged when ``dim`` has no entry."""
-    if dim not in value_filters:
-        return frames
-    spec = value_filters[dim]
-    out = dict(frames)
-    for key in _METRIC_FRAMES:
-        out[key] = _apply_value_filter(out[key], dim, spec)
-    return out
+    """The collapsed frames (metrics.KPI_FRAMES) with one copy of each row per (root, cut) that keeps it,
+    labelled with _COMBO_KEYS, so one aggregation grouped by them gives every root x cut exactly the rows and
+    groups of its own.
+
+    A row is in (root, cut) when the root's filter (its dim_col equal to its value, NULL dropped) and the
+    cut's slices.value_filters entry (none on the "overall" cut or a cut without one) both keep it: the rows
+    left by filtering on the root and then on the cut. _dimension_value is the cut column cast to string,
+    NULL for a NULL value (keep_null), so a NULL group joins its metric families as when the cut column was
+    the group key (null-safe for the pair counts only); "ALL" on the "overall" cut, which had no group key.
+    Every original column stays, for metrics.population_filters.
+
+    A cut column must be a string: its values are reported as they come, and one string column holds every
+    cut's value (a number, date or boolean cut fails here; cast it in slices.derived_dimensions).
+    """
+    schema = frames["scoped_daily"].schema
+    non_string = [c for c in cuts if c is not None and not isinstance(schema[c].dataType, StringType)]
+    if non_string:
+        raise ValueError(
+            f"slice dimension(s) {non_string} must be string columns: cast them in slices.derived_dimensions, "
+            "e.g. CAST(col AS STRING)"
+        )
+    value_filters = ctx.settings.get("SLICE_VALUE_FILTERS", {}) or {}
+    labels = []
+    for root_pos, root_def in enumerate(roots):
+        root_keep = (
+            F.lit(True) if root_def is None else value_filter_condition(root_def["dim_col"], [root_def["value"]])
+        )
+        for cut_pos, cut in enumerate(cuts):
+            keep, value = root_keep, F.lit("ALL")
+            if cut is not None:
+                if cut in value_filters:
+                    keep = keep & value_filter_condition(cut, value_filters[cut])
+                value = F.col(cut).cast("string")
+            labels.append(
+                F.when(
+                    keep,
+                    F.struct(
+                        F.lit(root_pos).alias("_root"),
+                        F.lit(cut_pos).alias("_dimension"),
+                        value.alias("_dimension_value"),
+                    ),
+                )
+            )
+    combo = F.explode(F.array(*labels)).alias("_combo")
+    return {
+        key: frames[key]
+        .select("*", combo)
+        .filter(F.col("_combo").isNotNull())
+        .select(*frames[key].columns, "_combo.*")
+        for key in KPI_FRAMES
+    }
 
 
 def build_kpi_long(ctx: KPIContext, frames: Dict[str, DataFrame]) -> pd.DataFrame:
@@ -232,38 +283,38 @@ def build_kpi_long(ctx: KPIContext, frames: Dict[str, DataFrame]) -> pd.DataFram
 def kpi_rows(
     ctx: KPIContext, frames: Dict[str, DataFrame], period_type: str, period_col: str, period_filter
 ) -> List[dict]:
-    """kpi_long records of one period type for every (root, cut), ``frames`` already period-framed and
-    restricted to ``period_filter`` rows (shared with comparable._comparable_period_rows)."""
+    """kpi_long records of one period type for every (root, cut) of the period-framed ``frames`` (shared with
+    comparable._comparable_period_rows). Their ``period_filter`` rows are collapsed to product level once
+    (metrics.collapse_frames, cached, released after) and every root x cut is one aggregation of them
+    (_stack_roots_and_cuts): one aggregation and one toPandas.
+
+    Records come root by root and cut by cut, each (root, cut)'s from a table of its own rows and columns (the
+    period, its cut value, the metrics) sorted by period then cut value, read row by row; iterrows makes an
+    all-numeric row (the "overall" cut of a numeric period) float, as when each was its own table.
+    """
     metric_cols = ctx.settings["METRIC_COLS"]
-    cuts: List[Tuple[str, List[str]]] = [("overall", [])] + [
-        (dim, [dim]) for dim in ctx.cut_dimensions
-    ]
     roots: List[Optional[Dict[str, str]]] = [None] + list(ctx.root_definitions)
-    value_filters = ctx.settings.get("SLICE_VALUE_FILTERS", {}) or {}
+    cuts: List[Optional[str]] = [None] + list(ctx.cut_dimensions)
+    collapsed = collapse_frames(ctx, frames, period_col, period_filter)
+    table = build_kpi_table(ctx, _stack_roots_and_cuts(ctx, collapsed, roots, cuts), period_col, _COMBO_KEYS)
+    release_frames(collapsed)
+    ctx.progress.table_done(f"{len(roots)} roots x {len(cuts)} cuts")
     rows: List[dict] = []
-    for root_def in roots:
-        if root_def is None:
-            root_name, rf = "overall", frames
-        else:
-            root_name = root_def["root"]
-            rf = _filter_frames_for_dimension(
-                frames, root_def["dim_col"], {root_def["dim_col"]: [root_def["value"]]}
-            )
-        for cut_name, gk in cuts:
-            sf = _filter_frames_for_dimension(rf, gk[0], value_filters) if gk else rf
-            tbl = build_kpi_table(ctx, sf, period_col, gk, period_filter)
-            ctx.progress.table_done(f"{root_name} · {cut_name}")
-            for _, r in tbl.iterrows():
-                rec = {
-                    "period_type": period_type,
-                    "period": _period_label(period_type, r),
-                    "root": root_name,
-                    "dimension": cut_name,
-                    "dimension_value": ("ALL" if not gk else r[gk[0]]),
-                }
-                for m in metric_cols:
-                    rec[m] = r.get(m)
-                rows.append(rec)
+    for (root_pos, cut_pos), combo in table.groupby(["_root", "_dimension"]):
+        root_def, cut = roots[root_pos], cuts[cut_pos]
+        gk = [] if cut is None else ["_dimension_value"]
+        combo = combo.drop(columns=["_root", "_dimension", *([] if gk else ["_dimension_value"])])
+        for _, r in combo.sort_values([period_col] + gk).iterrows():
+            rec = {
+                "period_type": period_type,
+                "period": _period_label(period_type, r),
+                "root": "overall" if root_def is None else root_def["root"],
+                "dimension": "overall" if cut is None else cut,
+                "dimension_value": "ALL" if cut is None else r["_dimension_value"],
+            }
+            for m in metric_cols:
+                rec[m] = r.get(m)
+            rows.append(rec)
     return rows
 
 

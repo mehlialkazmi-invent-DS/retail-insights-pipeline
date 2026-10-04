@@ -11,9 +11,34 @@ from pyspark.sql import functions as F
 from kpi_pipeline.context import KPIContext
 from kpi_pipeline.filters import apply_group_population_filter, resolve_group_population_filter
 
-# One row's on-hand stock per measure, and the per-unit price column goods in transit is valued at.
+# One row's stock per measure: on-hand, and on-hand + goods in transit (derived per store row by
+# collapse_frames before the store rows are summed, since the valued ones are rounded per row).
 _ON_HAND = {"units": "inventory", "retail": "inventory_retail", "cost": "inventory_cost"}
+_WITH_GIT = {"units": "inventory_git", "retail": "inventory_retail_git", "cost": "inventory_cost_git"}
 _UNIT_PRICE = {"retail": "price_without_tax", "cost": "cogs"}
+
+# The frames build_kpi_table reads: collapse_frames' output (for kpi_long, stacked per root x cut by
+# kpi_long._stack_roots_and_cuts).
+KPI_FRAMES = ("scoped_daily", "sales_pairs", "inst_data", "lost_base", "dc_daily", "dc_inst")
+
+# collapse_frames, per metric frame: (the location column summed across, the additive measure columns).
+# Every other column of a frame is a collapse group key, so it must be the same on every store / warehouse
+# row of a product and day (product attributes, calendar, flags): a new additive per-store column must be
+# listed here, or the collapse would merge it as a key. The measures are float (noob daily-data); a decimal
+# measure would widen the sum of sums' precision.
+_COLLAPSE = {
+    "scoped_daily": (
+        "store_id",
+        (
+            "sales_revenue", "sales_quantity", "sales_cost", "inventory", "inventory_retail", "inventory_cost",
+            "git_quantity", "inventory_git", "inventory_retail_git", "inventory_cost_git",
+        ),
+    ),
+    "inst_data": ("store_id", ("stocked_pairs", "available_days")),
+    "lost_base": ("store_id", ("lost_sales", "sales_quantity_weekly", "TY_sales_quantity_weekly_corrected_lost_sales")),
+    "dc_daily": ("warehouse_id", ("inventory", "git_quantity", "inventory_git")),
+    "dc_inst": ("warehouse_id", ("dc_stocked_days", "dc_available_days", "dc_unblocked_days")),
+}
 
 # WOS family: (metric, measure of the store inventory behind it or None, sales column it divides by).
 # WOS_DC and WOS_TOTAL also add the DC inventory (_WOS_DC_METRICS).
@@ -48,12 +73,7 @@ def _per_unit(ctx: KPIContext, metric: str, numerator: str):
 
 def _stock(measure: str, with_git: bool):
     """One row's stock of ``measure`` (units / retail / cost): on-hand, or on-hand + goods in transit."""
-    if not with_git:
-        return F.col(_ON_HAND[measure])
-    units = F.col("inventory") + F.col("git_quantity")
-    if measure == "units":
-        return units
-    return F.round(units * F.col(_UNIT_PRICE[measure]), 2)
+    return F.col((_WITH_GIT if with_git else _ON_HAND)[measure])
 
 
 def _day_stock(ctx: KPIContext, metric: str, measure: str, real_flag: str):
@@ -113,46 +133,124 @@ def _store_day_stock(ctx: KPIContext, daily_scoped: DataFrame, keys: Sequence[st
     return frames
 
 
+def _filter_columns(ctx: KPIContext) -> set:
+    """The columns a root, a cut (value filter) or any metrics.population_filters entry filters on."""
+    population = ctx.settings.get("METRIC_POPULATION_FILTERS") or {}
+    return (
+        {root["dim_col"] for root in ctx.root_definitions}
+        | set(ctx.cut_dimensions)
+        | {dim for spec in population.values() for dim in (spec or {})}
+    )
+
+
+def _collapse(frame: DataFrame, location: str, measures: Sequence[str], filtered: set) -> DataFrame:
+    """``frame`` summed across ``location``: one row per value combination of every other column, its
+    ``measures`` summed (a sum of all-null stays null). Each collapsed row only merges rows identical in every
+    column a filter, gate, group key or distinct count downstream reads, so filtering / grouping it and then
+    summing equals doing so on the rows. Kept as is without the location column, or when a root / cut /
+    population filter reads the location or a measure (that filter must see the rows)."""
+    if location not in frame.columns or filtered & {location, *measures}:
+        return frame
+    keys = [c for c in frame.columns if c != location and c not in measures]
+    return frame.groupBy(*keys).agg(*[F.sum(m).alias(m) for m in measures])
+
+
+def _sales_rows(ctx: KPIContext, real_daily: DataFrame) -> DataFrame:
+    """The rows of the sales metrics (sales / AUR / AUC / total_inventory / distinct counts), which give every
+    period x slice its output row (the other families are left-joined onto it): the real daily rows, without
+    the blocked days only when every reported metric drops them, so a row survives while any metric reads
+    them."""
+    if set(ctx.settings["METRIC_COLS"]) <= set(ctx.settings["BLOCKED_SCOPE"]["metrics"]):
+        real_daily = real_daily.filter(~F.col("is_blocked"))
+    return real_daily
+
+
+def collapse_frames(
+    ctx: KPIContext, frames: Dict[str, DataFrame], period_col: str, period_filter
+) -> Dict[str, DataFrame]:
+    """The KPI_FRAMES of one period-framed (and, for comparable pairs, pair-restricted) frame set, cached:
+    every metric frame's ``period_filter`` rows summed across stores / warehouses to product level (_collapse),
+    plus sales_pairs for the store and pair counts. Release with context.release_frames.
+
+    Every row filter runs on the store rows first: period framing and the comparable restriction (the caller)
+    and ``period_filter`` here. The root / cut filters (kpi_long._stack_roots_and_cuts) and population filters
+    (compute_kpis) applied afterwards read product attributes, which the collapse keeps as group keys, so they
+    select exactly the same rows; one that reads a store / warehouse or a measure leaves the frames it would
+    see uncollapsed. Goods in transit valued at retail / cost is rounded per store row (as inventory_retail /
+    inventory_cost / sales_cost are), so it is derived before the sum. A frame left uncollapsed is a filter
+    of an already-cached pipeline frame and is not cached again.
+
+    sales_pairs: the distinct (product_id, store_id, is_blocked, ``period_col``, filtered columns) of the real
+    daily rows, from which distinct_store_count / distinct_pair_count count the same (product, store) set per
+    group as on the store rows.
+    """
+    filtered = _filter_columns(ctx)
+    units_git = F.col("inventory") + F.col("git_quantity")
+    framed = {key: frames[key].filter(period_filter) for key in _COLLAPSE}
+    framed["scoped_daily"] = (
+        framed["scoped_daily"]
+        .withColumn("inventory_git", units_git)
+        .withColumn("inventory_retail_git", F.round(units_git * F.col(_UNIT_PRICE["retail"]), 2))
+        .withColumn("inventory_cost_git", F.round(units_git * F.col(_UNIT_PRICE["cost"]), 2))
+    )
+    framed["dc_daily"] = framed["dc_daily"].withColumn("inventory_git", units_git)
+    collapsed = {}
+    for key in _COLLAPSE:
+        frame = _collapse(framed[key], *_COLLAPSE[key], filtered)
+        collapsed[key] = frame if frame is framed[key] else frame.cache()
+    pair_cols = dict.fromkeys(
+        ["product_id", "store_id", "is_blocked", period_col, *sorted(filtered & set(framed["scoped_daily"].columns))]
+    )
+    collapsed["sales_pairs"] = (
+        framed["scoped_daily"].filter(F.col("has_daily_row")).select(*pair_cols).distinct().cache()
+    )
+    return collapsed
+
+
+def _join_null_safe(left: DataFrame, right: DataFrame, keys: Sequence[str]) -> DataFrame:
+    """``left`` left-joined with ``right`` on ``keys``, a null key (a cut value kept by keep_null) matching
+    null, as when both sides were one aggregation."""
+    right = right.select(
+        *[F.col(k).alias(f"_r_{k}") for k in keys], *[c for c in right.columns if c not in keys]
+    )
+    on = [F.col(k).eqNullSafe(F.col(f"_r_{k}")) for k in keys]
+    return left.join(right, on, how="left").drop(*[f"_r_{k}" for k in keys])
+
+
 def compute_kpis(
-    ctx: KPIContext,
-    scoped_daily_in: DataFrame,
-    inst_in: DataFrame,
-    dc_daily_in: DataFrame,
-    dc_inst_in: DataFrame,
-    period_col: str,
-    group_keys: Sequence[str],
-    period_filter,
+    ctx: KPIContext, frames: Dict[str, DataFrame], period_col: str, group_keys: Sequence[str]
 ) -> DataFrame:
-    """KPI columns per (period_col, *group_keys) over the rows matching ``period_filter``.
+    """KPI columns per (period_col, *group_keys) of collapse_frames' frames.
 
     Each metric group (filters.METRIC_FILTER_GROUPS) applies its own metrics.population_filters on top of
-    the caller's root / cut restriction (a no-op without an entry).
+    the caller's root / cut restriction (a no-op without an entry). kpi_long's group keys label each row's
+    root x cut (kpi_long._stack_roots_and_cuts), so every group reads exactly one root x cut's rows; joins on
+    them are plain equi-joins (a NULL cut value matches nothing) except the pair counts' (_join_null_safe).
 
     blocked_scope.metrics: scoped_daily / dc_daily keep blocked days, flagged is_blocked; a metric in the
     list reads only the unblocked rows (_read_only / _day_stock), the others every row. The in-stock frames
     and lost sales's sales denominator dropped them when built.
 
     goods_in_transit.inventory_metrics: scoped_daily / dc_daily also carry GIT-only days (has_daily_row /
-    has_inventory_row False) and git_quantity. Sales and weighted-instock's sales weights read the real rows
-    only; an inventory metric reads on-hand on its real-row days, or on-hand + git_quantity on every day
-    when it is named.
+    has_inventory_row False) and the on-hand + goods in transit stock (_WITH_GIT). Sales and
+    weighted-instock's sales weights read the real rows only; an inventory metric reads on-hand on its
+    real-row days, or on-hand + goods in transit on every day when it is named.
+
+    The rows are product level (collapse_frames; store level for a frame whose filters read a store column),
+    with is_blocked / has_daily_row / has_inventory_row and every other column kept, so each gate and filter
+    reads them as it would the store rows.
     """
     group_keys = list(group_keys)
     keys = [period_col] + group_keys
     git_metrics = ctx.settings["GOODS_IN_TRANSIT"]["inventory_metrics"]
-    daily_scoped = scoped_daily_in.filter(period_filter)
-    inst = inst_in.filter(period_filter)
-    dc_daily = dc_daily_in.filter(period_filter)
-    dc_inst = dc_inst_in.filter(period_filter)
+    daily_scoped = frames["scoped_daily"]
+    inst = frames["inst_data"]
+    dc_daily = frames["dc_daily"]
+    dc_inst = frames["dc_inst"]
     # Real daily-data rows (no GIT-only days): the sales metrics' rows.
     real_daily = daily_scoped.filter(F.col("has_daily_row"))
 
-    # The sales rows give every period x slice its output row (the other families are left-joined onto it).
-    # They drop blocked days only when every reported metric does, so a row survives while any metric reads them.
-    sales_rows = real_daily
-    if set(ctx.settings["METRIC_COLS"]) <= set(ctx.settings["BLOCKED_SCOPE"]["metrics"]):
-        sales_rows = real_daily.filter(~F.col("is_blocked"))
-    sales_pop = apply_group_population_filter(sales_rows, "sales", ctx.settings)
+    sales_pop = apply_group_population_filter(_sales_rows(ctx, real_daily), "sales", ctx.settings)
     sales = sales_pop.groupBy(*keys).agg(
         F.sum(_read_only(ctx, "total_inventory", F.col("inventory"))).alias("total_inventory"),
         F.sum(_read_only(ctx, "total_sales_quantity", F.col("sales_quantity"))).alias("total_sales_quantity"),
@@ -162,20 +260,23 @@ def compute_kpis(
         F.countDistinct(_read_only(ctx, "distinct_product_count", F.col("product_id"))).alias(
             "distinct_product_count"
         ),
+    )
+    # Store and pair counts over the same rows, from sales_pairs; every sales group has a row there.
+    pairs_pop = apply_group_population_filter(_sales_rows(ctx, frames["sales_pairs"]), "sales", ctx.settings)
+    pair_counts = pairs_pop.groupBy(*keys).agg(
         F.countDistinct(_read_only(ctx, "distinct_store_count", F.col("store_id"))).alias("distinct_store_count"),
         F.countDistinct(
             _read_only(ctx, "distinct_pair_count", F.col("product_id")),
             _read_only(ctx, "distinct_pair_count", F.col("store_id")),
         ).alias("distinct_pair_count"),
     )
+    sales = _join_null_safe(sales, pair_counts, keys)
     if "total_inventory" in git_metrics:
         total_inventory_with_git = (
             apply_group_population_filter(daily_scoped, "sales", ctx.settings)
             .groupBy(*keys)
             .agg(
-                F.sum(
-                    _read_only(ctx, "total_inventory", F.col("inventory") + F.col("git_quantity"))
-                ).alias("total_inventory")
+                F.sum(_read_only(ctx, "total_inventory", _stock("units", True))).alias("total_inventory")
             )
         )
         sales = sales.drop("total_inventory").join(total_inventory_with_git, on=keys, how="left")
@@ -323,25 +424,14 @@ def build_kpi_table(
     frames: Dict[str, DataFrame],
     period_col: str,
     group_keys: Sequence[str],
-    period_filter,
 ) -> pd.DataFrame:
-    """Spark KPI aggregation joined with lost_sales_pct; returns a pandas table."""
+    """Spark KPI aggregation of collapse_frames' frames joined with lost_sales_pct; returns a pandas table."""
     group_keys = list(group_keys)
     keys = [period_col] + group_keys
-    kpis = compute_kpis(
-        ctx,
-        frames["scoped_daily"],
-        frames["inst_data"],
-        frames["dc_daily"],
-        frames["dc_inst"],
-        period_col,
-        group_keys,
-        period_filter,
-    )
+    kpis = compute_kpis(ctx, frames, period_col, group_keys)
     lost_base_pop = apply_group_population_filter(frames["lost_base"], "lost_sales", ctx.settings)
     lost_pct = (
         lost_base_pop
-        .filter(period_filter)
         .groupBy(*keys)
         .agg(
             F.sum("lost_sales").alias("_ls"),

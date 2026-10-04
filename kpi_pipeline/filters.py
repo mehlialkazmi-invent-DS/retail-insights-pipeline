@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Tuple
 
-from pyspark.sql import DataFrame
+from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 
 
@@ -41,9 +41,9 @@ def normalize_value_filter(spec) -> Dict[str, Any]:
     )
 
 
-def apply_value_filter(df: DataFrame, dim: str, spec) -> DataFrame:
-    """``df`` filtered on column ``dim`` by a value filter: a non-null value must pass include / exclude, a
-    NULL is kept only with keep_null (handled explicitly: ``isin`` / ``NOT isin`` are NULL on NULL)."""
+def value_filter_condition(dim: str, spec) -> Column:
+    """The rows a value filter keeps on column ``dim``: a non-null value must pass include / exclude, a NULL
+    is kept only with keep_null (handled explicitly: ``isin`` / ``NOT isin`` are NULL on NULL)."""
     norm = normalize_value_filter(spec)
     col = F.col(dim)
 
@@ -56,7 +56,12 @@ def apply_value_filter(df: DataFrame, dim: str, spec) -> DataFrame:
     keep = col.isNotNull() & value_match
     if norm["keep_null"]:
         keep = keep | col.isNull()
-    return df.filter(keep)
+    return keep
+
+
+def apply_value_filter(df: DataFrame, dim: str, spec) -> DataFrame:
+    """``df`` restricted to the rows a value filter keeps on column ``dim`` (value_filter_condition)."""
+    return df.filter(value_filter_condition(dim, spec))
 
 
 # Metric columns computed in one aggregation in metrics.compute_kpis: a metrics.population_filters entry

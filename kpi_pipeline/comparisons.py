@@ -331,19 +331,22 @@ def build_scope_diff(ctx: KPIContext) -> None:
     Annual tab's years."""
     from pyspark.sql import functions as F
 
+    from kpi_pipeline.context import release_frames
     from kpi_pipeline.kpi_long import _period_frames
-    from kpi_pipeline.metrics import build_kpi_table
+    from kpi_pipeline.metrics import build_kpi_table, collapse_frames
 
     scope_diff_metrics = ctx.settings["SCOPE_DIFF_METRICS"]
+
+    def annual(frames: Dict[str, Any], label: str) -> pd.DataFrame:
+        collapsed = collapse_frames(ctx, _period_frames(ctx, frames, "annual"), "Year", F.lit(True))
+        table = build_kpi_table(ctx, collapsed, "Year", [])[["Year"] + scope_diff_metrics]
+        release_frames(collapsed)
+        ctx.progress.table_done(label)
+        return table
+
     ctx.progress.section = "annual"
-    scope_annual = build_kpi_table(
-        ctx, _period_frames(ctx, ctx.scope_frames, "annual"), "Year", [], F.lit(True)
-    )[["Year"] + scope_diff_metrics]
-    ctx.progress.table_done("scope table only")
-    score_annual = build_kpi_table(
-        ctx, _period_frames(ctx, ctx.score_frames, "annual"), "Year", [], F.lit(True)
-    )[["Year"] + scope_diff_metrics]
-    ctx.progress.table_done("score only")
+    scope_annual = annual(ctx.scope_frames, "scope table only")
+    score_annual = annual(ctx.score_frames, "score only")
     merged = scope_annual.merge(score_annual, on="Year", suffixes=("_scope", "_score"))
     records = []
     for _, r in merged.iterrows():
