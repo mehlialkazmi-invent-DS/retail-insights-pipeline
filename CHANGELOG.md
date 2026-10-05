@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-#### Metric Details tab shows how the run was built - 2026-10-05
+#### Methodology tab: how the report is built, for the client - 2026-10-05
 
-The Metric Details tab now ends with a generated "How this run was built" section: a table of what applies to every metric (sales basis, daily-data filter, scope, window, roots and cuts, blocked scope, goods in transit, like-for-like) and a per-metric table of source, filters and conditions, blocked days dropped and goods in transit added. `html_report._run_logic_html` reads it from the run's settings, so every report carries it with no config and it follows every setting change. `_metric_details_html` takes the settings. Checked with a stubbed pyspark rendering of the section from `tbretail_config` (gross basis, ytd like-for-like); not rendered from a real run.
+The report has a new **Methodology** tab before Metric Details. It shows, in business wording and generated from the run's settings (`html_report._methodology_html`), cards for what applies to the whole report (sales basis, what is included, reporting period, views, blocked days, stock in transit, in-stock rules, lost sales, like-for-like) and a table of what each metric is based on, its filters and conditions, and whether blocked days are removed and stock in transit is included. Each line comes from a fixed sentence switched on by its setting, so a new rule needs a new sentence in `_instock_rules` / `_methodology_cards` / `_metric_basis`. The Metric Details tab is restyled (centered, fixed column widths, no empty column) and its technical wording (table names, filter expressions, "UI blocked scope") is replaced by business wording; `_extra_tab_css` and `extra_tabs` replace the single-tab plumbing. Checked by rendering the tabs from `tbretail_config` (gross basis, ytd like-for-like) in Chrome; not rendered from a real run.
 
 **Affected:** `kpi_pipeline/html_report.py`, `docs/HTML_REPORT.md`, `docs/LOGIC_FLOW.md`, `.claude/commands/retail-insights-help.md`
 
