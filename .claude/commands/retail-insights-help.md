@@ -709,7 +709,7 @@ Each root's period tabs (seven top-level tabs when it's the only/outermost level
 - **Half** (only with `fiscal_calendar.half_periods`) — KPI table by half, **value trend only** (most recent N halves, default 4, complete halves only) (+ comparable `half`, one block per half number, when enabled)
 - **Monthly** — KPI table by month, **value trend only** (most recent N months, default 5, and only fully-elapsed months — see §3.1) — no comparison table. Column header text is the real calendar month (e.g. "2026-Aug"), which can differ from the fiscal month *number* underlying the grouping — see §3.1's fiscal-calendar note.
 - **Weekly** — KPI table for the **most recent N fiscal weeks** (default 5; sorted by `week_start_date`), **value trend only** — no comparison table
-- **Metric Details** — plain-English definition, store scope, and formula for every active metric (single root only; a peer of the root tabs, not the period tabs, when there's more than one root)
+- **Metric Details** — plain-English definition, store scope, and formula for every active metric, plus an auto-generated "How this run was built" section (common settings, then each metric's source, filters, blocked-days and GIT gates; `html_report._run_logic_html`) (single root only; a peer of the root tabs, not the period tabs, when there's more than one root)
 
 Within each period tab, navigation is three levels:
 1. **Period** (horizontal) — Annual / YTD / Quarter / Half / Monthly / Weekly

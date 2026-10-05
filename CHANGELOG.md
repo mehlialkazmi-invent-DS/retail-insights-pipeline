@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+#### Metric Details tab shows how the run was built - 2026-10-05
+
+The Metric Details tab now ends with a generated "How this run was built" section: a table of what applies to every metric (sales basis, daily-data filter, scope, window, roots and cuts, blocked scope, goods in transit, like-for-like) and a per-metric table of source, filters and conditions, blocked days dropped and goods in transit added. `html_report._run_logic_html` reads it from the run's settings, so every report carries it with no config and it follows every setting change. `_metric_details_html` takes the settings. Checked with a stubbed pyspark rendering of the section from `tbretail_config` (gross basis, ytd like-for-like); not rendered from a real run.
+
+**Affected:** `kpi_pipeline/html_report.py`, `docs/HTML_REPORT.md`, `docs/LOGIC_FLOW.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-05
+
 #### `instock.daily.sales_counts_as_stocked` enables a day with sales but zero inventory to count as stocked - 2026-10-05
 
 New boolean config key `instock.daily.sales_counts_as_stocked` (default `False`) in both `config.py` and `tbretail_config.py`. When `True`, a counted day with `sales_quantity > 0` and `inventory <= 0` counts as an in-stock day for the daily in-stock metric (`in_stock_rate`, `weighted_instock_rate`), because the sale proves stock existed on that date. The day-end inventory snapshot does not capture intra-day sales, so this covers that gap. When `False` (default), the behavior is byte-identical to today: only days with `inventory > 0` (after `usable_only` filter) count as stocked. The flag runs entirely on Spark and takes effect when enabled at pipeline run time, with no retroactive scope or date-range impact. Not run on Spark yet.

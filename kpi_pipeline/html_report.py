@@ -751,6 +751,8 @@ _CSS_BASE = """\
   }
   .scope-all     { background: #eff6ff; color: #1e40af; }
   .scope-service { background: #ecfdf5; color: #065f46; }
+  .logic-table td { text-align: left; }
+  .logic-title { margin: 28px 0 6px; font-size: 1rem; }
   .def-table .formula {
     font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
     font-size: .75rem;
@@ -1510,6 +1512,7 @@ def _metric_details_html(
     metric_cols: List[str],
     labels: Dict[str, str],
     defs: Dict[str, Dict[str, str]],
+    settings: Dict[str, Any],
 ) -> str:
     head = (
         "<thead><tr>"
@@ -1537,6 +1540,158 @@ def _metric_details_html(
         "<div class='table-wrap'>"
         f"<table class='def-table'>{head}<tbody>{''.join(rows)}</tbody></table>"
         "</div>"
+        + _run_logic_html(metric_cols, labels, settings)
+    )
+
+
+_LOGIC_SALES_METRICS = ("total_sales_quantity", "total_sales_revenue", "AUR", "AUC", "distinct_product_count",
+                        "distinct_store_count", "distinct_pair_count")
+_LOGIC_DC_METRICS = ("dc_mean_stock", "total_mean_stock", "WOS_DC", "WOS_TOTAL")
+
+
+def _filters_text(filters: Any) -> str:
+    return " AND ".join(filters) if filters else "none"
+
+
+def _run_common_rows(settings: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """(item, text) rows of what applies to every metric of this run, all read from the settings."""
+    scope = settings["SCOPE"]
+    blocked = settings["BLOCKED_SCOPE"]
+    git = settings["GOODS_IN_TRANSIT"]
+    gross = settings["SALES_BASIS"] == "gross"
+    rows: List[Tuple[str, str]] = [
+        (
+            "Sales basis",
+            "gross: operation/transactional_sales rows with " + _filters_text(settings["INPUT_FILTERS"].get("transactional_sales"))
+            + ", before returns, every transactional day" if gross
+            else "net: noob/daily-data sales, net of returns",
+        ),
+        ("Daily-data filter", _filters_text(settings["INPUT_FILTERS"]["daily_data"])),
+        (
+            "Scope",
+            f"operation/scope solution {', '.join(map(str, scope['solution_id']))} at {scope['grain']} grain, {scope['time']}"
+            + ("; rolled to the family main" if scope["roll_to_family_main"] else "")
+            + ("; active products only" if scope["active_only"] else ""),
+        ),
+        (
+            "Window",
+            f"{settings['EFFECTIVE_REPORT_START_DATE']} to {settings['REPORT_END_DATE']}; "
+            + ("YTD to the latest day, other tabs complete periods only" if settings["REPORT_END_MODE"] == "latest_day"
+               else "complete months"),
+        ),
+        (
+            "Roots and cuts",
+            "roots: Overall" + "".join(
+                f", {settings['HTML_REPORT_ROOT_LABELS'].get(root, root)}"
+                for spec in settings["ROOT_SPECS"] for root in spec["root_values"].values()
+            )
+            + "; cuts: " + ", ".join(
+                settings["HTML_REPORT_DIMENSION_LABELS"].get(dim, dim)
+                for dim in settings["SLICE_DIMENSIONS"] + list(settings["DERIVED_SLICE_DIMENSIONS"])
+            ),
+        ),
+    ]
+    if blocked["path"] is not None:
+        rows.append((
+            "Blocked scope",
+            f"UI blocks of store solution {', '.join(map(str, blocked['solution_id']))}"
+            + (f" and DC solution {', '.join(map(str, blocked['dc_solution_id']))}" if blocked["dc_solution_id"] else "")
+            + f", rule {blocked['rule']}; dropped only from the metrics marked below",
+        ))
+    if git["inventory_metrics"] or git["store_instock"]:
+        rows.append(("Goods in transit", f"snapshot shifted {git['date_shift_days']} day(s), rolled to the family main; added only to the metrics marked below"))
+    if settings["COMPARABLE_PAIRS_ENABLED"]:
+        rows.append((
+            "Like-for-like",
+            f"kinds {', '.join(settings['COMPARABLE_KINDS'])}; pairs at {settings['COMPARABLE_PAIRS_GRAIN']} grain present on "
+            f"{settings['COMPARABLE_PAIRS_PAIR_DAYS']} days in every year",
+        ))
+    return rows
+
+
+def _instock_conditions(settings: Dict[str, Any]) -> str:
+    scope = settings["SCOPE"]
+    if settings["INSTOCK_METHOD"] != "daily":
+        return f"in-stock method {settings['INSTOCK_METHOD']}"
+    cfg = settings["INSTOCK_DAILY"]
+    stocked = "inventory > 0"
+    if cfg["sales_counts_as_stocked"]:
+        stocked += " or sales > 0"
+    if settings["GOODS_IN_TRANSIT"]["store_instock"]:
+        stocked += " or store goods in transit > 0"
+    parts = [
+        f"stocked day = {stocked}",
+        f"count start: {cfg['count_start']} (searched from {cfg['history_start']})",
+        "pairs without a daily-data row dropped" if cfg["require_daily_data"] else "",
+        "unusable days removed" if cfg["usable_only"] else "",
+        f"stores removed: {_filters_text(cfg['input_filters'])}" if cfg["input_filters"] else "",
+        "stores where only a sub-item is assorted removed" if scope["instock_main_eligible_only"] else "",
+        "sizes outside a supersession removed" if scope["instock_exclude_unsuperseded_sizes"] else "",
+    ]
+    return "; ".join(p for p in parts if p)
+
+
+def _metric_logic_row(metric: str, settings: Dict[str, Any]) -> Tuple[str, str, str, str]:
+    """(source, conditions, blocked days, goods in transit) of one metric under the run's settings."""
+    gross = settings["SALES_BASIS"] == "gross"
+    blocked_metrics = settings["BLOCKED_SCOPE"]["metrics"] if settings["BLOCKED_SCOPE"]["path"] is not None else []
+    git = settings["GOODS_IN_TRANSIT"]
+    population = settings["METRIC_POPULATION_FILTERS"].get(metric, {})
+    conditions = [
+        f"{dim} {'excludes' if 'exclude' in rule else 'only'} {', '.join(map(str, rule.get('exclude') or rule.get('include')))}"
+        for dim, rule in population.items()
+    ]
+    sales_source = "transactional_sales (gross)" if gross else "daily-data (net)"
+    if metric in _LOGIC_SALES_METRICS:
+        source = sales_source
+    elif metric in _LOGIC_DC_METRICS:
+        source = "daily-data + inventory_warehouse" if metric in ("total_mean_stock", "WOS_TOTAL") else "inventory_warehouse"
+        if metric in ("WOS_DC", "WOS_TOTAL"):
+            source += f"; sales from {sales_source}"
+    elif metric in ("in_stock_rate", "weighted_instock_rate"):
+        source = "daily-data store-days" if settings["INSTOCK_METHOD"] == "daily" else settings["INSTOCK_METHOD"]
+        conditions.insert(0, _instock_conditions(settings))
+    elif metric == "dc_in_stock_rate":
+        source = "inventory_warehouse day grid"
+    elif metric == "lost_sales_pct":
+        source = f"report_dfu lost sales; sales from {sales_source}"
+        if settings["LOST_SALES_SALES_FILTER"]:
+            conditions.insert(0, f"sales side excludes: {_filters_text(settings['LOST_SALES_SALES_FILTER'])}")
+    else:
+        source = "daily-data" + (f"; sales from {sales_source}" if gross and metric in _SALES_BASIS_METRICS else "")
+    if metric in git["inventory_metrics"]:
+        git_text = "yes (" + _GIT_METRIC_NOTES[metric] + ")"
+    elif metric in ("in_stock_rate", "weighted_instock_rate"):
+        git_text = "yes (store)" if git["store_instock"] else "no"
+    elif metric == "dc_in_stock_rate":
+        git_text = "yes (DC)" if git["dc_instock"] else "no"
+    else:
+        git_text = "no"
+    return source, "; ".join(conditions) or "none", "yes" if metric in blocked_metrics else "no", git_text
+
+
+def _run_logic_html(metric_cols: List[str], labels: Dict[str, str], settings: Dict[str, Any]) -> str:
+    """The "How this run was built" section of Metric Details: what applies to every metric, then each reported
+    metric's source, conditions, blocked-days and goods-in-transit gates. Generated from the run's settings."""
+    common = "".join(
+        f"<tr><td>{_esc(item)}</td><td>{_esc(text)}</td></tr>" for item, text in _run_common_rows(settings)
+    )
+    per_metric = "".join(
+        "<tr>" + f"<td>{_esc(_metric_display_label(metric, labels))}</td>"
+        + "".join(f"<td>{_esc(cell)}</td>" for cell in _metric_logic_row(metric, settings)) + "</tr>"
+        for metric in metric_cols
+    )
+    return (
+        "<h3 class='logic-title'>How this run was built</h3>"
+        "<p class='cmp-label'>Applies to every metric</p>"
+        "<div class='table-wrap'><table class='def-table logic-table'>"
+        "<thead><tr><th>Item</th><th>Setting</th></tr></thead>"
+        f"<tbody>{common}</tbody></table></div>"
+        "<p class='cmp-label'>Per metric</p>"
+        "<div class='table-wrap'><table class='def-table logic-table'>"
+        "<thead><tr><th>Metric</th><th>Source</th><th>Filters and conditions</th><th>Blocked days dropped</th>"
+        "<th>Goods in transit added</th></tr></thead>"
+        f"<tbody>{per_metric}</tbody></table></div>"
     )
 
 
@@ -1739,7 +1894,7 @@ def render_kpi_html(
 
     # Unwrapped: each call site wraps it once in the panel class its CSS shows (a nested .top-panel stays
     # hidden).
-    metric_details_html = _metric_details_html(metric_cols, labels, defs)
+    metric_details_html = _metric_details_html(metric_cols, labels, defs, settings)
 
     if len(roots) == 1:
         root = roots[0]
