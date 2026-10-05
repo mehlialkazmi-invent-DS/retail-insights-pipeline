@@ -246,6 +246,7 @@ Where `in_stock_rate` (and the in-stock side of `weighted_instock_rate`) comes f
         "require_daily_data": True,
         "history_start": "2024-01-21",  # None = window start
         "usable_only": True,
+        "sales_counts_as_stocked": False,  # a day with sales > 0 but inventory <= 0 counts as stocked
         "input_filters": ["store_id NOT IN (829, 639, 917)"],
     },
     "weekly_source": {
@@ -275,7 +276,7 @@ Where `in_stock_rate` (and the in-stock side of `weighted_instock_rate`) comes f
 2. `get_instock_daily_raw` reads daily-data **without** `input_filters.daily_data` (usually `usable = 1`, which would hide the unusable days this method subtracts), from `history_start` to `REPORT_END_DATE` (filtered on the raw date column before `to_date` for Delta pruning), restricted to those pairs, blocked days removed when `in_stock_rate` is in [`blocked_scope.metrics`](#blocked_scope), cached. It is not family-rolled (daily-data is already rolled to the family main upstream). The run raises unless daily-data's latest date for those pairs reaches `REPORT_END_DATE` (later days would count as out of stock).
 3. Count start: `first_daily_row` (first daily row from `history_start`), `scope_start` (the scope table's start) or `earliest` of the two, clipped to the window start. `require_daily_data` drops pairs without any daily row.
 4. Store-days = every day from the count start to `REPORT_END_DATE` (a day with no daily row is out of stock) minus blocked days (when `in_stock_rate` is in `blocked_scope.metrics`) minus, with `usable_only`, days with `usable != 1`.
-5. In-stock day = `inventory > 0` on a usable day; with `goods_in_transit.store_instock` also a day with store GIT (`destination_type = 0`, `quantity > 0`, family main, shifted by `date_shift_days`); united (OH OR GIT), never summed; blocked and unusable days drop out too.
+5. In-stock day = a usable day with `inventory > 0`, or (with `sales_counts_as_stocked`) a day with `sales_quantity > 0` even if `inventory <= 0`; with `goods_in_transit.store_instock` also a day with store GIT (`destination_type = 0`, `quantity > 0`, family main, shifted by `date_shift_days`); united (OH OR sales OR GIT), never summed; blocked and unusable days drop out too.
 
 The output has the shape of the weekly `inst_data` (`stocked_pairs` / `available_days` per pair-week plus product dims), so `compute_kpis`, population filters and comparable pairs work unchanged; day counts come from fiscal week bounds. Under `latest_day` the week containing day K is two rows per pair, carrying `last_day_index` ([Latest-day report end](LOGIC_FLOW.md#latest-day-report-end-report_end--latest_day)).
 

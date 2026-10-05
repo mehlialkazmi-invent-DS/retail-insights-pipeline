@@ -529,10 +529,10 @@ def read_goods_in_transit_source(spark: SparkSession, settings: Dict[str, Any]) 
 
 
 def get_instock_daily_raw(ctx) -> DataFrame:
-    """noob/daily-data for the daily in-stock metric: product_id, store_id, date, inventory and is_usable
-    (usable == 1; null is unusable), from instock.daily.history_start to the report end, filtered on the
-    raw date column so Delta file pruning applies. Not cached here (build_instock_daily caches it after
-    its scope join).
+    """noob/daily-data for the daily in-stock metric: product_id, store_id, date, inventory, is_usable
+    (usable == 1; null is unusable), and has_sales (sales_quantity > 0), from instock.daily.history_start
+    to the report end, filtered on the raw date column so Delta file pruning applies. Not cached here
+    (build_instock_daily caches it after its scope join).
 
     Not get_daily_data_raw: input_filters.daily_data typically drops unusable days, which the daily
     in-stock method must see to take them out of the store-days. Not rolled to the family main:
@@ -551,6 +551,7 @@ def get_instock_daily_raw(ctx) -> DataFrame:
             F.to_date(F.col(date_col)).alias("date"),
             "inventory",
             (F.coalesce(F.col("usable"), F.lit(0)) == 1).alias("is_usable"),
+            (F.coalesce(F.col("sales_quantity"), F.lit(0)) > 0).alias("has_sales"),
         )
     )
 

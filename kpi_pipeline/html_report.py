@@ -358,6 +358,8 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
     cfg = settings["INSTOCK_DAILY"]
     if settings["INSTOCK_METHOD"] == "daily":
         in_stock = "on-hand inventory > 0"
+        if cfg["sales_counts_as_stocked"]:
+            in_stock += " or sales > 0 even if inventory <= 0"
         if goods_in_transit["store_instock"]:
             in_stock += " or store goods in transit > 0"
         blocked_excluded = settings["BLOCKED_SCOPE"]["path"] is not None and "in_stock_rate" in blocked_metrics

@@ -441,7 +441,8 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
     require_daily_data drops pairs without a daily row. A day without a daily row counts as out of stock.
 
     Removed from the store-days: blocked days when in_stock_rate is in blocked_scope.metrics, and days with
-    usable != 1 when usable_only. An in-stock day is a usable day with inventory > 0 or, with
+    usable != 1 when usable_only. An in-stock day is a usable day with inventory > 0, or (with
+    sales_counts_as_stocked) a day with sales_quantity > 0 even if inventory <= 0, or, with
     goods_in_transit.store_instock, store goods in transit (united per day, never summed). Store-days per
     pair-week come from week bounds, not from exploding every pair-day. weighted_instock_rate reads this
     same frame.
@@ -510,7 +511,10 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
     if cfg["usable_only"]:
         unusable_days = counted_daily.filter(~F.col("is_usable")).select(*day_keys).distinct()
 
-    oh_days = counted_daily.filter(F.col("inventory") > 0)
+    instock_condition = F.col("inventory") > 0
+    if cfg["sales_counts_as_stocked"]:
+        instock_condition = instock_condition | F.col("has_sales")
+    oh_days = counted_daily.filter(instock_condition)
     if cfg["usable_only"]:
         oh_days = oh_days.filter(F.col("is_usable"))
     in_stock_days = oh_days.select(*day_keys).distinct()

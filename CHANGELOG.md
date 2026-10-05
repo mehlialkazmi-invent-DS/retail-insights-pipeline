@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+#### `instock.daily.sales_counts_as_stocked` enables a day with sales but zero inventory to count as stocked - 2026-10-05
+
+New boolean config key `instock.daily.sales_counts_as_stocked` (default `False`) in both `config.py` and `tbretail_config.py`. When `True`, a counted day with `sales_quantity > 0` and `inventory <= 0` counts as an in-stock day for the daily in-stock metric (`in_stock_rate`, `weighted_instock_rate`), because the sale proves stock existed on that date. The day-end inventory snapshot does not capture intra-day sales, so this covers that gap. When `False` (default), the behavior is byte-identical to today: only days with `inventory > 0` (after `usable_only` filter) count as stocked. The flag runs entirely on Spark and takes effect when enabled at pipeline run time, with no retroactive scope or date-range impact. Not run on Spark yet.
+
+**Affected:** `kpi_pipeline/inputs.py`, `kpi_pipeline/pipeline.py`, `kpi_pipeline/html_report.py`, `config.py`, `tbretail_config.py`, `docs/CONFIG.md`, `docs/LOGIC_FLOW.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-05
+
 #### `sales_basis = "gross"` counts every transactional day (sales-only days) - 2026-10-04
 
 Gross sales were left-joined onto the daily-data rows, so a transactional day with no daily-data row (none exists, or `input_filters.daily_data` removed it, e.g. `usable = 1`) lost its sales. `inputs._with_gross_sales` now full-outer-joins: such a day becomes a row with inventory 0 and `gross_only` True, and `pipeline.build_scoped_daily` turns the flag into three row flags: `has_daily_row` (False on a sales-only day, so the inventory metrics still read only daily-data days), `has_sales_row` (daily rows and sales-only days) and `has_stock_row` (False on a sales-only day without goods in transit, so it never adds a zero-stock day to the goods-in-transit day averages; `metrics._day_stock` takes it as `stock_flag`). The sales metrics (sales units / revenue, `AUR`, `AUC`, WOS / turnover sales, weighted in-stock weights, distinct counts, `sales_pairs`, the lost-sales denominator, comparable-pair presence) read `has_sales_row`. The added days get the family-main roll-up, scope and the active filter, but no `usable = 1`, ECOM or blocked-day removal; goods in transit that the daily-data filter removed stay removed on those days. `lost_sales_source.sales_filter` still narrows the lost-sales denominator. On the civil calendar a sales-only day takes its native week from the daily-data rows of the same date (`_with_gross_sales`), and `fiscal.build_time_grain_from_daily_data` ignores `gross_only` rows, so a window date with no daily-data row still raises as under `net`; the fiscal calendar needs neither. `"net"` is unchanged. Gross totals change (they are no longer limited to daily-data days): use `output.save_mode = "full_refresh"`. Not run on Spark yet.

@@ -202,6 +202,7 @@ CONFIG: Dict[str, Any] = {
             "require_daily_data": True,  # drop pairs with no daily-data row at all
             "history_start": "2024-02-04",  # first day searched for a pair's first daily row
             "usable_only": True,  # usable != 1 days leave the store-days and the in-stock days
+            "sales_counts_as_stocked": False,  # a day with sales_quantity > 0 but inventory <= 0 counts as stocked
             "input_filters": ["store_id NOT IN (829, 639, 917)"],  # ECOM stores leave in-stock only
         },
         "weekly_source": {
@@ -858,6 +859,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "require_daily_data": bool(instock_daily_cfg["require_daily_data"]),
         "history_start": datetime.date.fromisoformat(history_start_raw) if history_start_raw else None,
         "usable_only": bool(instock_daily_cfg["usable_only"]),
+        "sales_counts_as_stocked": bool(instock_daily_cfg["sales_counts_as_stocked"]),
         "input_filters": list(instock_daily_cfg["input_filters"]),
     }
     if daily_instock["count_start"] not in ("first_daily_row", "scope_start", "earliest"):
