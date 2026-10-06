@@ -798,6 +798,17 @@ _CSS_BASE = """\
     text-transform: uppercase;
     color: var(--muted);
   }
+  .method-heading-gap { margin-top: 30px; }
+  .method-path { margin-left: 10px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--ink-soft); }
+  .method-code {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 6px;
+    background: #f4f7fb;
+    color: var(--ink-soft);
+    font-size: .76rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
   table.method-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: .8125rem; }
   .method-table th, .method-table td { padding: 10px 14px; border-bottom: 1px solid #eef2f8; text-align: center; vertical-align: middle; line-height: 1.45; }
   .method-table thead th {
@@ -1785,7 +1796,33 @@ def _metric_basis(metric: str, settings: Dict[str, Any]) -> Tuple[str, List[str]
     return based_on, filters, blocked_on, git_on
 
 
-def _methodology_html(metric_cols: List[str], labels: Dict[str, str], settings: Dict[str, Any]) -> str:
+def _coverage_html(coverage: List[Dict[str, Any]]) -> str:
+    """The Methodology tab's data section: per source its table, the first and last date of each measure and the
+    input filters in force, as inputs.collect_data_coverage found them."""
+    rows = ""
+    for source in coverage:
+        path = f" <span class='method-path'>{_esc(source['path'])}</span>" if source["path"] else ""
+        rows += f"<tr class='method-group'><td colspan='3'>{_esc(source['title'])}{path}</td></tr>"
+        for label, first, last in source["rows"]:
+            rows += f"<tr><td>{_esc(label)}</td><td>{_esc(first) if first is not None else '—'}</td><td>{_esc(last) if last is not None else '—'}</td></tr>"
+        if source["filters"]:
+            code = "".join(f"<div><code class='method-code'>{_esc(f)}</code></div>" for f in source["filters"])
+            rows += f"<tr><td>Filters applied</td><td colspan='2'>{code}</td></tr>"
+        else:
+            rows += "<tr><td>Filters applied</td><td colspan='2'>None</td></tr>"
+        for note in source["notes"]:
+            rows += f"<tr><td>Note</td><td colspan='2'>{_esc(note)}</td></tr>"
+    return (
+        "<h4 class='method-heading method-heading-gap'>Data available, by source (for checking)</h4>"
+        "<div class='table-wrap'><table class='method-table'>"
+        "<thead><tr><th>Data</th><th>First date</th><th>Last date</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></div>"
+    )
+
+
+def _methodology_html(
+    metric_cols: List[str], labels: Dict[str, str], settings: Dict[str, Any], coverage: Optional[List[Dict[str, Any]]] = None
+) -> str:
     """The Methodology tab: how the numbers are built, for the client. Cards of what applies to the whole
     report, then per metric what it is based on and which adjustments it carries. Generated from the settings."""
     cards = "".join(
@@ -1815,7 +1852,9 @@ def _methodology_html(metric_cols: List[str], labels: Dict[str, str], settings: 
         "<div class='table-wrap'><table class='method-table'>"
         "<thead><tr><th>Metric</th><th>Based on</th><th>Filters and conditions</th><th>Blocked days removed</th>"
         "<th>Stock in transit included</th></tr></thead>"
-        f"<tbody>{''.join(groups)}</tbody></table></div></div>"
+        f"<tbody>{''.join(groups)}</tbody></table></div>"
+        + (_coverage_html(coverage) if coverage else "")
+        + "</div>"
     )
 
 
@@ -2019,7 +2058,7 @@ def render_kpi_html(
     # Unwrapped: each call site wraps it once in the panel class its CSS shows (a nested .top-panel stays
     # hidden).
     metric_details_html = _metric_details_html(metric_cols, labels, defs)
-    methodology_html = _methodology_html(metric_cols, labels, settings)
+    methodology_html = _methodology_html(metric_cols, labels, settings, getattr(ctx, "data_coverage", None))
     extra_tabs = [("methodology", "Methodology", methodology_html), ("details", "Metric Details", metric_details_html)]
 
     if len(roots) == 1:

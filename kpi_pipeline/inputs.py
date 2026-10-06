@@ -528,6 +528,141 @@ def read_goods_in_transit_source(spark: SparkSession, settings: Dict[str, Any]) 
     return spark.read.format("delta").load(path)
 
 
+def _span_rows(df: DataFrame, spans: List[tuple]) -> List[tuple]:
+    """(label, first, last) per (label, column, condition) span of df, from one aggregation; a span with no row
+    has first and last None. A column name is read as a date; a Column expression is used as it is."""
+    aggs = []
+    for index, (_, column, condition) in enumerate(spans):
+        parsed = F.to_date(F.col(column)) if isinstance(column, str) else column
+        value = parsed if condition is None else F.when(condition, parsed)
+        aggs += [F.min(value).alias(f"first_{index}"), F.max(value).alias(f"last_{index}")]
+    bounds = df.agg(*aggs).first()
+    return [(label, bounds[f"first_{i}"], bounds[f"last_{i}"]) for i, (label, _, _) in enumerate(spans)]
+
+
+def _kept_condition(expressions: List[str]):
+    kept = F.lit(True)
+    for expr in expressions:
+        if expr.strip():
+            kept = kept & F.coalesce(F.expr(expr), F.lit(False))
+    return kept
+
+
+def collect_data_coverage(ctx) -> List[Dict[str, Any]]:
+    """What data each source holds and over which dates, for the report's Methodology tab (debugging): per source
+    its table, the (first, last) date of each measure it carries, and the input filters in force. One
+    aggregation per dated source, over the whole table (not only the report window), so the dates show what the
+    source offers, not only what the report uses. Sources that are switched off are left out; the scope has
+    dates only when it is weekly (a daily scope is one scope applied back over the whole window).
+    """
+    s = ctx.settings
+    spark = ctx.spark
+    sources: List[Dict[str, Any]] = []
+
+    def add(title: str, path: Optional[str], rows: List[tuple], filters: List[str], notes: Optional[List[str]] = None):
+        sources.append({"title": title, "path": path, "rows": rows, "filters": filters, "notes": notes or []})
+
+    window = (s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"])
+    add("Report window", None, [("Window the report covers", *window)], [],
+        [f"Run as of {s['AS_OF_DATE']}; report end mode {s['REPORT_END_MODE']}."])
+
+    date_col = s["DAILY_TIME_COLUMNS"]["date"]
+    daily_filters = _input_filters(s, "daily_data")
+    kept = _kept_condition(daily_filters)
+    daily = spark.read.format("delta").load(s["PATH_DAILY_DATA"])
+    add(
+        "Daily data", s["PATH_DAILY_DATA"],
+        _span_rows(daily, [
+            ("Every row in the table", date_col, None),
+            ("Rows kept by the filters", date_col, kept),
+            ("Sales (units above 0), kept rows", date_col, kept & (F.col("sales_quantity") > 0)),
+            ("Inventory recorded, kept rows", date_col, kept & F.col("inventory").isNotNull()),
+        ]),
+        daily_filters,
+        ["Sales and inventory come from this table."] if s["SALES_BASIS"] == "net"
+        else ["Sales basis is gross: sales come from transactional sales (below); inventory comes from this table."],
+    )
+
+    if s["SALES_BASIS"] == "gross":
+        filters = _input_filters(s, "transactional_sales")
+        transactional = spark.read.format("delta").load(s["PATH_TRANSACTIONAL_SALES"])
+        add("Transactional sales (gross sales)", s["PATH_TRANSACTIONAL_SALES"],
+            _span_rows(transactional, [("Every row in the table", "date", None),
+                                       ("Rows kept by the filters", "date", _kept_condition(filters))]),
+            filters)
+
+    lost_sales_filters = _input_filters(s, "lost_sales")
+    lost_sales_col = s["LOST_SALES_COLUMN_MAP"]["lost_sales_col"]
+    lost_sales = read_lost_sales_source(spark, s, quiet=True)
+    add("Lost sales", s["PATH_LOST_SALES"],
+        _span_rows(lost_sales, [("Weeks kept by the filters", "week_start_date", None),
+                                ("Weeks with a lost-sales value", "week_start_date", F.col(lost_sales_col).isNotNull())]),
+        lost_sales_filters,
+        [f"Lost-sales percentage divides by sales narrowed by: {'; '.join(s['LOST_SALES_SALES_FILTER'])}."]
+        if s["LOST_SALES_SALES_FILTER"] else [])
+    if s["LOST_SALES_ENSEMBLE_ENABLED"]:
+        slow = read_lost_sales_source(spark, s, s["PATH_LOST_SALES_SLOW"], quiet=True)
+        add("Lost sales, slow model", s["PATH_LOST_SALES_SLOW"],
+            _span_rows(slow, [("Weeks kept by the filters", "week_start_date", None)]), lost_sales_filters)
+
+    if s["INSTOCK_METHOD"] == "weekly_source":
+        add("In-stock source (weekly)", s["PATH_INSTOCK_SOURCE"],
+            _span_rows(read_instock_source(spark, s, quiet=True), [("Weeks", "week_start_date", None)]), [])
+
+    scope_cfg = s["SCOPE"]
+    scope_filters = _input_filters(s, "scope")
+    scope_notes = [f"Solution(s) {scope_cfg['solution_id']}."] if scope_cfg["solution_id"] else []
+    if scope_cfg["time"] == "weekly":
+        rows_ = read_scope_source(spark, s, scope_cfg["solution_id"], "store_id", quiet=True)
+        if scope_cfg["columns"]["date"]:
+            scope_rows = _span_rows(rows_, [("Weeks in the scope table", "scope_date", None)])
+        else:
+            scope_rows = _span_rows(
+                rows_, [("Weeks in the scope table", F.format_string("%04d-W%02d", F.col("Year"), F.col("Week")), None)]
+            )
+    else:
+        run_date = scope_run_date(s)
+        scope_rows = []
+        scope_notes.append(
+            f"Daily scope: one scope (as of {run_date}) applied back over the whole window, so it has no dates of its own."
+        )
+        if ctx.scope_pairs is not None and "scope_start" in ctx.scope_pairs.columns:
+            scope_rows = _span_rows(ctx.scope_pairs, [("Pair start dates (scope_start)", "scope_start", None)])
+    add("Scope", s["PATH_SCOPE"], scope_rows, scope_filters, scope_notes)
+
+    if s["PATH_INVENTORY_WAREHOUSE"] is not None:
+        filters = _input_filters(s, "inventory_warehouse")
+        warehouse = spark.read.format("delta").load(s["PATH_INVENTORY_WAREHOUSE"])
+        add("DC inventory", s["PATH_INVENTORY_WAREHOUSE"],
+            _span_rows(warehouse, [("Every row in the table", "date", None),
+                                   ("Rows kept by the filters", "date", _kept_condition(filters))]),
+            filters)
+
+    git = s["GOODS_IN_TRANSIT"]
+    if git["date_shift_days"] is not None:
+        transit = spark.read.format("delta").load(s["PATH_GOODS_IN_TRANSIT"])
+        add("Goods in transit", s["PATH_GOODS_IN_TRANSIT"],
+            _span_rows(transit, [("To stores (quantity above 0)", "date", (F.col("destination_type") == 0) & (F.col("quantity") > 0)),
+                                 ("To warehouses (quantity above 0)", "date", (F.col("destination_type") == 1) & (F.col("quantity") > 0))]),
+            [], [f"A snapshot dated D describes the end of day D - ({git['date_shift_days']})."])
+
+    blocked = s["BLOCKED_SCOPE"]
+    blocked_rows = []
+    for label, frame in (("Store blocked days in the window", ctx.blocked_days), ("DC blocked days in the window", ctx.dc_blocked_days)):
+        if frame is not None:
+            first, last = frame.agg(F.min("first_day"), F.max("last_day")).first()
+            blocked_rows.append((label, first, last))
+    if blocked["path"] is not None or blocked["dc_path"] is not None:
+        add("Blocked scope", blocked["path"] or blocked["dc_path"], blocked_rows, [],
+            [f"Rule {blocked['rule']}; store solution(s) {blocked['solution_id']}; kinds {blocked['kinds']}"
+             + (f"; DC solution(s) {blocked['dc_solution_id']}; DC kinds {blocked['dc_kinds']}." if blocked["dc_solution_id"] else ".")])
+
+    if s["PATH_ITEM_FAMILY"] is not None:
+        add("Item family (no dates)", s["PATH_ITEM_FAMILY"], [], _input_filters(s, "item_family"),
+            [f"Rolled to the family main: {[k for k, on in s['ITEM_FAMILY_ROLLUP'].items() if on] or 'none'}."])
+    return sources
+
+
 def get_instock_daily_raw(ctx) -> DataFrame:
     """noob/daily-data for the daily in-stock metric: product_id, store_id, date, inventory, is_usable
     (usable == 1; null is unusable), and has_sales (sales_quantity > 0), from instock.daily.history_start

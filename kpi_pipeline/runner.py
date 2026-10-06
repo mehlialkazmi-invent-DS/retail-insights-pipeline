@@ -18,6 +18,7 @@ from kpi_pipeline.comparisons import _selected_comparison_kinds, build_compariso
 from kpi_pipeline.context import KPIContext, release, release_frames
 from kpi_pipeline.fiscal import apply_report_end_mode, build_fiscal_and_products, build_fiscal_week_only
 from kpi_pipeline.html_report import render_kpi_html
+from kpi_pipeline.inputs import collect_data_coverage
 from kpi_pipeline.io import OutputSaver, build_save_plan, load_saved_outputs
 from kpi_pipeline.kpi_long import PERIODS, build_kpi_long, trim_periods_to_recent
 from kpi_pipeline.pipeline import build_pipeline_frames
@@ -188,6 +189,7 @@ class KPIRunner:
         self.ctx.instock_weekly_base = None
         self.ctx.item_family_raw = None
         self.ctx.inventory_warehouse_rolled = None
+        self.ctx.data_coverage = None
 
     def print_config_summary(self) -> None:
         s = self.settings
@@ -455,6 +457,8 @@ class KPIRunner:
             customer=self.settings["CUSTOMER"], report_end=self.settings["REPORT_END_DATE"]
         )
         out_path = Path(local_dir) / filename
+        if self.ctx.data_coverage is None:
+            self.ctx.data_coverage = collect_data_coverage(self.ctx)
         written = render_kpi_html(
             self.ctx,
             out_path,

@@ -122,4 +122,7 @@ class KPIContext:
     lost_sales_weekly_base: Optional[DataFrame] = None
     instock_weekly_base: Optional[DataFrame] = None
     item_family_raw: Optional[DataFrame] = None
+    # inputs.collect_data_coverage: per source its table, measure date spans and filters (Methodology tab); built on
+    # the first HTML report of a run.
+    data_coverage: Optional[List[Dict[str, Any]]] = None
     inventory_warehouse_rolled: Optional[DataFrame] = None
