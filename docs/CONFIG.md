@@ -84,6 +84,18 @@ Folders under the datastore bucket, one list of segments per source:
 | `product_planning_level` | `operation/product_planning_level` | `product_agg_level` to `product_id` map |
 | `transactional_sales` | `operation/transactional_sales` | Read only with `sales_basis = "gross"`: one row per transaction line, `sales_type` regular / promo / clearence / return |
 
+**Sources left unset.** A `path_segments` entry that is `None` / `[]` (or missing) for an optional source is not read, and nothing that needs it happens; `materialize()` prints one `note:` line per source and does not fail (`_switch_off_unset_sources`):
+
+| Unset | Not read, so off |
+| --- | --- |
+| `item_family` | every family-main roll-up (`item_family_rollup.*`, `scope.roll_to_family_main`, `goods_in_transit.roll_to_family_main`), `scope.instock_main_eligible_only`, `scope.instock_exclude_unsuperseded_sizes` |
+| `inventory_warehouse` | the DC metrics (`dc_mean_stock`, `total_mean_stock`, `WOS_DC`, `WOS_TOTAL`, `dc_in_stock_rate`, dropped from `metrics.metric_cols`, `scope_diff_metrics`, `population_filters`), `dc_instock`, `scope.dc_solution_id`, `blocked_scope.dc_solution_id` |
+| `goods_in_transit` | goods in transit everywhere (`date_shift_days`, `store_instock`, `dc_instock`, `inventory_metrics` all off) |
+| `transactional_sales` | `sales_basis = "gross"` (sales are net) |
+| `lost_sales_ensemble.slow_path_segments` / `speed_cluster_path_segments` | the ensemble (the single model at `path_segments.lost_sales` is read) |
+
+Still required, with a clear `ValueError` when unset: `daily_data`, `products`, `scope`, `lost_sales`; `fiscal` while `fiscal_calendar.use_fiscal_calendar` is True; `product_planning_level` while a source sets `product_agg_level_col`.
+
 ## `input_filters`
 
 The notebook reads the **scope table**, **lost sales**, and **daily data** separately before the pipeline run so you can inspect them. Config filters are applied to both previews and the pipeline.
@@ -134,6 +146,7 @@ One section for the whole scope definition (tbretail's deployed values shown):
     "active_only": True,
     "instock_main_eligible_only": True,             # in-stock only where the main itself is eligible
     "instock_exclude_unsuperseded_sizes": True,     # in-stock leaves out sizes not in a supersession
+    "instock_unsuperseded_group_column": "option_code",  # products column grouping the sizes of one class color
     "backfill_leading_gap": False,                  # weekly only
     "use_hybrid_scope": False,   # False = scope table alone; True = hybrid (covered weeks + score backfill)
     "run_scope_diff": False,     # True = compute score scope and the scope-vs-score annual diff
@@ -157,7 +170,7 @@ The generic `config.py` reads a client table: `columns` = `product_id` / `store_
 When `run_scope_diff=False` (default), score-scope computation is skipped unless `use_hybrid_scope=True` (hybrid backfill needs it). The notebook scope-diff cell and `scope_diff` Delta output are omitted.
 
 - **`instock_main_eligible_only`** (tbretail `True`, generic `False`): in-stock (and weighted in-stock) counts only stores where the main item itself is eligible; a store where only a superseded (sub) item is eligible was intentionally not assorted the new item (client rule). Those stores stay in every other metric. The pair's start is still the earliest of the main and sub rows. Built from `ctx.scope_pairs.main_eligible`, applied in `pipeline.build_instock_daily`.
-- **`instock_exclude_unsuperseded_sizes`** (tbretail `True`, generic `False`): in-stock leaves out sizes "not created in the supersession": a product in no `item_family` row whose class color (`products.option_code`) has at least one size in `item_family` (main or sub). Treated like NGF: out of in-stock, still in every other metric (`pipeline._unsuperseded_sizes`).
+- **`instock_exclude_unsuperseded_sizes`** (tbretail `True`, generic `False`): in-stock leaves out sizes "not created in the supersession": a product in no `item_family` row whose group has at least one size in `item_family` (main or sub); the group is the `products` column `scope.instock_unsuperseded_group_column` (`option_code` = the class color at tbretail; another client names its own column). Treated like NGF: out of in-stock, still in every other metric (`pipeline._unsuperseded_sizes`).
 
 Block product_ids are **not** rolled: only blocks on the main's own `product_id` apply, as in the client reference script.
 
@@ -415,6 +428,8 @@ UI-blocked days, applied per metric. Default off: on exactly when `ui_parameters
 "blocked_scope": {
     "ui_parameters_path": "ui-data/parameter_config/<timestamp>_<id>",  # under the datastore root; None = off
     "rule": "after_scope_start",   # or "all"
+    "folder": "blocked_scope",     # store blocks folder under ui_parameters_path; None = store blocks not read
+    "dc_folder": "dc_blocked_scope",  # DC blocks folder under ui_parameters_path; None = DC blocks not read
     "solution_id": 21,             # store blocks of these solution(s) only (int or list), whatever scope reads
     "dc_solution_id": None,        # DC blocks of these solution(s) (tbretail 22); None = no DC blocks
     "kinds": ["product", "product_destination", "destination"],  # store block folders read
@@ -425,11 +440,11 @@ UI-blocked days, applied per metric. Default off: on exactly when `ui_parameters
 
 **Block solutions**: the snapshot is filtered to `solution_id` / `dc_solution_id` independently of `scope`'s solutions; adding e.g. allocation (51) to `scope.solution_id` widens scope but does not pull in its blocks unless 51 is also listed here. DC blocks need `scope.dc_solution_id`. tbretail: 21 and 22. Always set `ui_parameters_path` explicitly (the newest snapshot folder may hold no blocks for the solution); a missing listed `blocked_scope/<kind>` folder fails the run (tbretail's `dc_blocked_scope` has no `destination` folder, so `dc_kinds` omits it).
 
-**Store blocks** come from `{ui_parameters_path}/blocked_scope/{product,product_destination,destination}` (parquet; `destination_id` is the store), matched to the scope pairs (requires `scope.columns.start` and `store`). With `rule = "after_scope_start"` a block applies only when `block.start_date >= scope_start` (same day: applies); an earlier block is ignored because the pair was set up again after it; `"all"` applies every matched block. A block covers `start_date` to `end_date` (null = open-ended), clipped to the window. Block `product_id`s are not rolled to the family main.
+**Store blocks** come from `{ui_parameters_path}/{folder}/{product,product_destination,destination}` (`folder`, default `blocked_scope`; `None` = store blocks not read, with a `note:`) (parquet; `destination_id` is the store), matched to the scope pairs (requires `scope.columns.start` and `store`). With `rule = "after_scope_start"` a block applies only when `block.start_date >= scope_start` (same day: applies); an earlier block is ignored because the pair was set up again after it; `"all"` applies every matched block. A block covers `start_date` to `end_date` (null = open-ended), clipped to the window. Block `product_id`s are not rolled to the family main.
 
 **Blocked-day representation.** Blocked days are built as cached, disjoint per-pair date intervals `(product_id, store_id, first_day, last_day)` (`ctx.blocked_days`, `scope.build_blocked_days` via `scope._applied_block_intervals`, shared with DC blocks); overlapping or adjacent blocks of a pair are merged. Frames flag or drop a day with a range join on (pair, `first_day <= date <= last_day`) rather than a per-pair-day table. The printed "blocked pair-days in window" count is the number of covered pair-days. Under `instock.method` `weekly_source` / `lost_sales_source` with `in_stock_rate` named and an in-stock source without a store column, `scope.build_blocked_product_days` also builds `ctx.blocked_product_days`, the cached `(product_id, first_day, last_day)` intervals of the `"product"` kind only, matched to each product's earliest `scope_start` under `rule` (`product_destination` / `destination` name a store that source does not have, and the run prints this); every store-level frame (sales, WOS, turnover, inventory, the daily in-stock frame, a weekly in-stock source with a store column) still applies every kind in `blocked_scope.kinds`, `product_destination` and `destination` included.
 
-**DC blocks** (`dc_solution_id`, int not bool, e.g. 22; `None` = none) work the same from `{ui_parameters_path}/dc_blocked_scope/{product,product_destination}` (`destination_id` = warehouse), by `rule`. A DC pair's `scope_start` comes from that solution's rows of the scope table (same `run_date`, family roll-up, earliest start and `active_only` as the store scope, location = warehouse); DC pairs outside it get no blocks. Built once per run as `(product_id, warehouse_id, first_day, last_day)` intervals, `ctx.dc_blocked_days` (`scope.build_dc_blocked_days`).
+**DC blocks** (`dc_solution_id`, int not bool, e.g. 22; `None` = none) work the same from `{ui_parameters_path}/{dc_folder}/{product,product_destination}` (`dc_folder`, default `dc_blocked_scope`; `None` = DC blocks not read, with a `note:`) (`destination_id` = warehouse), by `rule`. A DC pair's `scope_start` comes from that solution's rows of the scope table (same `run_date`, family roll-up, earliest start and `active_only` as the store scope, location = warehouse); DC pairs outside it get no blocks. Built once per run as `(product_id, warehouse_id, first_day, last_day)` intervals, `ctx.dc_blocked_days` (`scope.build_dc_blocked_days`).
 
 **`metrics` — which metrics drop blocked days.** Blocked days stay in the frames, flagged `is_blocked` (on `scoped_daily` and `dc_daily`, from one range join in `pipeline.build_scoped_daily` / `build_dc_daily`). A metric reads **only unblocked rows when it is named in `metrics`**, and **blocked and unblocked rows alike when it is not**. `"all"` (generic default) means every name of `METRICS_ALL`; an unknown name raises (the allowed names are listed); `settings["BLOCKED_SCOPE"]["metrics"]` holds the resolved list in `METRICS_ALL` order. tbretail names the inventory, WOS, in-stock and DC metrics and leaves sales units, sales revenue, AUR, AUC, the distinct counts and `lost_sales_pct` out: a blocked pair can still sell its existing stock, and the report never removes blocked days from history for those metrics. Per-metric gating is tabulated in [Inventory metrics: blocked days and goods in transit](METRICS.md#inventory-metrics-blocked-days-and-goods-in-transit).
 

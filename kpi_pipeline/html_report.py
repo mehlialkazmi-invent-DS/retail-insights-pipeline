@@ -320,7 +320,7 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
                     **base,
                     "definition": base["definition"] + " Days an item was blocked in the planning screens are excluded.",
                 }
-    if (settings["BLOCKED_SCOPE"]["dc_solution_id"] is not None and settings["BLOCKED_SCOPE"]["path"] is not None):
+    if settings["BLOCKED_SCOPE"]["dc_solution_id"] is not None and settings["BLOCKED_SCOPE"]["dc_path"] is not None:
         for metric in _DC_BLOCKED_DAY_METRICS:
             if metric in blocked_metrics:
                 base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
@@ -390,7 +390,7 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
         dc_notes = []
         if goods_in_transit["dc_instock"]:
             dc_notes.append("A day with goods in transit to the DC also counts as stocked.")
-        if (settings["BLOCKED_SCOPE"]["dc_solution_id"] is not None and settings["BLOCKED_SCOPE"]["path"] is not None) and "dc_in_stock_rate" in blocked_metrics:
+        if settings["BLOCKED_SCOPE"]["dc_solution_id"] is not None and settings["BLOCKED_SCOPE"]["dc_path"] is not None and "dc_in_stock_rate" in blocked_metrics:
             dc_notes.append("DC days blocked in the planning screens are excluded.")
         if dc_notes:
             base = DEFAULT_METRIC_DEFINITIONS["dc_in_stock_rate"]
@@ -1689,7 +1689,7 @@ def _instock_rules(settings: Dict[str, Any]) -> List[str]:
 def _methodology_cards(settings: Dict[str, Any], metric_cols: List[str], labels: Dict[str, str]) -> List[Tuple[str, List[str]]]:
     """(title, lines) cards of what applies to the run, in business words, each line read from the settings."""
     scope, blocked, git = settings["SCOPE"], settings["BLOCKED_SCOPE"], settings["GOODS_IN_TRANSIT"]
-    blocked_metrics = blocked["metrics"] if blocked["path"] is not None else []
+    blocked_metrics = blocked["metrics"] if blocked["path"] is not None or blocked["dc_path"] is not None else []
     gross = settings["SALES_BASIS"] == "gross"
     sales = [
         "Sales are counted before returns: every sales transaction except returns, on every day it happened."
@@ -1775,7 +1775,8 @@ def _metric_basis(metric: str, settings: Dict[str, Any]) -> Tuple[str, List[str]
     if metric not in ("in_stock_rate", "weighted_instock_rate"):
         for dim, rule in settings["METRIC_POPULATION_FILTERS"].get(metric, {}).items():
             filters.append(_upper_first(_population_text(dim, rule, settings)))
-    blocked_on = blocked["path"] is not None and metric in blocked["metrics"]
+    blocked_folder = blocked["dc_path"] if metric in ("dc_mean_stock", "WOS_DC", "dc_in_stock_rate") else blocked["path"]
+    blocked_on = blocked_folder is not None and metric in blocked["metrics"]
     git_on = (
         metric in git["inventory_metrics"]
         or (metric in ("in_stock_rate", "weighted_instock_rate") and git["store_instock"])

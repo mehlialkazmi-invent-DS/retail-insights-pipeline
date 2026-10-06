@@ -129,8 +129,8 @@ def _blocked_pair_days(intervals: DataFrame) -> int:
 
 def build_blocked_days(ctx: KPIContext) -> None:
     """Build ctx.blocked_days, the cached (product_id, store_id, first_day, last_day) block intervals of
-    {ui_parameters_path}/blocked_scope for blocked_scope.solution_id, matched to the scope pairs
-    (None when blocked_scope.ui_parameters_path is None). The metrics named in blocked_scope.metrics drop the
+    {ui_parameters_path}/{blocked_scope.folder} for blocked_scope.solution_id, matched to the scope pairs
+    (None when blocked_scope.ui_parameters_path or blocked_scope.folder is None). The metrics named in blocked_scope.metrics drop the
     blocked days; the daily frames only flag them (pipeline._flag_blocked_days).
     """
     release(ctx.blocked_days, ctx.blocked_product_days)
@@ -200,15 +200,15 @@ def build_dc_scope(ctx: KPIContext) -> None:
 
 def build_dc_blocked_days(ctx: KPIContext) -> None:
     """Build ctx.dc_blocked_days, the cached (product_id, warehouse_id, first_day, last_day) DC block intervals
-    of {ui_parameters_path}/dc_blocked_scope for blocked_scope.dc_solution_id, matched to ctx.dc_scope_pairs by
-    blocked_scope.rule (None unless scope.dc_solution_id, blocked_scope.ui_parameters_path and
-    blocked_scope.dc_solution_id are set). The DC metrics named in blocked_scope.metrics drop those days.
+    of {ui_parameters_path}/{blocked_scope.dc_folder} for blocked_scope.dc_solution_id, matched to ctx.dc_scope_pairs
+    by blocked_scope.rule (None unless scope.dc_solution_id, blocked_scope.ui_parameters_path, blocked_scope.dc_folder
+    and blocked_scope.dc_solution_id are set). The DC metrics named in blocked_scope.metrics drop those days.
     """
     if ctx.dc_blocked_days is not None:
         ctx.dc_blocked_days.unpersist()
     ctx.dc_blocked_days = None
     s = ctx.settings
-    if ctx.dc_scope_pairs is None or s["BLOCKED_SCOPE"]["path"] is None or s["BLOCKED_SCOPE"]["dc_solution_id"] is None:
+    if ctx.dc_scope_pairs is None or s["BLOCKED_SCOPE"]["dc_path"] is None or s["BLOCKED_SCOPE"]["dc_solution_id"] is None:
         return
     solution_ids = s["BLOCKED_SCOPE"]["dc_solution_id"]
     ctx.dc_blocked_days = _applied_block_intervals(

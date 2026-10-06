@@ -578,13 +578,15 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
 
 
 def _unsuperseded_sizes(ctx: KPIContext) -> DataFrame:
-    """product_ids in no item_family row whose class color (products.option_code) has a size in item_family:
-    the sizes left out of a superseded class color's supersession (scope.instock_exclude_unsuperseded_sizes)."""
+    """product_ids in no item_family row whose group (products column scope.instock_unsuperseded_group_column,
+    option_code = the class color at tbretail) has a size in item_family: the sizes left out of a superseded
+    group's supersession (scope.instock_exclude_unsuperseded_sizes)."""
+    group_col = ctx.settings["SCOPE"]["instock_unsuperseded_group_column"]
     family_ids = get_item_family_raw(ctx).select("product_id").distinct()
-    products = ctx.spark.read.format("delta").load(ctx.settings["PATH_PRODUCTS"]).select("product_id", "option_code")
-    superseded_class_colors = products.join(family_ids, on="product_id", how="inner").select("option_code").distinct()
+    products = ctx.spark.read.format("delta").load(ctx.settings["PATH_PRODUCTS"]).select("product_id", group_col)
+    superseded_groups = products.join(family_ids, on="product_id", how="inner").select(group_col).distinct()
     return (
-        products.join(superseded_class_colors, on="option_code", how="inner")
+        products.join(superseded_groups, on=group_col, how="inner")
         .join(family_ids, on="product_id", how="left_anti")
         .select("product_id")
         .distinct()
@@ -632,6 +634,16 @@ def _get_inventory_warehouse_parent_rolled(ctx: KPIContext) -> DataFrame:
 
     s = ctx.settings
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
+    if s["PATH_INVENTORY_WAREHOUSE"] is None:
+        # path_segments.inventory_warehouse is not set (config.py _switch_off_unset_sources): no DC rows.
+        ctx.inventory_warehouse_rolled = (
+            ctx.scope_pairs.select("product_id").limit(0)
+            .withColumn("warehouse_id", F.lit(None).cast("int"))
+            .withColumn("date", F.lit(None).cast("date"))
+            .withColumn("inventory", F.lit(None).cast("double"))
+            .cache()
+        )
+        return ctx.inventory_warehouse_rolled
     base = (
         read_inventory_warehouse_source(ctx.spark, s, quiet=True)
         .select("product_id", "warehouse_id", "date", "inventory")

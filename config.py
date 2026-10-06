@@ -158,6 +158,8 @@ CONFIG: Dict[str, Any] = {
         # In-stock leaves out sizes not in a supersession whose class color is (likely NGF); they stay
         # in every other metric. Needs instock.method "daily".
         "instock_exclude_unsuperseded_sizes": False,
+        # products column that groups the sizes of one class color for that removal (option_code at tbretail).
+        "instock_unsuperseded_group_column": "option_code",
         "backfill_leading_gap": True,  # weekly only
         "use_hybrid_scope": False,  # True also backfills the weeks the scope table leaves uncovered
         "run_scope_diff": False,  # True adds the scope-vs-score comparison
@@ -171,6 +173,8 @@ CONFIG: Dict[str, Any] = {
     "blocked_scope": {
         "ui_parameters_path": None,  # path under the datastore root; None = blocked scope off
         "rule": "after_scope_start",  # or "all"
+        "folder": "blocked_scope",  # store blocks folder under ui_parameters_path; None = store blocks not read
+        "dc_folder": "dc_blocked_scope",  # DC blocks folder under ui_parameters_path; None = DC blocks not read
         "solution_id": 21,  # store blocks of these solution(s) only (int or list), whatever scope reads
         "dc_solution_id": None,  # DC blocks of these solution(s); None = no DC blocks (also needs scope.dc_solution_id)
         "kinds": ["product", "product_destination", "destination"],  # store block folders read
@@ -578,6 +582,72 @@ def _resolve_report_window(
 # =============================================================================
 # MATERIALIZE -- CONFIG -> validated flat settings dict
 # =============================================================================
+DC_METRICS = ("dc_mean_stock", "total_mean_stock", "WOS_DC", "WOS_TOTAL", "dc_in_stock_rate")
+
+
+def _switch_off_unset_sources(cfg: Dict[str, Any], paths: Dict[str, Optional[str]]) -> None:
+    """Switch off, in cfg, whatever reads a path_segments entry left unset (None or []), and print what is off.
+    A source that is not set is never read, so nothing fails and nothing that needs it happens:
+    item_family -> every family-main roll-up and the in-stock main-eligible / unsuperseded-size removals;
+    inventory_warehouse -> the DC metrics, DC scope and DC blocks; goods_in_transit -> goods in transit;
+    transactional_sales -> sales_basis "gross" (net is used); the lost-sales ensemble paths -> the ensemble.
+    """
+    if paths["PATH_ITEM_FAMILY"] is None:
+        print(
+            "note: path_segments.item_family is not set, so it is not read and no product is rolled to its family "
+            "main (scope, daily_data, lost_sales, inventory_warehouse, transactional_sales, goods_in_transit), "
+            "and scope.instock_main_eligible_only / instock_exclude_unsuperseded_sizes do not apply"
+        )
+        cfg["item_family_rollup"] = {
+            key: False for key in ("daily_data", "lost_sales", "inventory_warehouse", "transactional_sales")
+        }
+        cfg["scope"]["roll_to_family_main"] = False
+        cfg["scope"]["instock_main_eligible_only"] = False
+        cfg["scope"]["instock_exclude_unsuperseded_sizes"] = False
+        cfg["goods_in_transit"]["roll_to_family_main"] = False
+
+    if paths["PATH_INVENTORY_WAREHOUSE"] is None:
+        print(
+            f"note: path_segments.inventory_warehouse is not set, so it is not read and the DC metrics {list(DC_METRICS)}, "
+            "the DC scope (scope.dc_solution_id) and the DC blocks (blocked_scope.dc_solution_id) are off"
+        )
+        cfg["dc_instock"]["enabled"] = False
+        cfg["scope"]["dc_solution_id"] = None
+        cfg["blocked_scope"]["dc_solution_id"] = None
+        cfg["goods_in_transit"]["dc_instock"] = False
+        cfg["goods_in_transit"]["inventory_metrics"] = [
+            m for m in cfg["goods_in_transit"]["inventory_metrics"] if m not in DC_METRICS
+        ]
+        metrics = cfg["metrics"]
+        metrics["metric_cols"] = [m for m in metrics["metric_cols"] if m not in DC_METRICS]
+        metrics["scope_diff_metrics"] = [m for m in metrics["scope_diff_metrics"] if m not in DC_METRICS]
+        metrics["population_filters"] = {
+            m: f for m, f in (metrics.get("population_filters") or {}).items() if m not in DC_METRICS
+        }
+        if isinstance(cfg["blocked_scope"]["metrics"], (list, tuple)):
+            cfg["blocked_scope"]["metrics"] = [m for m in cfg["blocked_scope"]["metrics"] if m not in DC_METRICS]
+
+    if paths["PATH_GOODS_IN_TRANSIT"] is None:
+        print("note: path_segments.goods_in_transit is not set, so it is not read and no goods in transit are added anywhere")
+        git = cfg["goods_in_transit"]
+        git["date_shift_days"] = None
+        git["store_instock"] = False
+        git["dc_instock"] = False
+        git["inventory_metrics"] = []
+
+    if paths["PATH_TRANSACTIONAL_SALES"] is None and cfg["sales_basis"] == "gross":
+        print("note: path_segments.transactional_sales is not set, so it is not read and sales_basis 'gross' does not apply: sales are net")
+        cfg["sales_basis"] = "net"
+
+    ensemble = cfg["lost_sales_ensemble"]
+    if ensemble.get("enabled") and (paths["PATH_LOST_SALES_SLOW"] is None or paths["PATH_SPEED_CLUSTER"] is None):
+        print(
+            "note: lost_sales_ensemble.slow_path_segments or speed_cluster_path_segments is not set, so they are not "
+            "read and the lost-sales ensemble does not apply: the single model at path_segments.lost_sales is used"
+        )
+        ensemble["enabled"] = False
+
+
 def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Resolve CONFIG into flat settings dict for KPIRunner (paths, dates, metrics, slices)."""
     cfg = _apply_env_overrides(cfg or CONFIG)
@@ -590,20 +660,47 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     # --- Source paths -----------------------------------------------------------
     bucket = os.environ.get("KPI_BUCKET", f"/mnt/invent-{customer}-datastore")
     path_segments = cfg["path_segments"]
+    for required in ("daily_data", "products", "scope", "lost_sales"):
+        if not path_segments.get(required):
+            raise ValueError(f"path_segments.{required} is required: the report cannot be built without it")
+
+    def optional_path(segments: Optional[List[str]]) -> Optional[str]:
+        return fund_paste(bucket, *segments) if segments else None
+
     paths = {
-        "PATH_FISCAL": fund_paste(bucket, *path_segments["fiscal"]),
+        "PATH_FISCAL": optional_path(path_segments.get("fiscal")),
         "PATH_DAILY_DATA": fund_paste(bucket, *path_segments["daily_data"]),
-        "PATH_INVENTORY_WAREHOUSE": fund_paste(bucket, *path_segments["inventory_warehouse"]),
-        "PATH_ITEM_FAMILY": fund_paste(bucket, *path_segments["item_family"]),
+        "PATH_INVENTORY_WAREHOUSE": optional_path(path_segments.get("inventory_warehouse")),
+        "PATH_ITEM_FAMILY": optional_path(path_segments.get("item_family")),
         "PATH_PRODUCTS": fund_paste(bucket, *path_segments["products"]),
         "PATH_LOST_SALES": fund_paste(bucket, *path_segments["lost_sales"]),
-        "PATH_LOST_SALES_SLOW": fund_paste(bucket, *cfg["lost_sales_ensemble"]["slow_path_segments"]),
-        "PATH_SPEED_CLUSTER": fund_paste(bucket, *cfg["lost_sales_ensemble"]["speed_cluster_path_segments"]),
-        "PATH_PRODUCT_PLANNING_LEVEL": fund_paste(bucket, *path_segments["product_planning_level"]),
+        "PATH_LOST_SALES_SLOW": optional_path(cfg["lost_sales_ensemble"].get("slow_path_segments")),
+        "PATH_SPEED_CLUSTER": optional_path(cfg["lost_sales_ensemble"].get("speed_cluster_path_segments")),
+        "PATH_PRODUCT_PLANNING_LEVEL": optional_path(path_segments.get("product_planning_level")),
         "PATH_SCOPE": fund_paste(bucket, *path_segments["scope"]),
-        "PATH_GOODS_IN_TRANSIT": fund_paste(bucket, *path_segments["goods_in_transit"]),
-        "PATH_TRANSACTIONAL_SALES": fund_paste(bucket, *path_segments["transactional_sales"]),
+        "PATH_GOODS_IN_TRANSIT": optional_path(path_segments.get("goods_in_transit")),
+        "PATH_TRANSACTIONAL_SALES": optional_path(path_segments.get("transactional_sales")),
     }
+    _switch_off_unset_sources(cfg, paths)
+    if cfg["fiscal_calendar"]["use_fiscal_calendar"] and paths["PATH_FISCAL"] is None:
+        raise ValueError(
+            "fiscal_calendar.use_fiscal_calendar is True but path_segments.fiscal is not set: "
+            "set the fiscal_cal folder, or set use_fiscal_calendar to False"
+        )
+    planning_level_users = [
+        cfg.get("lost_sales_source", {}).get("product_agg_level_col"),
+    ]
+    if cfg["instock"]["method"] == "weekly_source":
+        weekly_source = cfg["instock"]["weekly_source"]
+        planning_level_users += [
+            weekly_source.get("product_agg_level_col"),
+            *[fb.get("product_agg_level_col") for fb in weekly_source.get("fallback_sources", [])],
+        ]
+    if any(planning_level_users) and paths["PATH_PRODUCT_PLANNING_LEVEL"] is None:
+        raise ValueError(
+            "a source sets product_agg_level_col but path_segments.product_planning_level is not set: "
+            "it maps that level to product_id"
+        )
 
     # --- Column maps: lost sales, weekly in-stock source, item family -------------
     lost_sales_source_cfg = cfg.get("lost_sales_source", {}) or {}
@@ -742,6 +839,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "active_only": bool(scope_cfg["active_only"]),
         "instock_main_eligible_only": bool(scope_cfg["instock_main_eligible_only"]),
         "instock_exclude_unsuperseded_sizes": bool(scope_cfg["instock_exclude_unsuperseded_sizes"]),
+        "instock_unsuperseded_group_column": scope_cfg["instock_unsuperseded_group_column"],
         "backfill_leading_gap": bool(scope_cfg["backfill_leading_gap"]),
         "use_hybrid_scope": scope_cfg["use_hybrid_scope"],
         "run_scope_diff": scope_cfg["run_scope_diff"],
@@ -773,15 +871,23 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     blocked_scope_cfg = cfg["blocked_scope"]
     ui_parameters_path = blocked_scope_cfg["ui_parameters_path"]
     ui_segments = ui_parameters_path.strip("/").split("/") if ui_parameters_path is not None else None
+    store_folder = blocked_scope_cfg.get("folder", "blocked_scope")
+    dc_folder = blocked_scope_cfg.get("dc_folder", "dc_blocked_scope")
+    if ui_segments is not None:
+        for key, folder in (("folder", store_folder), ("dc_folder", dc_folder)):
+            if not folder:
+                print(f"note: blocked_scope.{key} is not set, so those blocks are not read and do not apply")
     blocked_scope = {
         "rule": blocked_scope_cfg["rule"],
-        "path": fund_paste(bucket, *ui_segments, "blocked_scope") if ui_segments is not None else None,
+        "path": fund_paste(bucket, *ui_segments, store_folder) if ui_segments is not None and store_folder else None,
         # DC blocks of the same snapshot, read only when scope.dc_solution_id is set.
-        "dc_path": fund_paste(bucket, *ui_segments, "dc_blocked_scope") if ui_segments is not None else None,
+        "dc_path": fund_paste(bucket, *ui_segments, dc_folder) if ui_segments is not None and dc_folder else None,
     }
     if blocked_scope["rule"] not in ("after_scope_start", "all"):
         raise ValueError(f"blocked_scope.rule must be 'after_scope_start' or 'all'; got {blocked_scope['rule']!r}")
-    if blocked_scope["path"] is not None and not (columns["start"] and columns["store"]):
+    if (blocked_scope["path"] is not None or blocked_scope["dc_path"] is not None) and not (
+        columns["start"] and columns["store"]
+    ):
         raise ValueError("blocked_scope.ui_parameters_path requires scope.columns.start and scope.columns.store")
 
     blocked_metrics_cfg = blocked_scope_cfg["metrics"]
@@ -819,6 +925,8 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
     )
     if blocked_scope["dc_solution_id"] is not None and scope["dc_solution_id"] is None:
         raise ValueError("blocked_scope.dc_solution_id needs scope.dc_solution_id (the DC pairs the blocks match)")
+    if blocked_scope["dc_path"] is None:
+        blocked_scope["dc_solution_id"] = None
 
     # --- Daily in-stock -----------------------------------------------------------
     instock_daily_cfg = instock_cfg["daily"]
