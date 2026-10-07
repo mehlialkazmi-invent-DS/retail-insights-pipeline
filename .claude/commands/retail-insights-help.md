@@ -81,7 +81,7 @@ kpi_pipeline/
                    build_latest_day_windows (report_end=latest_day: K = fiscal day of
                    REPORT_END_DATE, ctx.ytd_years, ctx.ytd_lost_sales_last_week, ctx.day_calendar
                    — §3.1b); complete_fiscal_periods also at "Year" / "Week" grain under
-                   latest_day (LATEST_DAY_COMPLETE_PERIOD_COLUMNS);
+                   latest_day (Week via LATEST_DAY_COMPLETE_PERIOD_COLUMNS; "Year" is always in COMPLETE_PERIOD_COLUMNS, for comparable yoy);
                    require_complete_time_grain (fail-loud: every date in the window must be in the
                    calendar)
   inputs.py        cached Delta reads (daily_data_raw, lost_sales_weekly_base) + input_filters;
@@ -618,7 +618,7 @@ No `comparison_qoq`/`comparison_mom`/`comparison_wow` table exists — those are
 **Gated, opt-in** (default off). Metrics are recomputed over **only the pairs present in EVERY qualifying year**, then compared. Isolates like-for-like movement from mix shifts caused by new/closed pairs. Four independent kinds, selected via `comparable_pairs.kinds`:
 
 - **`ytd`** — pairs present in every window year, on each year's elapsed (fully-closed-months) window (with `report_end="latest_day"`: days 1..K of the fiscal year, over `ctx.ytd_years` — the years whose days 1..K are all in the window). Chains every consecutive year pair.
-- **`yoy`** — pairs present in every window year, on the FULL window year (not the YTD-elapsed subset). Chains every consecutive year pair too (not just the latest two, unlike the regular non-comparable YoY). Window-boundary years can themselves be partial — same accepted behaviour as the regular Annual/YoY tab, not something this corrects for (not under `report_end="latest_day"`: the Annual frames only hold complete fiscal years there).
+- **`yoy`** — pairs present in every COMPLETE fiscal year (a year lying entirely inside the window, under every `report_end`), on the full year (not the YTD-elapsed subset). Chains every consecutive complete-year pair (not just the latest two, unlike the regular non-comparable YoY). A partial current / first year is left out of the pair universe as well, so with 2024-2026 data and `as_of` it shows 2024→2025 only; the current year is in comparable `ytd`. Saved history from before this change keeps its partial-year links until `comparable_kpi_long` is `full_refresh`ed.
 - **`quarter`** — computed INDEPENDENTLY per quarter number. For quarter Q, only years where Q falls **entirely inside the report window** count (`_complete_period_years` in `comparable.py`) — `REPORT_END_DATE` is a week boundary, never quarter-aligned, so the in-progress "current" quarter would otherwise be silently compared as if complete against a full prior-year quarter. Mirrors the same "fully elapsed" guard `ytd`'s own elapsed-period check already uses (`fiscal.py`'s `available_fiscal_months` — same helper, but at MONTH grain, not quarter grain), generalized here to check both window boundaries for an arbitrary quarter and year. A pair common across years for Q1 says nothing about Q2 — fully independent populations.
 - **`half`** — the same as `quarter` per half number (H1/H2); needs `fiscal_calendar.half_periods=True` (rejected otherwise). A pair counts when scoped daily rows exist for it in every qualifying year after all scope steps. Both quarter and half read `ctx.complete_fiscal_periods`.
 

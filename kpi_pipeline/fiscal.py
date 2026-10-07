@@ -122,11 +122,12 @@ def _compute_available_fiscal_months(ctx: KPIContext) -> List[int]:
     return sorted(int(r["Fiscal_Month"]) for r in complete.select("Fiscal_Month").collect())
 
 
-# Period columns with a (Year, period) completeness set: the Quarter / Half / Monthly tabs' rollups.
-COMPLETE_PERIOD_COLUMNS = ("Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month")
+# Period columns with a completeness set: the Quarter / Half / Monthly tabs' rollups and the complete years
+# of the comparable yoy kind (key (Year,)).
+COMPLETE_PERIOD_COLUMNS = ("Year", "Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month")
 
-# report_end="latest_day" also keeps complete years (Annual tab, key (Year,)) and whole weeks (Weekly tab).
-LATEST_DAY_COMPLETE_PERIOD_COLUMNS = ("Year", "Week")
+# report_end="latest_day" also keeps complete years on the Annual tab and whole weeks on the Weekly tab.
+LATEST_DAY_COMPLETE_PERIOD_COLUMNS = ("Week",)
 
 # Civil-calendar path only: calendar months per period column, to derive period bounds analytically.
 _MONTHS_PER_PERIOD = {"Fiscal_Month": 1, "Fiscal_Quarter": 3, "Fiscal_Half": 6}

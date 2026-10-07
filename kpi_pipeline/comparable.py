@@ -5,8 +5,8 @@ qualifying year of that kind, then compares each consecutive-year link within th
 
   ytd     each year's YTD window (closed fiscal months; with report_end="latest_day" days 1..K of the
           fiscal year, years in ctx.ytd_years only).
-  yoy     the full window year (a partial first / last year included, as on the Annual tab; with
-          "latest_day" complete fiscal years only), chained across every consecutive year pair.
+  yoy     complete fiscal years only (a year lying entirely inside the window, whatever report_end), chained
+          across every consecutive year pair; a partial first / last year is left out of the universe too.
   quarter per quarter number Q, independently: only years whose Q lies entirely inside the window
           (_complete_period_years); a pair must be present in Q of each of them.
   half    like quarter, per half number (H1 = Q1-Q2, H2 = Q3-Q4).
@@ -114,6 +114,12 @@ def _complete_period_years(ctx: KPIContext, kind: str, number: int) -> List[int]
     number_col = _NUMBERED_KINDS[kind].number_col
     complete = ctx.complete_fiscal_periods[number_col].filter(F.col(number_col) == number)
     return sorted(r["Year"] for r in complete.select("Year").distinct().collect())
+
+
+def _complete_years(ctx: KPIContext) -> List[int]:
+    """Years lying entirely inside the report window, from ctx.complete_fiscal_periods["Year"] (unclipped
+    calendar, like _complete_period_years)."""
+    return sorted(r["Year"] for r in ctx.complete_fiscal_periods["Year"].collect())
 
 
 def _intersect_years(frame: DataFrame, years: Sequence[int], key_cols: List[str]) -> DataFrame:
@@ -249,6 +255,9 @@ def _build_comparable_kind(
     years = sorted(r["Year"] for r in scoped_daily_pop.select("Year").distinct().collect())
     if numbered:
         complete_years = set(_complete_period_years(ctx, comparison_type, number))
+        years = [y for y in years if y in complete_years]
+    elif comparison_type == "yoy":
+        complete_years = set(_complete_years(ctx))
         years = [y for y in years if y in complete_years]
     if len(years) < 2:
         ctx.progress.skip(1, f"{build_label}: fewer than 2 qualifying years")

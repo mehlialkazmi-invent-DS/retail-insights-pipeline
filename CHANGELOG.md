@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+#### Comparable `yoy`: complete fiscal years only, under every `report_end` - 2026-10-07
+
+Comparable `yoy` now compares complete fiscal years only and builds its same-pair universe from them: a pair must be present in every complete year, and a partial current (or first) year is left out of the universe and the links. With 2024-2026 data under `report_end="as_of"` it shows 2024→2025 (before: also 2025→2026, the partial 2026 against full 2025, and the partial 2026 shrank the universe of every link). Comparable `ytd` (same fiscal days / elapsed months) is unchanged and carries the current year; `quarter` / `half` already compared complete periods only and are unchanged. `fiscal.COMPLETE_PERIOD_COLUMNS` now includes `"Year"` (computed on every run, one small cached frame), `LATEST_DAY_COMPLETE_PERIOD_COLUMNS` is `("Week",)`; `comparable._build_comparable_kind` keeps only the years in `ctx.complete_fiscal_periods["Year"]` for `yoy`. The Annual tab and regular `yoy` are untouched. Saved `comparable_kpi_long` / `comparable_comparison_yoy` rows from before keep their partial-year links under incremental saves: run one `full_refresh` to clear them. Checked with `py_compile`; not run on Spark.
+
+**Affected:** `kpi_pipeline/comparable.py`, `kpi_pipeline/fiscal.py`, `docs/LOGIC_FLOW.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-10-07
+
 #### Methodology tab: data available by source, with dates and filters - 2026-10-06
 
 The Methodology tab now ends with a data section for checking a run: per source (report window, daily data, transactional sales under gross, lost sales and its slow model, weekly in-stock source, scope, DC inventory, goods in transit, blocked scope, item family) the table path, the first and last date of each measure it carries and the `input_filters` in force, printed as configured so they follow each client. Daily data shows every row, the rows the filters keep, the days with sales and the days with inventory; goods in transit splits stores and warehouses; a weekly scope shows its weeks, a daily scope says it is one scope applied back over the window and shows the pair start dates. `inputs.collect_data_coverage` builds it with one aggregation per dated source over the whole table (not only the window) on the first `runner.build_html_report` of a run (`ctx.data_coverage`, reset with the run caches). Styled with the existing Methodology classes (`.method-table`, `.method-group`, new `.method-code`). Rendered offline with the pyspark imports stubbed; not run on Spark.
