@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+#### `tbretail` branch: synced with `main`, `config.py` set to tbretail's deployed config - 2026-11-05
+
+`main` now carries all of `perf-product-day-aggregation` (fast-forward `ddb6a26..9906dfe`, tested on Databricks), and the fully merged `instock-daily-client-rule` branch is deleted. The `tbretail` branch takes `main`'s code through a merge and differs from it only in `config.py`, now a copy of `tbretail_config.py`. The old `config.py` used the old keys (`defined_scope`, `scope_adjustments`, `instock_source`) that the current code no longer reads. On this branch `config.py` and `tbretail_config.py` must stay identical.
+
+**Affected:** `config.py`, `README.md`, `.claude/commands/retail-insights-help.md`, `CHANGELOG.md`
+
+**Date:** 2026-11-05
+
 #### Comparable `yoy`: complete fiscal years only, under every `report_end` - 2026-10-07
 
 Comparable `yoy` now compares complete fiscal years only and builds its same-pair universe from them: a pair must be present in every complete year, and a partial current (or first) year is left out of the universe and the links. With 2024-2026 data under `report_end="as_of"` it shows 2024→2025 (before: also 2025→2026, the partial 2026 against full 2025, and the partial 2026 shrank the universe of every link). Comparable `ytd` (same fiscal days / elapsed months) is unchanged and carries the current year; `quarter` / `half` already compared complete periods only and are unchanged. `fiscal.COMPLETE_PERIOD_COLUMNS` now includes `"Year"` (computed on every run, one small cached frame), `LATEST_DAY_COMPLETE_PERIOD_COLUMNS` is `("Week",)`; `comparable._build_comparable_kind` keeps only the years in `ctx.complete_fiscal_periods["Year"]` for `yoy`. The Annual tab and regular `yoy` are untouched. Saved `comparable_kpi_long` / `comparable_comparison_yoy` rows from before keep their partial-year links under incremental saves: run one `full_refresh` to clear them. Checked with `py_compile`; not run on Spark.
