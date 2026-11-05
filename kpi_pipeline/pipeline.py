@@ -2,28 +2,32 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.functions import broadcast
 
-from kpi_pipeline.context import KPIContext
+from kpi_pipeline.context import DC_GIT_METRICS, STORE_GIT_METRICS, KPIContext
+from kpi_pipeline.fiscal import last_saturday_on_or_before, week_day_counts
 from kpi_pipeline.inputs import (
-    DEFAULT_LOST_SALES_COLUMN_MAP,
     apply_input_filters,
+    get_daily_data_excluded_days,
     get_daily_data_raw,
-    get_inventory_warehouse_raw,
+    get_instock_daily_raw,
     get_item_family_raw,
+    read_goods_in_transit_source,
     read_instock_source,
+    read_inventory_warehouse_source,
     read_lost_sales_source,
     read_speed_cluster_source,
     rename_column_or_fail,
+    roll_to_item_family_parent,
 )
 
 
 def _enrich_weekly_with_time_grain(ctx: KPIContext, weekly_pair: DataFrame) -> DataFrame:
-    fw_cols = ["week_start_date", "week_end_date", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Month"]
+    fw_cols = ["week_start_date", "week_end_date", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month"]
     if ctx.settings["USE_FISCAL_CALENDAR"]:
         return weekly_pair.join(broadcast(ctx.fiscal_week.select(*fw_cols)), on="week_start_date", how="inner")
     if "_ls_year" in weekly_pair.columns and "_ls_week" in weekly_pair.columns:
@@ -41,42 +45,65 @@ def _enrich_weekly_with_time_grain(ctx: KPIContext, weekly_pair: DataFrame) -> D
     return enriched.drop("week_start_date").join(broadcast(ctx.fiscal_week.select(*fw_cols)), on=["Year", "Week"], how="inner")
 
 
-def _aggregate_lost_sales_pairweek(ctx: KPIContext, raw: DataFrame, start, end) -> DataFrame:
-    """Aggregate ONE raw lost-sales model to (product_id, store_id, week_start_date) grain.
-
-    lost_sales/in_stock/total_days source column names come from LOST_SALES_COLUMN_MAP
-    (see config.py's lost_sales_source). in_stock/total_days are skipped here entirely
-    when INSTOCK_SOURCE_ENABLED — they come from the separate instock_source table
-    instead (see read_instock_weekly).
-
-    Item-family-rolled to parent product_id right before aggregation when
-    ITEM_FAMILY_ROLLUP["lost_sales"] is True (see config.py) — OFF by default, since
-    report_dfu already does its own supersede substitution upstream and a second rollup here
-    would likely be a no-op; available as an opt-in safety net. The groupBy below then combines
-    any child+parent rows landing in the same (product_id[, store_id], week_start_date) bucket.
+def _calendar_frame(ctx: KPIContext, *extra_cols: str) -> DataFrame:
+    """(date, Year, Week) of the report window, plus ``extra_cols``. With report_end="latest_day" it is
+    ctx.day_calendar, which also carries day_index and last_day_index (fiscal.build_latest_day_windows).
     """
-    col_map = ctx.settings.get("LOST_SALES_COLUMN_MAP") or DEFAULT_LOST_SALES_COLUMN_MAP
+    base = ctx.day_calendar if ctx.day_calendar is not None else ctx.fiscal_cal
+    return base.select("date", "Year", "Week", *extra_cols)
+
+
+def _fiscal_week_parts(ctx: KPIContext) -> DataFrame:
+    """Fiscal weeks as rows with week_start_date / week_end_date, for the daily in-stock store-day count.
+
+    Normally ctx.fiscal_week's own rows. With report_end="latest_day" the week containing day K (the
+    YTD cut, see ctx.day_calendar) comes as two rows -- its days up to K and the days after -- each with
+    its own bounds and last_day_index, so the in-stock frame can be cut at K without exploding other
+    weeks. Every other week stays one row, carrying its last_day_index.
+    """
+    cols = ["Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month"]
+    if ctx.settings["REPORT_END_MODE"] != "latest_day":
+        return ctx.fiscal_week.select(*cols, "week_start_date", "week_end_date")
+    parts = ctx.day_calendar.groupBy("Year", "Week", "last_day_index").agg(
+        F.min("date").alias("week_start_date"),
+        F.max("date").alias("week_end_date"),
+    )
+    return ctx.fiscal_week.select(*cols).join(parts, on=["Year", "Week"], how="inner")
+
+
+def _with_week_days(ctx: KPIContext, daily: DataFrame) -> DataFrame:
+    """Add week_days: the calendar days of the row's (Year, Week) inside the report window. A constant 7
+    except with report_end="latest_day" (fiscal.week_day_counts), where a week can be shorter and
+    metrics.compute_kpis weights WOS's weekly inventory by it."""
+    if ctx.settings["REPORT_END_MODE"] != "latest_day":
+        return daily.withColumn("week_days", F.lit(7))
+    return daily.join(broadcast(week_day_counts(ctx).select("Year", "Week", "week_days")), on=["Year", "Week"], how="inner")
+
+
+def _aggregate_lost_sales_pairweek(ctx: KPIContext, raw: DataFrame, start, end) -> DataFrame:
+    """One raw lost-sales model summed to (product_id[, store_id], week_start_date) for the window.
+
+    Column names come from LOST_SALES_COLUMN_MAP. in_stock/total_days are read only with
+    instock.method "lost_sales_source". Rolled to the family main first when
+    ITEM_FAMILY_ROLLUP["lost_sales"] is True (child and parent rows then sum into one bucket).
+    """
+    col_map = ctx.settings["LOST_SALES_COLUMN_MAP"]
     filtered = (
         raw.withColumn("week_start_date", F.to_date("week_start_date"))
         .filter(F.col("week_start_date").between(F.lit(start), F.lit(end)))
     )
     if ctx.settings["ITEM_FAMILY_ROLLUP"]["lost_sales"]:
-        filtered = _roll_to_item_family_parent(filtered, ctx)
+        filtered = roll_to_item_family_parent(filtered, ctx)
     agg_exprs = [F.sum(F.col(col_map["lost_sales_col"]).cast("double")).alias("lost_sales")]
-    if not ctx.settings.get("INSTOCK_SOURCE_ENABLED", False):
+    if ctx.settings["INSTOCK_METHOD"] == "lost_sales_source":
         agg_exprs.append(F.sum(F.col(col_map["in_stock_col"]).cast("double")).alias("in_stock_days"))
         agg_exprs.append(F.sum(F.col(col_map["total_days_col"]).cast("double")).alias("total_days"))
     ls_native_week = not ctx.settings["USE_FISCAL_CALENDAR"] and "week" in raw.columns
     if ls_native_week:
-        # Keep the native fiscal week number, but derive Year from week_start_date
-        # (calendar year) rather than the source 'year' column, which can carry the ISO
-        # week-year (late-December weeks labelled as the next year). See fiscal.py.
+        # Native week number; Year comes from week_start_date, not the source 'year' (ISO week-year).
         agg_exprs.append(F.first(F.col("week").cast("int"), ignorenulls=True).alias("_ls_week"))
-    # Grouped without store_id when the source has none (store_col=None in
-    # LOST_SALES_COLUMN_MAP) -- CAUTION (see config.py's lost_sales_source comment): lost_sales
-    # is an absolute count, so a pair-week without store_id must never be broadcast across a
-    # product's scoped stores, which would OVER-COUNT if later summed across stores -- see
-    # build_pipeline_frames, which collapses scope to this grain instead.
+    # No store_id when the source has none (store_col=None): lost_sales is an absolute count, so it must
+    # never be fanned out across stores; build_pipeline_frames collapses scope to this grain instead.
     group_keys = ["product_id", "week_start_date"]
     if "store_id" in raw.columns:
         group_keys.insert(1, "store_id")
@@ -84,25 +111,15 @@ def _aggregate_lost_sales_pairweek(ctx: KPIContext, raw: DataFrame, start, end) 
 
 
 def _aggregate_instock_pairweek(ctx: KPIContext, raw: DataFrame, start, end) -> DataFrame:
-    """Aggregate the standalone instock_source table to (product_id[, store_id], week_start_date).
-
-    ``raw`` is read_instock_source's output, already on canonical in_stock/total_days columns
-    (including any fallback_sources already appended -- see read_instock_source).
-
-    Grouped without store_id when the source has none (store_col=None in
-    INSTOCK_SOURCE_COLUMN_MAP, e.g. reporting_inv_fc_dfu/report_dfu) -- build_pipeline_frames
-    then restricts it to scope at product x week, never fanning it out across stores.
-
-    Item-family-rolled to parent product_id right before aggregation when
-    ITEM_FAMILY_ROLLUP["lost_sales"] is True (see config.py) -- same toggle and reasoning as
-    _aggregate_lost_sales_pairweek's own rollup, applied here for instock_source's own rows.
-    """
+    """read_instock_source's rows summed to (product_id[, store_id], week_start_date) for the window,
+    store-less when the source has no store_col. Rolled to the family main like the lost sales
+    (ITEM_FAMILY_ROLLUP["lost_sales"])."""
     filtered = (
         raw.withColumn("week_start_date", F.to_date("week_start_date"))
         .filter(F.col("week_start_date").between(F.lit(start), F.lit(end)))
     )
     if ctx.settings["ITEM_FAMILY_ROLLUP"]["lost_sales"]:
-        filtered = _roll_to_item_family_parent(filtered, ctx)
+        filtered = roll_to_item_family_parent(filtered, ctx)
     agg_exprs = [
         F.sum(F.col("in_stock").cast("double")).alias("in_stock_days"),
         F.sum(F.col("total_days").cast("double")).alias("total_days"),
@@ -113,22 +130,14 @@ def _aggregate_instock_pairweek(ctx: KPIContext, raw: DataFrame, start, end) -> 
     return filtered.groupBy(*group_keys).agg(*agg_exprs)
 
 
-def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataFrame:
-    """Weekly lost-sales aggregates for the report window (cached per run).
+def read_lost_sales_weekly(ctx: KPIContext) -> DataFrame:
+    """Weekly lost-sales aggregates for the report window, with fiscal week attributes (cached per run).
 
-    OFF (default, lost_sales_ensemble.enabled=False): reads the single fast-mover
-    model at PATH_LOST_SALES exactly as before.
-
-    ON (lost_sales_ensemble.enabled=True): blends the fast (120-day) and slow
-    (365-day) models by product sales-speed cluster — products whose cluster is in
-    FAST_MOVER_CLUSTERS take the fast model; everyone else (other clusters AND
-    products with no/NULL cluster row) takes the slow model. A single boolean drives
-    all three aggregate fields (lost_sales, in_stock_days, total_days) for a given
-    pair-week, so they always come from the SAME chosen model. Mutually exclusive with
-    instock_source (see config.py's validation).
-
-    instock_source.enabled=True: in_stock_days/total_days are not read here at all -- they come
-    from read_instock_weekly, independently of the lost-sales rows.
+    lost_sales_ensemble.enabled=False: the single model at PATH_LOST_SALES. True: the fast (120-day) and slow
+    (365-day) models blended by sales-speed cluster -- products whose cluster is in FAST_MOVER_CLUSTERS take
+    the fast model, every other product (no cluster included) the slow one. One boolean picks all three
+    fields of a pair-week, so they never mix models. in_stock_days/total_days are present only with
+    instock.method "lost_sales_source".
     """
     if ctx.lost_sales_weekly_base is not None:
         return ctx.lost_sales_weekly_base
@@ -137,8 +146,7 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
 
     if not s["LOST_SALES_ENSEMBLE_ENABLED"]:
-        path = path or s["PATH_LOST_SALES"]
-        raw = read_lost_sales_source(ctx.spark, s, path, quiet=True)
+        raw = read_lost_sales_source(ctx.spark, s, s["PATH_LOST_SALES"], quiet=True)
         deduped = _aggregate_lost_sales_pairweek(ctx, raw, start, end)
         if not s["USE_FISCAL_CALENDAR"] and "week" in raw.columns:
             deduped = deduped.withColumn("_ls_year", F.year("week_start_date"))
@@ -146,9 +154,7 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
         fast_raw = read_lost_sales_source(ctx.spark, s, s["PATH_LOST_SALES"], quiet=True)
         slow_raw = read_lost_sales_source(ctx.spark, s, s["PATH_LOST_SALES_SLOW"], quiet=True)
         native_week = not s["USE_FISCAL_CALENDAR"] and "week" in fast_raw.columns
-        # Both sides use the SAME LOST_SALES_COLUMN_MAP (store_col included), so fast/slow
-        # store_id presence is expected to agree -- only fast_raw is checked, mirroring
-        # native_week's own fast-only check just above.
+        # Both models share LOST_SALES_COLUMN_MAP, so checking fast_raw covers both.
         has_store = "store_id" in fast_raw.columns
         join_keys = ["product_id", "store_id", "week_start_date"] if has_store else ["product_id", "week_start_date"]
 
@@ -178,7 +184,6 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
             fast.join(slow, on=join_keys, how="fullouter")
             .join(cluster, on="product_id", how="left")
         )
-        # ONE shared boolean drives ALL field selections -> fields never mix across models.
         use_fast = F.col("sales_speed_cluster").isin(*s["FAST_MOVER_CLUSTERS"])
         merged = (
             merged.withColumn("_use_fast", use_fast)
@@ -194,9 +199,7 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
                 "total_days",
                 F.when(F.col("_use_fast"), F.col("total_days_fast")).otherwise(F.col("total_days_slow")),
             )
-            # Keep the legacy invariant: a pair-week exists ONLY if the CHOSEN model has a
-            # row. If the selected side is absent (full-outer null), all three fields are
-            # null together -> drop the row (do NOT coalesce to 0).
+            # A pair-week exists only when the chosen model has a row (not coalesced to 0).
             .filter(F.col("total_days").isNotNull())
         )
         if native_week:
@@ -218,12 +221,8 @@ def read_lost_sales_weekly(ctx: KPIContext, path: Optional[str] = None) -> DataF
 
 
 def read_instock_weekly(ctx: KPIContext) -> DataFrame:
-    """Weekly in-stock aggregates from instock_source for the report window (cached per run).
-
-    Only called when INSTOCK_SOURCE_ENABLED. Independent of the lost-sales rows: every
-    (product[, store], week) the in-stock table has is kept, whether or not lost_sales_source
-    has a row for it. Scope restriction happens in build_pipeline_frames.
-    """
+    """Weekly in-stock aggregates of instock.weekly_source for the report window (cached per run), kept
+    independently of the lost-sales rows; build_pipeline_frames restricts them to scope."""
     if ctx.instock_weekly_base is not None:
         return ctx.instock_weekly_base
 
@@ -236,82 +235,423 @@ def read_instock_weekly(ctx: KPIContext) -> DataFrame:
     return ctx.instock_weekly_base
 
 
+def _block_join(blocked: DataFrame, location_col: str):
+    """``blocked``'s intervals with prefixed columns, and the condition matching a row of a frame keyed by
+    (product_id, <location_col>, date) to the interval containing its day. The intervals of a pair are
+    disjoint (scope._applied_block_intervals), so a row matches at most one."""
+    intervals = blocked.select(
+        F.col("product_id").alias("_block_product_id"),
+        F.col(location_col).alias("_block_location"),
+        F.col("first_day").alias("_block_first_day"),
+        F.col("last_day").alias("_block_last_day"),
+    )
+    on = (
+        (F.col("product_id") == F.col("_block_product_id"))
+        & (F.col(location_col) == F.col("_block_location"))
+        & F.col("date").between(F.col("_block_first_day"), F.col("_block_last_day"))
+    )
+    return intervals, on
+
+
+def _drop_fully_blocked_weeks(ctx: KPIContext, frame: DataFrame, blocked: DataFrame, keys: List[str]) -> DataFrame:
+    """``frame`` (keys, Year, Week) without the key-weeks whose every day inside the report window is blocked:
+    a week is fully blocked when the overlaps of its key's disjoint intervals with it cover all its days. A
+    partly blocked week stays, as a weekly source cannot say which days were blocked."""
+    start, end = ctx.settings["EFFECTIVE_REPORT_START_DATE"], ctx.settings["REPORT_END_DATE"]
+    weeks = ctx.fiscal_week.select(
+        "Year",
+        "Week",
+        F.greatest(F.col("week_start_date"), F.lit(start)).alias("_from"),
+        F.least(F.col("week_end_date"), F.lit(end)).alias("_to"),
+    )
+    overlap = F.datediff(F.least(F.col("last_day"), F.col("_to")), F.greatest(F.col("first_day"), F.col("_from"))) + 1
+    fully_blocked = (
+        frame.select(*keys, "Year", "Week")
+        .distinct()
+        .join(blocked, on=keys, how="inner")
+        .join(broadcast(weeks), on=["Year", "Week"], how="inner")
+        .groupBy(*keys, "Year", "Week", "_from", "_to")
+        .agg(F.sum(F.greatest(F.lit(0), overlap)).alias("_blocked_days"))
+        .filter(F.col("_blocked_days") >= F.datediff(F.col("_to"), F.col("_from")) + 1)
+        .select(*keys, "Year", "Week")
+    )
+    return frame.join(fully_blocked, on=[*keys, "Year", "Week"], how="left_anti")
+
+
+def _flag_blocked_days(df: DataFrame, blocked: Optional[DataFrame], location_col: str) -> DataFrame:
+    """Add is_blocked: whether the row's day lies in one of ``blocked``'s intervals (False everywhere when
+    blocked scope is off). Blocked days stay in the frame: each metric decides in metrics.compute_kpis
+    whether it reads them (blocked_scope.metrics)."""
+    if blocked is None:
+        return df.withColumn("is_blocked", F.lit(False))
+    intervals, on = _block_join(blocked, location_col)
+    return (
+        df.join(intervals, on, how="left")
+        .withColumn("is_blocked", F.col("_block_product_id").isNotNull())
+        .drop(*intervals.columns)
+    )
+
+
+def _drop_blocked_days(df: DataFrame, blocked: DataFrame, location_col: str) -> DataFrame:
+    """``df`` without the rows whose day lies in one of ``blocked``'s intervals."""
+    intervals, on = _block_join(blocked, location_col)
+    return df.join(intervals, on, how="left_anti")
+
+
+def _join_store_goods_in_transit(ctx: KPIContext, daily: DataFrame, scope_pairs: Optional[DataFrame]) -> DataFrame:
+    """Full outer join of store goods in transit (_goods_in_transit_quantity, destination_type 0) onto the
+    window's daily rows on (product_id, store_id, date), adding has_daily_row and git_quantity; limited to
+    the scoped pairs when the scope has stores.
+
+    A GIT-only day gets sales / revenue / inventory 0 and has_daily_row False. GIT-only days whose daily row
+    input_filters.daily_data removed (e.g. usable = 1) are dropped: those days are not reported. A gross-only
+    day (sales_basis "gross", no daily-data row) has has_daily_row False too but keeps its sales, and the
+    goods in transit of such a removed day are 0. Daily rows are first summed to one row per pair-day (a
+    child and its parent can share a date after the family roll-up), so the quantity attaches once per day;
+    every sum-based metric is unchanged by that.
+    """
+    day_keys = ["product_id", "store_id", "date"]
+    git = _goods_in_transit_quantity(ctx, 0, "store_id", ctx.settings["GOODS_IN_TRANSIT"]["date_shift_days"])
+    if scope_pairs is not None:
+        git = git.join(scope_pairs, on=["product_id", "store_id"], how="left_semi")
+    git = git.join(get_daily_data_excluded_days(ctx).withColumn("_removed", F.lit(True)), on=day_keys, how="left")
+    pair_days = (
+        daily.groupBy(*day_keys)
+        .agg(
+            F.sum("sales_revenue").alias("sales_revenue"),
+            F.sum("sales_quantity").alias("sales_quantity"),
+            F.sum("inventory").alias("inventory"),
+            F.max("gross_only").alias("gross_only"),
+        )
+        .withColumn("has_daily_row", ~F.col("gross_only"))
+    )
+    joined = (
+        pair_days.join(git, on=day_keys, how="full_outer")
+        .filter(F.col("has_daily_row").isNotNull() | F.col("_removed").isNull())
+        # A gross-only day daily-data removed keeps its sales but not the goods in transit the removal dropped.
+        .withColumn(
+            "git_quantity",
+            F.when(F.col("_removed").isNotNull() & ~F.col("has_daily_row"), F.lit(0.0)).otherwise(F.col("git_quantity")),
+        )
+        .drop("_removed")
+    )
+    for column in ("sales_revenue", "sales_quantity", "inventory"):
+        joined = joined.withColumn(
+            column, F.when(F.col("has_daily_row").isNull(), F.lit(0)).otherwise(F.col(column))
+        )
+    return (
+        joined.withColumn("gross_only", F.coalesce(F.col("gross_only"), F.lit(False)))
+        .withColumn("has_daily_row", F.coalesce(F.col("has_daily_row"), F.lit(False)))
+        .withColumn("git_quantity", F.coalesce(F.col("git_quantity"), F.lit(0.0)))
+    )
+
+
 def build_scoped_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs_in: DataFrame, has_store: bool) -> DataFrame:
-    """Daily sales/inventory for scoped pairs, with product cost/price and fiscal week attributes."""
+    """Daily sales / inventory of the scoped pairs, with product cost / price and fiscal week attributes.
+
+    Order: daily data -> scoped-pair semi-join -> store goods in transit (when a store metric is in
+    goods_in_transit.inventory_metrics; else has_daily_row True, except on sales_basis "gross" gross-only
+    days, and git_quantity 0 on every row) -> has_sales_row / has_stock_row ->
+    blocked-day flag (is_blocked, kept for metrics.compute_kpis to gate per metric) -> calendar -> scope
+    semi-join -> product attributes. week_days is the days of the row's fiscal week inside the window (7
+    unless report_end="latest_day"); latest_day also adds day_index, which the YTD cut filters on.
+    """
     s = ctx.settings
     time_cols = s["DAILY_TIME_COLUMNS"]
     date_col, week_col = time_cols["date"], time_cols["week"]
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
+    latest_day = s["REPORT_END_MODE"] == "latest_day"
+    store_git = any(m in STORE_GIT_METRICS for m in s["GOODS_IN_TRANSIT"]["inventory_metrics"])
+    gross = s["SALES_BASIS"] == "gross"
     select_cols = ["product_id", "store_id", date_col, "sales_revenue", "sales_quantity", "inventory"]
     if not s["USE_FISCAL_CALENDAR"]:
         select_cols.append(week_col)
 
-    daily = (
-        get_daily_data_raw(ctx)
-        .select(*select_cols)
-        .withColumn(date_col, F.to_date(F.col(date_col)))
-    )
+    daily = get_daily_data_raw(ctx).select(*select_cols, *(["gross_only"] if gross else []))
+    if not gross:
+        daily = daily.withColumn("gross_only", F.lit(False))
+    daily = daily.withColumn(date_col, F.to_date(F.col(date_col)))
     daily = rename_column_or_fail(daily, date_col, "date", "fiscal_calendar.daily_time_columns.date")
     daily = daily.filter(F.col("date").between(F.lit(start), F.lit(end)))
     if has_store:
         daily = daily.join(scope_pairs_in, on=["product_id", "store_id"], how="left_semi")
+    if store_git:
+        daily = _join_store_goods_in_transit(ctx, daily, scope_pairs_in if has_store else None)
+    else:
+        daily = daily.withColumn("has_daily_row", ~F.col("gross_only")).withColumn("git_quantity", F.lit(0.0))
+    # has_sales_row: the rows the sales metrics read (daily rows and gross-only days); has_stock_row: the rows
+    # that can be a day of stock (not a gross-only day without goods in transit).
+    daily = (
+        daily.withColumn("has_sales_row", F.col("has_daily_row") | F.col("gross_only"))
+        .withColumn("has_stock_row", ~(F.col("gross_only") & (F.col("git_quantity") == 0)))
+        .drop("gross_only")
+    )
+    daily = _flag_blocked_days(daily, ctx.blocked_days, "store_id")
     if not s["USE_FISCAL_CALENDAR"]:
-        # Year = calendar year of `date`; Week = native fiscal week column. Avoids the
-        # source 'year' column's ISO week-year mislabel (Dec -> next year). See fiscal.py.
+        # Year = calendar year of `date`, Week = the native week column (not the ISO week-year 'year').
         daily = daily.withColumn("Year", F.year(F.col("date")))
         daily = rename_column_or_fail(daily, week_col, "Week", "fiscal_calendar.daily_time_columns.week")
         daily = daily.withColumn("Week", F.col("Week").cast("int"))
+        if latest_day:
+            daily = daily.withColumn("day_index", F.dayofyear(F.col("date")))
     else:
-        daily = daily.join(broadcast(ctx.fiscal_cal.select("date", "Year", "Week")), on="date", how="inner")
+        daily = daily.join(
+            broadcast(_calendar_frame(ctx, *(["day_index"] if latest_day else []))), on="date", how="inner"
+        )
 
     scope_keys = ["product_id", "store_id", "Year", "Week"] if has_store else ["product_id", "Year", "Week"]
     daily = daily.join(scope_core, on=scope_keys, how="left_semi")
     return (
-        daily.join(ctx.products_attr, on="product_id", how="inner")
+        _with_week_days(ctx, daily)
+        .join(ctx.products_attr, on="product_id", how="inner")
         .withColumn("inventory_retail", F.round(F.col("inventory") * F.col("price_without_tax"), 2))
         .withColumn("inventory_cost", F.round(F.col("inventory") * F.col("cogs"), 2))
         .withColumn("sales_cost", F.round(F.col("sales_quantity") * F.col("cogs"), 2))
         .join(
-            broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Month")),
+            broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month")),
             on=["Year", "Week"],
             how="inner",
         )
     )
 
 
-def _roll_to_item_family_parent(df: DataFrame, ctx: KPIContext) -> DataFrame:
-    """Maps product_id -> coalesce(parent_id, product_id). scope_core/defined_scope is already
-    parent-rolled, so DC frames must be rolled too or child-id inventory is silently dropped.
-    """
-    child_to_parent = broadcast(
-        get_item_family_raw(ctx).filter(~F.col("is_main")).select("product_id", "parent_id")
+def instock_daily_pairs(ctx: KPIContext, scope_pairs: DataFrame) -> DataFrame:
+    """The (product_id, store_id) pairs instock.method="daily" counts: ``scope_pairs`` after
+    instock.daily.input_filters and the scope in-stock client rules, whose removal sets
+    scope.build_scope_removals built once."""
+    pairs = apply_input_filters(
+        scope_pairs, ctx.settings["INSTOCK_DAILY"]["input_filters"], "instock.daily.input_filters"
     )
+    if ctx.settings["SCOPE"]["instock_main_eligible_only"]:
+        # Client rule: stores where only a sub item (not the main) is eligible leave in-stock only.
+        pairs = pairs.join(ctx.instock_sub_only_pairs, on=["product_id", "store_id"], how="left_anti")
+    if ctx.settings["SCOPE"]["instock_exclude_unsuperseded_sizes"]:
+        # Client rule: sizes of a superseded class color outside the supersession (likely NGF) leave in-stock only.
+        pairs = pairs.join(broadcast(ctx.instock_unsuperseded_products), on="product_id", how="left_anti")
+    return pairs
+
+
+def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: DataFrame) -> DataFrame:
+    """In-stock frame of instock.method="daily": per scope pair x fiscal week, stocked_pairs (in-stock days)
+    and available_days (counted store-days), the shape of the weekly inst_data, from noob/daily-data.
+
+    Pairs: the scope pairs after instock.daily.input_filters and the scope in-stock client rules.
+    Each pair counts from its count start (instock.daily.count_start: "first_daily_row" from history_start,
+    "scope_start", or the "earliest" of the two), clipped to the window start, to the window end;
+    require_daily_data drops pairs without a daily row. A day without a daily row counts as out of stock.
+
+    Removed from the store-days: blocked days when in_stock_rate is in blocked_scope.metrics, and days with
+    usable != 1 when usable_only. An in-stock day is a usable day with inventory > 0, or (with
+    sales_counts_as_stocked) a day with sales_quantity > 0 even if inventory <= 0, or, with
+    goods_in_transit.store_instock, store goods in transit (united per day, never summed). Store-days per
+    pair-week come from week bounds, not from exploding every pair-day. weighted_instock_rate reads this
+    same frame.
+
+    report_end="latest_day": the week containing the YTD cut day K comes as two rows per pair (days up to K
+    and after, _fiscal_week_parts), each with last_day_index, so YTD keeps exactly days 1..K.
+    """
+    s = ctx.settings
+    cfg = s["INSTOCK_DAILY"]
+    goods_in_transit = s["GOODS_IN_TRANSIT"]
+    start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
+    latest_day = s["REPORT_END_MODE"] == "latest_day"
+    part_cols = ["last_day_index"] if latest_day else []
+    pair_keys = ["product_id", "store_id"]
+    day_keys = pair_keys + ["date"]
+    week_keys = pair_keys + ["Year", "Week"] + part_cols
+    blocked = ctx.blocked_days if "in_stock_rate" in s["BLOCKED_SCOPE"]["metrics"] else None
+    cal = broadcast(_calendar_frame(ctx, *part_cols))
+    fw = broadcast(_fiscal_week_parts(ctx))
+
+    pairs = instock_daily_pairs(ctx, scope_pairs)
+    daily = get_instock_daily_raw(ctx).join(pairs, on=pair_keys, how="left_semi")
+    if blocked is not None:
+        daily = _drop_blocked_days(daily, blocked, "store_id")
+    daily = daily.cache()
+    latest_daily_date = daily.agg(F.max("date")).first()[0]
+    if latest_daily_date is None or latest_daily_date < end:
+        raise ValueError(
+            f"instock.method='daily': daily-data latest date {latest_daily_date} (scope pairs) is before the report "
+            f"end {end}; days after it would count as out of stock. Wait for daily-data to reach the report "
+            "end, or set reporting_window.as_of_date earlier."
+        )
+
+    first_day = daily.groupBy(*pair_keys).agg(F.min("date").alias("first_date"))
+    pair_start = pairs.join(first_day, on=pair_keys, how="left")
+    if ctx.scope_pairs is not None:
+        pair_start = pair_start.join(
+            ctx.scope_pairs.select(*pair_keys, "scope_start"), on=pair_keys, how="left"
+        )
+    else:
+        pair_start = pair_start.withColumn("scope_start", F.lit(None).cast("date"))
+    if cfg["require_daily_data"]:
+        pair_start = pair_start.filter(F.col("first_date").isNotNull())
+    if cfg["count_start"] == "first_daily_row":
+        start_from = F.col("first_date")
+    elif cfg["count_start"] == "scope_start":
+        start_from = F.coalesce(F.col("scope_start"), F.col("first_date"))
+    else:
+        start_from = F.least(F.col("scope_start"), F.col("first_date"))
+    pair_start = (
+        pair_start.withColumn("start_from", start_from)
+        .filter(F.col("start_from").isNotNull())
+        .withColumn("count_from", F.greatest(F.col("start_from"), F.lit(start)))
+        .filter(F.col("count_from") <= F.lit(end))
+        .select(*pair_keys, "count_from")
+        .cache()
+    )
+
+    def pair_week_count(days: DataFrame, name: str) -> DataFrame:
+        return days.join(cal, on="date", how="inner").groupBy(*week_keys).agg(F.count(F.lit(1)).alias(name))
+
+    # Only days from each pair's count_from on (the daily rows reach back to history_start).
+    counted_daily = daily.join(pair_start, on=pair_keys, how="inner").filter(F.col("date") >= F.col("count_from"))
+
+    unusable_days = None
+    if cfg["usable_only"]:
+        unusable_days = counted_daily.filter(~F.col("is_usable")).select(*day_keys).distinct()
+
+    instock_condition = F.col("inventory") > 0
+    if cfg["sales_counts_as_stocked"]:
+        instock_condition = instock_condition | F.col("has_sales")
+    oh_days = counted_daily.filter(instock_condition)
+    if cfg["usable_only"]:
+        oh_days = oh_days.filter(F.col("is_usable"))
+    in_stock_days = oh_days.select(*day_keys).distinct()
+    if goods_in_transit["store_instock"]:
+        git_days = (
+            _goods_in_transit_days(ctx, 0, "store_id", goods_in_transit["date_shift_days"])
+            .join(pair_start, on=pair_keys, how="inner")
+            .filter(F.col("date") >= F.col("count_from"))
+            .select(*day_keys)
+            .distinct()
+        )
+        if blocked is not None:
+            git_days = _drop_blocked_days(git_days, blocked, "store_id")
+        if unusable_days is not None:
+            git_days = git_days.join(unusable_days, on=day_keys, how="left_anti")
+        in_stock_days = in_stock_days.unionByName(git_days).distinct()
+
+    store_days = (
+        pair_start.join(fw, F.col("week_end_date") >= F.col("count_from"))
+        .withColumn(
+            "counted_days",
+            F.datediff(
+                F.least(F.col("week_end_date"), F.lit(end)),
+                F.greatest(F.col("week_start_date"), F.col("count_from"), F.lit(start)),
+            )
+            + 1,
+        )
+        .filter(F.col("counted_days") > 0)
+    )
+    removed_days = F.lit(0)
+    if blocked is not None:
+        # Overlap of each blocked interval with each pair-week's counted days; a pair's intervals are disjoint,
+        # so the overlaps sum to each blocked day once.
+        overlap = F.datediff(
+            F.least(F.col("last_day"), F.col("week_end_date")),
+            F.greatest(F.col("first_day"), F.col("week_start_date"), F.col("count_from")),
+        ) + 1
+        n_blocked = (
+            store_days.join(blocked, on=pair_keys, how="inner")
+            .groupBy(*week_keys)
+            .agg(F.sum(F.greatest(F.lit(0), overlap)).alias("n_blocked"))
+        )
+        store_days = store_days.join(n_blocked, on=week_keys, how="left")
+        removed_days = removed_days + F.coalesce(F.col("n_blocked"), F.lit(0))
+    if unusable_days is not None:
+        store_days = store_days.join(pair_week_count(unusable_days, "n_unusable"), on=week_keys, how="left")
+        removed_days = removed_days + F.coalesce(F.col("n_unusable"), F.lit(0))
+
     return (
-        df.join(child_to_parent, on="product_id", how="left")
-        .withColumn("product_id", F.coalesce(F.col("parent_id"), F.col("product_id")))
-        .drop("parent_id")
+        store_days.join(pair_week_count(in_stock_days, "n_in_stock"), on=week_keys, how="left")
+        .withColumn("available_days", F.col("counted_days") - removed_days)
+        .withColumn("stocked_pairs", F.coalesce(F.col("n_in_stock"), F.lit(0)))
+        .filter(F.col("available_days") > 0)
+        .join(scope_core, on=ctx.scope_keys, how="left_semi")
+        .select(
+            *pair_keys, "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month",
+            "stocked_pairs", "available_days", *part_cols,
+        )
+        .join(ctx.product_dims, on="product_id", how="left")
+    )
+
+
+def _unsuperseded_sizes(ctx: KPIContext) -> DataFrame:
+    """product_ids in no item_family row whose group (products column scope.instock_unsuperseded_group_column,
+    option_code = the class color at tbretail) has a size in item_family: the sizes left out of a superseded
+    group's supersession (scope.instock_exclude_unsuperseded_sizes)."""
+    group_col = ctx.settings["SCOPE"]["instock_unsuperseded_group_column"]
+    family_ids = get_item_family_raw(ctx).select("product_id").distinct()
+    products = ctx.spark.read.format("delta").load(ctx.settings["PATH_PRODUCTS"]).select("product_id", group_col)
+    superseded_groups = products.join(family_ids, on="product_id", how="inner").select(group_col).distinct()
+    return (
+        products.join(superseded_groups, on=group_col, how="inner")
+        .join(family_ids, on="product_id", how="left_anti")
+        .select("product_id")
+        .distinct()
+    )
+
+
+def _goods_in_transit_quantity(ctx: KPIContext, destination_type: int, location_col: str, shift: int) -> DataFrame:
+    """(product_id, <location_col>, date, git_quantity): goods in transit (quantity > 0) to one destination
+    type (0 = store, 1 = warehouse), summed per day for the window, rolled to the family main when
+    goods_in_transit.roll_to_family_main. A snapshot dated D - shift describes the end of day D.
+    """
+    start, end = ctx.settings["EFFECTIVE_REPORT_START_DATE"], ctx.settings["REPORT_END_DATE"]
+    git = (
+        read_goods_in_transit_source(ctx.spark, ctx.settings)
+        .filter(F.col("date").between(F.date_sub(F.lit(start), shift), F.date_sub(F.lit(end), shift)))
+        .filter((F.col("destination_type") == destination_type) & (F.col("quantity") > 0))
+        .select(
+            "product_id",
+            F.col("destination_id").alias(location_col),
+            F.date_add(F.col("date"), shift).alias("date"),
+            "quantity",
+        )
+    )
+    if ctx.settings["GOODS_IN_TRANSIT"]["roll_to_family_main"]:
+        git = roll_to_item_family_parent(git, ctx)
+    return (
+        git.groupBy("product_id", location_col, "date")
+        .agg(F.sum("quantity").alias("git_quantity"))
+    )
+
+
+def _goods_in_transit_days(ctx: KPIContext, destination_type: int, location_col: str, shift: int) -> DataFrame:
+    """The (product_id, <location_col>, date) days of _goods_in_transit_quantity, for the in-stock metrics."""
+    return _goods_in_transit_quantity(ctx, destination_type, location_col, shift).select(
+        "product_id", location_col, "date"
     )
 
 
 def _get_inventory_warehouse_parent_rolled(ctx: KPIContext) -> DataFrame:
-    """inventory_warehouse for the report window, item-family-rolled to parent product_id
-    (gated by ITEM_FAMILY_ROLLUP["inventory_warehouse"], default True -- preserves today's
-    always-on behaviour) and re-aggregated so children sum rather than duplicate. Cached on ctx:
-    scope-independent, so both DC frames and every scope variant share one materialization.
-    """
+    """inventory_warehouse for the window, rolled to the family main (ITEM_FAMILY_ROLLUP["inventory_warehouse"])
+    and re-summed per (product_id, warehouse_id, date) so children add up instead of duplicating grid rows.
+    Scope-independent, cached once per run."""
     if ctx.inventory_warehouse_rolled is not None:
         return ctx.inventory_warehouse_rolled
 
     s = ctx.settings
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
+    if s["PATH_INVENTORY_WAREHOUSE"] is None:
+        # path_segments.inventory_warehouse is not set (config.py _switch_off_unset_sources): no DC rows.
+        ctx.inventory_warehouse_rolled = (
+            ctx.scope_pairs.select("product_id").limit(0)
+            .withColumn("warehouse_id", F.lit(None).cast("int"))
+            .withColumn("date", F.lit(None).cast("date"))
+            .withColumn("inventory", F.lit(None).cast("double"))
+            .cache()
+        )
+        return ctx.inventory_warehouse_rolled
     base = (
-        get_inventory_warehouse_raw(ctx)
+        read_inventory_warehouse_source(ctx.spark, s, quiet=True)
         .select("product_id", "warehouse_id", "date", "inventory")
         .withColumn("date", F.to_date(F.col("date")))
         .filter(F.col("date").between(F.lit(start), F.lit(end)))
     )
     if s["ITEM_FAMILY_ROLLUP"]["inventory_warehouse"]:
-        base = _roll_to_item_family_parent(base, ctx)
+        base = roll_to_item_family_parent(base, ctx)
     ctx.inventory_warehouse_rolled = (
         base.groupBy("product_id", "warehouse_id", "date")
         .agg(F.sum("inventory").alias("inventory"))
@@ -320,58 +660,84 @@ def _get_inventory_warehouse_parent_rolled(ctx: KPIContext) -> DataFrame:
     return ctx.inventory_warehouse_rolled
 
 
+def _dc_scope_keys(ctx: KPIContext) -> DataFrame:
+    """(product_id, warehouse_id) of the DC (network) scope, scope.dc_solution_id."""
+    return ctx.dc_scope_pairs.select("product_id", "warehouse_id")
+
+
 def build_dc_daily(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
-    """Daily DC (warehouse) inventory for the in-scope product population.
+    """Daily DC (warehouse) inventory of the scope's product-weeks, rolled to the family main.
 
-    Unlike build_scoped_daily, there is no store join/semi-join here -- DC data has no
-    store_id at all. Restriction is on (product_id, Year, Week): left-semi against
-    scope_core's own in-scope product-weeks, the SAME population every other scoped frame
-    for this scope/root is restricted to (not an independently-scoped universe).
-
-    Year/Week must be attached to a DC row BEFORE the scope semi-join, not after -- scope_core
-    always carries Year/Week (ctx.scope_keys includes it for every grain), and for
-    product_store_week grain scope membership genuinely varies by week. Restricting on
-    product_id alone (dropping Year/Week first) would keep a product's DC inventory for
-    weeks it fell out of scope, since DC data itself has no notion of scope weeks.
-
-    Reads inventory_warehouse item-family-rolled to parent product_id (matching scope_core's own
-    id space), which changes dc_mean_stock/WOS_DC/WOS_TOTAL for families with inventory split
-    across old and current item codes.
+    DC data has no store: rows are restricted on (product_id, Year, Week) of scope_core, attached to the
+    calendar first because scope membership can vary by week, then to ctx.dc_scope_pairs when set. With a
+    DC metric in goods_in_transit.inventory_metrics (context.DC_GIT_METRICS), DC goods in transit
+    (destination_type 1) is full-outer-joined on (product_id, warehouse_id, date): a GIT-only day has
+    inventory 0 and has_inventory_row False. DC blocked days are flagged (is_blocked) on every row;
+    report_end="latest_day" adds day_index.
     """
+    s = ctx.settings
+    latest_day = s["REPORT_END_MODE"] == "latest_day"
     scope_product_weeks = scope_core.select("product_id", "Year", "Week").distinct()
 
+    inventory = _get_inventory_warehouse_parent_rolled(ctx).withColumn("has_inventory_row", F.lit(True))
+    if any(m in DC_GIT_METRICS for m in s["GOODS_IN_TRANSIT"]["inventory_metrics"]):
+        git = _goods_in_transit_quantity(ctx, 1, "warehouse_id", s["GOODS_IN_TRANSIT"]["date_shift_days"])
+        inventory = (
+            inventory.join(git, on=["product_id", "warehouse_id", "date"], how="full_outer")
+            .withColumn(
+                "inventory", F.when(F.col("has_inventory_row").isNull(), F.lit(0)).otherwise(F.col("inventory"))
+            )
+            .withColumn("has_inventory_row", F.coalesce(F.col("has_inventory_row"), F.lit(False)))
+            .withColumn("git_quantity", F.coalesce(F.col("git_quantity"), F.lit(0.0)))
+        )
+    else:
+        inventory = inventory.withColumn("git_quantity", F.lit(0.0))
+    inventory = _flag_blocked_days(inventory, ctx.dc_blocked_days, "warehouse_id")
+
     dc = (
-        _get_inventory_warehouse_parent_rolled(ctx)
-        .join(broadcast(ctx.fiscal_cal.select("date", "Year", "Week")), on="date", how="inner")
+        inventory.join(
+            broadcast(_calendar_frame(ctx, *(["day_index"] if latest_day else []))), on="date", how="inner"
+        )
         .join(scope_product_weeks, on=["product_id", "Year", "Week"], how="left_semi")
     )
+    if ctx.dc_scope_pairs is not None:
+        # DC (network) scope: only its product x warehouse pairs, among the store scope's products.
+        dc = dc.join(_dc_scope_keys(ctx), on=["product_id", "warehouse_id"], how="left_semi")
     return dc.join(ctx.product_dims, on="product_id", how="left").join(
-        broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Month")),
+        broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month")),
         on=["Year", "Week"],
         how="inner",
     )
 
 
 def build_dc_inst(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
-    """DC in-stock rate frame: dc_stocked_days / dc_available_days over a per-pair daily grid.
+    """DC in-stock frame: dc_stocked_days / dc_available_days per (product_id, warehouse_id, fiscal week).
 
-    The grid is inventory-derived: each (product_id, warehouse_id) pair runs from its own first
-    inventory_warehouse row to the report window's end, missing days 0-filled and counted as
-    stockouts. That is the same bound the store-level in-stock denominator uses, so the two
-    series stay on one definition (see README's "dc_instock" section).
+    Each pair's daily grid runs from its first inventory_warehouse row to the window end, missing days
+    0-filled (stockouts) -- the same bound as the store in-stock denominator. A pair never stocked has no
+    row and is absent rather than 0%. A day is stocked when inventory > stock_threshold or, with
+    goods_in_transit.dc_instock, goods are in transit to the DC. DC blocked days leave both counts only
+    when dc_in_stock_rate is in blocked_scope.metrics; dc_unblocked_days counts the unblocked grid days
+    either way (comparable.py's pair universe). report_end="latest_day": grouped per week part with
+    last_day_index, like build_instock_daily.
     """
     s = ctx.settings
-    if not s.get("DC_INSTOCK_ENABLED", False):
-        # Disabled: empty, correctly-shaped frame so dc_in_stock_rate stays a literal-null column.
+    latest_day = s["REPORT_END_MODE"] == "latest_day"
+    part_cols = ["last_day_index"] if latest_day else []
+    if not s["DC_INSTOCK_ENABLED"]:
+        # Disabled: an empty frame of the right shape, so dc_in_stock_rate stays null.
         empty_base = (
             scope_core.select("product_id", "Year", "Week")
             .limit(0)
             .withColumn("warehouse_id", F.lit(None).cast("int"))
             .withColumn("dc_stocked_days", F.lit(None).cast("long"))
             .withColumn("dc_available_days", F.lit(None).cast("long"))
+            .withColumn("dc_unblocked_days", F.lit(None).cast("long"))
         )
+        if latest_day:
+            empty_base = empty_base.withColumn("last_day_index", F.lit(None).cast("int"))
         return empty_base.join(ctx.product_dims, on="product_id", how="left").join(
-            broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Month")),
+            broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month")),
             on=["Year", "Week"],
             how="inner",
         )
@@ -379,22 +745,18 @@ def build_dc_inst(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
     threshold = s["DC_INSTOCK_STOCK_THRESHOLD"]
 
-    # Each pair's window starts at its own first inventory_warehouse row. inventory_warehouse
-    # carries a row whenever a pair holds stock, so that first row is the same "first day this
-    # pair has any history" signal daily_data_expanded uses to bound the store-level in-stock
-    # denominator. Trade-off: a pair ranged at a DC but never once stocked has no row anywhere,
-    # so it is absent from the metric rather than reading 0%.
     inv = _get_inventory_warehouse_parent_rolled(ctx)
     pairs = inv.groupBy("product_id", "warehouse_id").agg(F.min("date").alias("first_stocked_date"))
+    if ctx.dc_scope_pairs is not None:
+        # DC (network) scope pairs only, before the per-day expansion.
+        pairs = pairs.join(_dc_scope_keys(ctx), on=["product_id", "warehouse_id"], how="left_semi")
     cal = broadcast(
-        ctx.fiscal_cal.select("date", "Year", "Week").filter(F.col("date").between(F.lit(start), F.lit(end)))
+        _calendar_frame(ctx, *part_cols).filter(F.col("date").between(F.lit(start), F.lit(end)))
     )
     scope_product_weeks = scope_core.select("product_id", "Year", "Week").distinct()
 
-    # Mirrors daily_data_expanded's own F.explode(F.sequence(min_date, max_date)) per-pair grid
-    # (customer-analysis-tbretail's 05_future_visibility_data_prep.py). inv is already filtered to
-    # the report window, so first_stocked_date can never precede it and needs no further clamping.
-    # Restrict to scope_core before joining inventory, so the join only runs over in-scope rows.
+    # inv is window-filtered, so first_stocked_date needs no clamping. The scope restriction runs before the
+    # inventory join so that join only sees in-scope rows.
     grid = (
         pairs.withColumn(
             "date",
@@ -406,59 +768,73 @@ def build_dc_inst(ctx: KPIContext, scope_core: DataFrame) -> DataFrame:
         .join(inv, on=["product_id", "warehouse_id", "date"], how="left")
         .withColumn("inventory", F.coalesce(F.col("inventory"), F.lit(0.0)))
     )
+    day_keys = ["product_id", "warehouse_id", "date"]
+    grid = _flag_blocked_days(grid, ctx.dc_blocked_days, "warehouse_id")
+    stocked = F.col("inventory") > F.lit(threshold)
+    if s["GOODS_IN_TRANSIT"]["dc_instock"]:
+        git_days = _goods_in_transit_days(
+            ctx, 1, "warehouse_id", s["GOODS_IN_TRANSIT"]["date_shift_days"]
+        ).withColumn("has_git", F.lit(True))
+        grid = grid.join(git_days, on=day_keys, how="left")
+        stocked = stocked | F.col("has_git").isNotNull()
+    counted = ~F.col("is_blocked") if "dc_in_stock_rate" in s["BLOCKED_SCOPE"]["metrics"] else F.lit(True)
 
-    dc_inst = grid.groupBy("product_id", "warehouse_id", "Year", "Week").agg(
-        F.sum((F.col("inventory") > F.lit(threshold)).cast("int")).alias("dc_stocked_days"),
-        F.count(F.lit(1)).alias("dc_available_days"),
+    dc_inst = (
+        grid.groupBy("product_id", "warehouse_id", "Year", "Week", *part_cols)
+        .agg(
+            F.sum(F.when(counted, stocked.cast("int"))).alias("dc_stocked_days"),
+            F.sum(F.when(counted, F.lit(1))).alias("dc_available_days"),
+            F.sum(F.when(~F.col("is_blocked"), F.lit(1))).alias("dc_unblocked_days"),
+        )
+        .filter(F.col("dc_available_days") > 0)
     )
     return dc_inst.join(ctx.product_dims, on="product_id", how="left").join(
-        broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Month")),
+        broadcast(ctx.fiscal_week.select("Year", "Week", "Year_Week", "week_start_date", "Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month")),
         on=["Year", "Week"],
         how="inner",
     )
 
 
 def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, DataFrame]:
-    """Build scoped_daily, inst_data, lost_base, and scope helper frames for one scope variant.
+    """The metric frames of one scope variant: scoped_daily, inst_data, lost_base, dc_daily, dc_inst, plus
+    scope_core (the scope keys, held so its cache can be released) / scope_pairs / scope_pair_weeks /
+    lost_sales_weekly.
 
-    Four independent metric families, each restricted to scope on its own: daily-data metrics
-    (scoped_daily), in-stock (inst_data), lost sales (lost_base), and DC (dc_daily/dc_inst).
-    They only meet at the final per-period aggregate join (metrics.build_kpi_table).
+    Each metric family is restricted to scope on its own and they only meet in the per-period join
+    (metrics.build_kpi_table). Goods in transit only reaches scoped_daily / dc_daily
+    (inventory_metrics) and the two in-stock frames (store_instock / dc_instock), never lost sales. Blocked
+    days are flagged on scoped_daily / dc_daily and gated per metric in metrics.compute_kpis; the in-stock
+    frames and lost sales's sales denominator drop them at build time when in_stock_rate /
+    dc_in_stock_rate / lost_sales_pct are in blocked_scope.metrics.
 
-    has_store is read from ctx.scope_keys (set once in scope.build_defined_scope from
-    defined_scope.grain), not re-derived from scope_in.columns -- every scope variant this is
-    called with (hybrid_scope_keys, defined_scope_keys, score_only_scope_keys) is already built
-    to exactly ctx.scope_keys's columns, so ctx.scope_keys is the authoritative source. Failing
-    loudly here on a genuine mismatch is far more useful than silently falling back to the
-    store-less/product-week path and surfacing a confusing UNRESOLVED_COLUMN several calls later.
+    has_store comes from ctx.scope_keys (scope.grain); a scope frame without the store_id it
+    expects fails here rather than as an unresolved column later.
     """
     scope_keys = ctx.scope_keys
     has_store = "store_id" in scope_keys
     if has_store and "store_id" not in scope_in.columns:
         raise ValueError(
-            "ctx.scope_keys expects store_id (defined_scope.grain is product_store or "
-            "product_store_week) but the scope frame passed to build_pipeline_frames doesn't "
+            "ctx.scope_keys expects store_id (scope.grain is product_store) "
+            "but the scope frame passed to build_pipeline_frames doesn't "
             f"have it -- columns: {sorted(scope_in.columns)}"
         )
     scope_core = scope_in.select(*scope_keys).distinct().cache()
 
     lost_sales_raw = read_lost_sales_weekly(ctx)
-    # Collapse scope to the source's own grain, never fan the source out to scope's: drop store_id
-    # from the join keys when lost_sales_raw has no per-store dimension (e.g. report_dfu,
-    # store_col=None), then left_semi against the collapsed scope. Joining scope_core's stores onto
-    # a store-less row instead would repeat lost_sales -- an ABSOLUTE count -- once per scoped
-    # store, inflating every later sum across stores by the store-count factor.
+    # Collapse scope to the source's grain (no store_id for a store-less source such as report_dfu), never
+    # fan the source out to scope's: lost_sales is an absolute count and would repeat once per store.
     ls_keys = [k for k in scope_keys if k != "store_id" or "store_id" in lost_sales_raw.columns]
     lost_sales_weekly = lost_sales_raw.join(
         scope_core.select(*ls_keys).distinct(), on=ls_keys, how="left_semi"
     ).cache()
 
-    # In-stock is its own metric family: with instock_source enabled it is read and
-    # scope-restricted on its own, at its own grain, exactly like lost-sales above -- never
-    # joined onto the lost-sales rows. Otherwise it comes from lost_sales_source's own
-    # in_stock/total_days columns, i.e. the same rows as lost_sales_weekly.
-    instock_source_enabled = ctx.settings.get("INSTOCK_SOURCE_ENABLED", False)
-    if instock_source_enabled:
+    # In-stock: "daily" is built below from the scope pairs; "weekly_source" is scope-restricted at its own
+    # grain like lost sales; "lost_sales_source" is lost_sales_weekly's own in_stock/total_days.
+    instock_method = ctx.settings["INSTOCK_METHOD"]
+    instock_source_enabled = instock_method == "weekly_source"
+    if instock_method == "daily":
+        instock_weekly = None
+    elif instock_source_enabled:
         instock_raw = read_instock_weekly(ctx)
         inst_keys = [k for k in scope_keys if k != "store_id" or "store_id" in instock_raw.columns]
         instock_weekly = instock_raw.join(
@@ -467,17 +843,12 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
     else:
         instock_weekly = lost_sales_weekly
 
-    # ls_has_store: whether lost_sales_weekly has its own store_id. Purely a property of
-    # lost_sales_source.store_col -- the semi-join above only filters rows, it never attaches a
-    # store dimension the source lacked -- so it is independent of scope's grain in BOTH
-    # directions: a store-ful source under product grain keeps its own stores (store granularity
-    # comes FROM lost-sales, scope itself has none), and a store-less source under product_store
-    # grain stays store-less (see the else branches of scope_pair_weeks/weekly_sales_for_lost/
-    # lost_base below). Neither is an error: nothing downstream reads a store dimension off these
-    # frames -- distinct_store_count/distinct_pair_count come from daily-data, not from here.
+    # Whether lost sales has its own store_id: a property of lost_sales_source.store_col only, independent
+    # of the scope grain (store and pair counts come from daily-data, not from these frames).
     ls_has_store = "store_id" in lost_sales_weekly.columns
     if has_store:
-        scope_pair_weeks = scope_core.select("product_id", "store_id", "Year", "Week").distinct().cache()
+        # scope_core is already the distinct (product_id, store_id, Year, Week) keys.
+        scope_pair_weeks = scope_core
         scope_pairs = scope_core.select("product_id", "store_id").distinct().cache()
     elif ls_has_store:
         scope_pair_weeks = lost_sales_weekly.select("product_id", "store_id", "Year", "Week").distinct().cache()
@@ -486,44 +857,57 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
         scope_pair_weeks = lost_sales_weekly.select("product_id", "Year", "Week").distinct().cache()
         scope_pairs = lost_sales_weekly.select("product_id").distinct().cache()
 
-    # Fall back to the fiscal week's day-count only for lost_sales_source's own in_stock/total_days
-    # (e.g. a null in the lost-sales table itself). instock_source's total_days is taken as-is --
-    # padding a null to a full week would deflate in_stock_rate/weighted_instock_rate.
-    available_days_expr = (
-        F.col("total_days")
-        if instock_source_enabled
-        else F.coalesce(F.col("total_days"), F.col("fiscal_week_days"))
-    )
-    inst_select_cols = ["product_id", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Month"]
-    if "store_id" in instock_weekly.columns:
-        inst_select_cols.insert(1, "store_id")
-    inst_data = (
-        instock_weekly.select(
-            *inst_select_cols,
-            F.col("in_stock_days").alias("stocked_pairs"),
-            available_days_expr.alias("available_days"),
+    if instock_method == "daily":
+        inst_data = build_instock_daily(ctx, scope_core, scope_pairs).cache()
+    else:
+        # A null total_days falls back to the week's day count for lost_sales_source only; weekly_source's is
+        # taken as-is (padding a null to a full week would deflate the in-stock rates).
+        available_days_expr = (
+            F.col("total_days")
+            if instock_source_enabled
+            else F.coalesce(F.col("total_days"), F.col("fiscal_week_days"))
         )
-        .filter(F.col("available_days") > 0)
-        .join(ctx.product_dims, on="product_id", how="left")
-    ).cache()
+        inst_select_cols = ["product_id", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month"]
+        has_instock_store = "store_id" in instock_weekly.columns
+        if has_instock_store:
+            inst_select_cols.insert(1, "store_id")
+        inst_data = (
+            instock_weekly.select(
+                *inst_select_cols,
+                F.col("in_stock_days").alias("stocked_pairs"),
+                available_days_expr.alias("available_days"),
+            )
+            .filter(F.col("available_days") > 0)
+            .join(ctx.product_dims, on="product_id", how="left")
+        )
+        # Only inst_data drops the fully blocked weeks: instock_weekly is lost_sales_weekly under
+        # lost_sales_source, and lost sales / lost_base keep every week.
+        instock_blocks = ctx.blocked_days if has_instock_store else ctx.blocked_product_days
+        if "in_stock_rate" in ctx.settings["BLOCKED_SCOPE"]["metrics"] and instock_blocks is not None:
+            block_keys = ["product_id", "store_id"] if has_instock_store else ["product_id"]
+            inst_data = _drop_fully_blocked_weeks(ctx, inst_data, instock_blocks, block_keys)
+        inst_data = inst_data.cache()
 
     scoped_daily = build_scoped_daily(ctx, scope_core, scope_pairs, has_store).cache()
     dc_daily = build_dc_daily(ctx, scope_core).cache()
     dc_inst = build_dc_inst(ctx, scope_core).cache()
-    # lost_sales_source.sales_filter narrows ONLY the sales half of lost_sales_pct's denominator,
-    # for when the lost-sales table covers a narrower population than daily_data (e.g. a model
-    # that excludes e-commerce, whose numerator would otherwise be divided by a denominator that
-    # still carries ecom sales). .get() so a customer config vendoring an older copy of
-    # materialize() still loads -- same reason DEFAULT_LOST_SALES_COLUMN_MAP exists in inputs.py.
-    ls_sales_filter = ctx.settings.get("LOST_SALES_SALES_FILTER") or []
+    # lost_sales_source.sales_filter narrows only the sales half of lost_sales_pct's denominator, for a
+    # lost-sales table covering a narrower population than daily-data (e.g. no e-commerce).
+    ls_sales_filter = ctx.settings["LOST_SALES_SALES_FILTER"]
+    daily_for_lost = scoped_daily.filter(F.col("has_sales_row"))
+    if "lost_sales_pct" in ctx.settings["BLOCKED_SCOPE"]["metrics"]:
+        daily_for_lost = daily_for_lost.filter(~F.col("is_blocked"))
     daily_for_lost = apply_input_filters(
-        scoped_daily, ls_sales_filter, "lost_sales_source.sales_filter", quiet=not ls_sales_filter
+        daily_for_lost,
+        ls_sales_filter,
+        "lost_sales_source.sales_filter",
+        quiet=not ls_sales_filter,
     )
     weekly_pair = daily_for_lost.groupBy("product_id", "store_id", "Year", "Week").agg(
         F.sum("sales_quantity").alias("weekly_sales")
     )
     lost_base_keys = ["product_id", "Year", "Week"]
-    lost_base_select_cols = ["product_id", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Month", "lost_sales"]
+    lost_base_select_cols = ["product_id", "Year", "Week", "Year_Week", "Fiscal_Quarter", "Fiscal_Half", "Fiscal_Month", "lost_sales"]
     if ls_has_store:
         lost_base_keys.insert(1, "store_id")
         lost_base_select_cols.insert(1, "store_id")
@@ -532,18 +916,21 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
             .select(*lost_base_keys, F.col("weekly_sales").alias("sales_quantity_weekly"))
         )
     else:
-        # No store dimension anywhere (scope AND lost_sales_source both store-less): roll
-        # weekly_pair (still per-store, from daily_for_lost) UP to product-week first --
-        # summed across every store selling the product, since there's no per-store lost_sales
-        # figure to match against individually -- then restrict to the (product, week) combos
-        # lost_sales_weekly actually covers, same as the has-store left_semi above.
+        # Store-less lost sales: sum the sales across stores to product-week, then keep the covered weeks.
         weekly_sales_for_lost = (
             weekly_pair.groupBy("product_id", "Year", "Week")
             .agg(F.sum("weekly_sales").alias("sales_quantity_weekly"))
             .join(scope_pair_weeks, on=lost_base_keys, how="left_semi")
         )
+    # report_end="latest_day": lost sales only reaches the last Saturday on or before REPORT_END_DATE, so a
+    # later partial week would divide missing lost sales by real sales; every view stops at that Saturday.
+    lost_weeks = lost_sales_weekly
+    if ctx.settings["REPORT_END_MODE"] == "latest_day":
+        lost_weeks = lost_weeks.filter(
+            F.col("week_end_date") <= F.lit(last_saturday_on_or_before(ctx.settings["REPORT_END_DATE"]))
+        )
     lost_base = (
-        lost_sales_weekly.select(*lost_base_select_cols)
+        lost_weeks.select(*lost_base_select_cols)
         .join(weekly_sales_for_lost, on=lost_base_keys, how="left")
         .withColumn("sales_quantity_weekly", F.coalesce(F.col("sales_quantity_weekly"), F.lit(0.0)))
         .withColumn(
@@ -557,6 +944,7 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
         "scoped_daily": scoped_daily,
         "inst_data": inst_data,
         "lost_base": lost_base,
+        "scope_core": scope_core,
         "scope_pairs": scope_pairs,
         "scope_pair_weeks": scope_pair_weeks,
         "lost_sales_weekly": lost_sales_weekly,

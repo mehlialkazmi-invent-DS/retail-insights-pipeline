@@ -2,44 +2,16 @@
 
 from __future__ import annotations
 
+import datetime
 from typing import Any, Dict, List, Optional
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-
-# Fallback defaults when a settings dict predates lost_sales_source/instock_source (e.g. a
-# customer config that duplicates config.py's schema instead of importing it) and so lacks
-# these resolved keys entirely — reproduces the schema every pipeline read has always assumed.
-DEFAULT_LOST_SALES_COLUMN_MAP: Dict[str, Any] = {
-    "week_col": "week_start_date",
-    "product_col": "product_id",
-    "store_col": "store_id",
-    "lost_sales_col": "lost_sales",
-    "in_stock_col": "in_stock",
-    "total_days_col": "details.total_days",
-    "product_agg_level_col": None,
-}
-DEFAULT_INSTOCK_SOURCE_COLUMN_MAP: Dict[str, Any] = {
-    "week_col": "week_start_date",
-    "product_col": "product_id",
-    "store_col": "store_id",
-    "in_stock_col": "in_stock",
-    "total_days_col": "total_days",
-    "product_agg_level_col": None,
-    "fallback_sources": [],
-}
-
+from pyspark.sql.functions import broadcast
 
 def resolve_csv_path(path: str, location: str = "datastore") -> str:
-    """Resolve a CSV path for Spark based on where the file physically lives.
-
-    location:
-      - "datastore" (default): a cloud / DBFS path under the datastore mount
-        (e.g. /mnt/invent-{customer}-datastore/...). Used as-is.
-      - "workspace": a Databricks **workspace** file (e.g. /Workspace/Users/...).
-        Spark reads workspace files through the ``file:`` scheme, so the prefix is
-        added when missing.
-    """
+    """CSV path for Spark: "datastore" (default) paths are used as-is; "workspace" paths (a Databricks
+    /Workspace/... file) get the ``file:`` scheme Spark needs to read them."""
     loc = (location or "datastore").strip().lower()
     if loc not in {"datastore", "workspace"}:
         raise ValueError(f"csv location must be 'datastore' or 'workspace'; got {location!r}")
@@ -54,13 +26,8 @@ def read_csv_source(
     csv_options: Optional[Dict[str, Any]] = None,
     location: str = "datastore",
 ) -> DataFrame:
-    """Read a CSV from either the datastore or a Databricks workspace path.
-
-    ``csv_options`` mirrors Spark CSV reader options. ``header`` (default True) and
-    ``inferSchema`` (default True) are applied as booleans; any other keys are passed
-    through verbatim. Use ``location`` to read workspace-resident CSVs (see
-    :func:`resolve_csv_path`).
-    """
+    """Read a CSV from the datastore or a workspace path (see resolve_csv_path). ``header`` and
+    ``inferSchema`` default to True; other ``csv_options`` pass through to the Spark reader."""
     opts = dict(csv_options or {})
     resolved = resolve_csv_path(path, location)
     reader = spark.read.option("header", str(opts.get("header", True)).lower())
@@ -74,7 +41,7 @@ def read_csv_source(
 
 
 def _input_filters(settings: Dict[str, Any], source: str) -> List[str]:
-    return list(settings.get("INPUT_FILTERS", {}).get(source, []) or [])
+    return list(settings["INPUT_FILTERS"].get(source) or [])
 
 
 def apply_input_filters(df: DataFrame, expressions: List[str], source_name: str, quiet: bool = False) -> DataFrame:
@@ -88,42 +55,16 @@ def apply_input_filters(df: DataFrame, expressions: List[str], source_name: str,
     return df
 
 
-def read_defined_scope_source(
-    spark: SparkSession, settings: Dict[str, Any], quiet: bool = False
-) -> DataFrame:
-    path = settings["DEFINED_SCOPE"]["path"]
-    filters = _input_filters(settings, "defined_scope")
-    if not quiet:
-        print(f"reading defined_scope: {path}")
-    raw = spark.read.format("delta").load(path)
-    if filters and not quiet:
-        print(f"defined_scope filters ({len(filters)}):")
-    return apply_input_filters(raw, filters, "defined_scope", quiet=quiet)
-
-
 def _print_date_range(df: DataFrame, date_col: str, label: str) -> None:
-    """Always printed (independent of the read's own ``quiet`` logging flag) — the date span
-    actually present in a main input source is worth surfacing on every run, not just verbose ones."""
-    if date_col not in df.columns:
-        return
+    """Print the date span present in a main input source (on every run, whatever ``quiet`` says)."""
     parsed = F.to_date(F.col(date_col))
     bounds = df.agg(F.min(parsed).alias("min"), F.max(parsed).alias("max")).collect()[0]
     print(f"  {label} date range in source ({date_col}): {bounds['min']} to {bounds['max']}")
 
 
 def rename_column_or_fail(df: DataFrame, source_col: str, canonical: str, config_key: str) -> DataFrame:
-    """Rename source_col -> canonical, failing loudly if source_col isn't actually a column.
-
-    Plain ``withColumnRenamed`` silently no-ops when the source column doesn't exist --
-    instead of erroring at the point of misconfiguration, it hides the problem until some
-    later, unrelated operation (e.g. a groupBy several calls downstream) finally references
-    the canonical name and fails with a confusing "column not found" pointing at the wrong
-    line. Every config-driven rename in this pipeline should go through this helper instead.
-
-    Verifies the column exists even when source_col already equals canonical (no rename
-    needed) -- "already correctly named" is still a claim about the source's actual schema,
-    not something to assume without checking.
-    """
+    """Rename source_col -> canonical, failing when source_col is not a column (withColumnRenamed silently
+    no-ops, which surfaces later as a confusing missing column). Checked even when no rename is needed."""
     if source_col not in df.columns:
         raise ValueError(
             f"{config_key}={source_col!r} not found on the source table; "
@@ -133,21 +74,11 @@ def rename_column_or_fail(df: DataFrame, source_col: str, canonical: str, config
 
 
 def _rename_join_keys_to_canonical(df: DataFrame, col_map: Dict[str, Any]) -> DataFrame:
-    """Rename a source's own product/store/week columns to the pipeline's canonical
-    names (product_id, store_id, week_start_date) so every downstream reader can keep
-    assuming those names regardless of what a client's raw table calls them.
+    """Rename a source's product / store / week columns to product_id / store_id / week_start_date.
 
-    product_col and store_col are each optional: a source with no per-store dimension sets
-    store_col to None and the resulting frame simply has no store_id column at all; a source
-    with no native product-id-level column at all sets product_col to None, relying entirely
-    on product_agg_level_col's join (_map_product_agg_level_to_product_id, called before this)
-    to have already produced product_id.
-
-    Configure exactly one of product_col / product_agg_level_col per source, never both: if
-    product_col is set AND actually present on the source, it always takes precedence over
-    product_agg_level_col (see _map_product_agg_level_to_product_id's own no-op check) --
-    leaving both set is misleading, not additive, since the agg-level join would silently
-    never fire.
+    store_col None: the frame has no store_id. product_col None: product_id must already come from
+    product_agg_level_col (_map_product_agg_level_to_product_id). Configure exactly one of product_col /
+    product_agg_level_col: a present product_col always wins, so setting both is misleading.
     """
     product_col = col_map.get("product_col")
     if product_col:
@@ -172,21 +103,9 @@ def _map_product_agg_level_to_product_id(
     settings: Dict[str, Any],
     quiet: bool = False,
 ) -> DataFrame:
-    """Backfill product_id from product_agg_level when a source is keyed by planning/DFU level
-    instead of product_id (e.g. a table where that key is genuinely one-to-many with
-    product_id) -- mirrors kpi-skill-toolkit's own product_agg_level fallback (same
-    product_planning_level table, same planning_level_id rename, same inner join).
-
-    product_col is a precedence flag as much as a rename target: this is a no-op whenever
-    product_col is configured (non-None) AND actually present on the source -- product_col
-    always wins, even if product_agg_level_col also happens to be set. It also no-ops when
-    product_agg_level_col isn't configured at all (nothing to fall back to). It only actually
-    fires -- and does the join -- when product_col is None/absent-from-source AND
-    product_agg_level_col is configured. Configure exactly one of the two per source; if
-    product_agg_level_col IS explicitly configured (in the firing branch), the configured
-    column must actually exist -- unlike "not configured", a wrong explicit value is a real
-    misconfiguration and should fail loudly here rather than silently no-op and surface as a
-    confusing missing-product_id error several calls downstream.
+    """Map a source keyed by planning / DFU level to product_id via product_planning_level (inner join on
+    planning_level_id). No-op when product_col is set and present on the source, or product_agg_level_col
+    is unset; a configured product_agg_level_col missing from the source fails.
     """
     product_col = col_map.get("product_col")
     agg_col = col_map.get("product_agg_level_col")
@@ -212,7 +131,7 @@ def read_lost_sales_source(
     spark: SparkSession, settings: Dict[str, Any], path: Optional[str] = None, quiet: bool = False
 ) -> DataFrame:
     path = path or settings["PATH_LOST_SALES"]
-    col_map = settings.get("LOST_SALES_COLUMN_MAP") or DEFAULT_LOST_SALES_COLUMN_MAP
+    col_map = settings["LOST_SALES_COLUMN_MAP"]
     filters = _input_filters(settings, "lost_sales")
     if not quiet:
         print(f"reading lost_sales: {path}")
@@ -227,23 +146,16 @@ def read_lost_sales_source(
 
 
 def read_instock_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
-    """In-stock table for the instock_source override (only read when enabled).
+    """instock.weekly_source's table as product_id[, store_id], week_start_date, in_stock, total_days.
 
-    Renamed to canonical product_id/[store_id/]week_start_date/in_stock/total_days columns,
-    regardless of what the source calls them (see INSTOCK_SOURCE_COLUMN_MAP).
-
-    fallback_sources (optional): additional column-sets read from the SAME table -- e.g.
-    report_dfu's LY_/LLY_ columns, which carry the same in_stock/total_days formula for the
-    calendar week exactly 52/104 weeks before each row's own TY_ week (see README) -- appended
-    in listed order to fill in weeks the primary column-set doesn't have. A fallback never
-    overrides a (product[, store], week) the primary (or an earlier fallback) already covered;
-    it only fills genuinely missing weeks. Safe because in_stock/total_days is a ratio and both
-    sources compute it the same way for any real week they both happen to cover.
+    fallback_sources: further column sets of the same table (e.g. report_dfu's LY_ / LLY_ columns, the same
+    formula for the week 52 / 104 weeks earlier), appended in order to fill only the (product[, store],
+    week) keys no earlier set has; a covered week is never overridden.
     """
     path = settings["PATH_INSTOCK_SOURCE"]
-    col_map = settings.get("INSTOCK_SOURCE_COLUMN_MAP") or DEFAULT_INSTOCK_SOURCE_COLUMN_MAP
+    col_map = settings["INSTOCK_SOURCE_COLUMN_MAP"]
     if not quiet:
-        print(f"reading instock_source: {path}")
+        print(f"reading instock.weekly_source: {path}")
     raw = spark.read.format("delta").load(path)
 
     def _build(cm: Dict[str, Any]) -> DataFrame:
@@ -269,17 +181,11 @@ def read_instock_source(spark: SparkSession, settings: Dict[str, Any], quiet: bo
 
 
 def read_speed_cluster_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
-    """One row per product_id with its numeric sales-speed cluster.
-
-    Supports two source table shapes via SPEED_CLUSTER_FORMAT:
-      "long" (default) - a long-format attributes table (one row per product_id x
-          attribute_name); filtered to SPEED_CLUSTER_ATTRIBUTE_NAME, attribute_value is
-          the cluster. This is the platform's noob/product-cluster-attributes-snapshot shape.
-      "wide" - the cluster is already its own column (SPEED_CLUSTER_VALUE_COL) on a
-          table with one row per product_id.
-    """
+    """One row per product_id with its integer sales_speed_cluster. SPEED_CLUSTER_FORMAT "long" (default): an
+    attributes table filtered to SPEED_CLUSTER_ATTRIBUTE_NAME (attribute_value is the cluster); "wide": the
+    cluster is the SPEED_CLUSTER_VALUE_COL column."""
     path = settings["PATH_SPEED_CLUSTER"]
-    fmt = settings.get("SPEED_CLUSTER_FORMAT", "long")
+    fmt = settings["SPEED_CLUSTER_FORMAT"]
     raw = spark.read.format("delta").load(path)
     if fmt == "wide":
         value_col = settings["SPEED_CLUSTER_VALUE_COL"]
@@ -312,38 +218,152 @@ def read_daily_data_source(spark: SparkSession, settings: Dict[str, Any], quiet:
     return out
 
 
+def _gross_sales_by_day(ctx) -> DataFrame:
+    """operation/transactional_sales as (product_id, store_id, _gross_date, gross_revenue, gross_quantity):
+    the rows of the report window that pass input_filters.transactional_sales (tbretail: sales_type != "return";
+    return rows are stored positive), rolled to the family main when ITEM_FAMILY_ROLLUP["transactional_sales"]
+    is True and summed per product x store x day.
+
+    The window filter is on the raw date column, so Delta file pruning applies; the configured filters run on
+    the raw columns before only the five needed ones are kept. Rolled before the sum because daily-data is in
+    the family-main id space.
+    """
+    s = ctx.settings
+    day_after_end = s["REPORT_END_DATE"] + datetime.timedelta(days=1)
+    windowed = (
+        ctx.spark.read.format("delta")
+        .load(s["PATH_TRANSACTIONAL_SALES"])
+        .filter(
+            (F.col("date") >= F.lit(s["EFFECTIVE_REPORT_START_DATE"].isoformat()))
+            & (F.col("date") < F.lit(day_after_end.isoformat()))
+        )
+    )
+    gross = apply_input_filters(
+        windowed, _input_filters(s, "transactional_sales"), "transactional_sales", quiet=True
+    ).select("product_id", "store_id", F.to_date(F.col("date")).alias("_gross_date"), "sales_revenue", "sales_quantity")
+    if s["ITEM_FAMILY_ROLLUP"]["transactional_sales"]:
+        gross = roll_to_item_family_parent(gross, ctx)
+    return gross.groupBy("product_id", "store_id", "_gross_date").agg(
+        F.sum(F.col("sales_revenue").cast("double")).alias("gross_revenue"),
+        F.sum(F.col("sales_quantity").cast("double")).alias("gross_quantity"),
+    )
+
+
+def _with_gross_sales(daily: DataFrame, ctx) -> DataFrame:
+    """``daily`` with sales_revenue / sales_quantity replaced by the gross (filtered) transactional sales of
+    the same product x store x day, 0 where a daily row has none, plus a ``gross_only`` flag.
+
+    Every transactional day is kept: a day with no daily row (none exists, or input_filters.daily_data
+    removed it, e.g. usable = 1) becomes a row of its own with inventory 0 and gross_only True, so the
+    sales metrics see all gross sales while the inventory metrics still read only the daily-data days
+    (build_scoped_daily turns the flag into has_daily_row / has_sales_row / has_stock_row). On the civil calendar
+    a sales-only day takes its native week from the daily-data rows of the same date.
+
+    With the daily-data family roll-up, a child and its parent on the same date are summed into one row first,
+    so the gross of that day attaches once instead of once per row.
+    """
+    s = ctx.settings
+    date_col = s["DAILY_TIME_COLUMNS"]["date"]
+    if s["ITEM_FAMILY_ROLLUP"]["daily_data"]:
+        measures = ("sales_revenue", "sales_quantity", "inventory")
+        daily = daily.groupBy(*[c for c in daily.columns if c not in measures]).agg(
+            *[F.sum(m).alias(m) for m in measures]
+        )
+    date_type = daily.schema[date_col].dataType
+    no_inventory = F.lit(0.0).cast(daily.schema["inventory"].dataType)
+    gross = _gross_sales_by_day(ctx)
+    civil = not s["USE_FISCAL_CALENDAR"]
+    week_col = s["DAILY_TIME_COLUMNS"]["week"]
+    if civil:
+        # A sales-only day takes the native week of its date from the daily-data rows of that date.
+        week_by_date = daily.groupBy(F.to_date(F.col(date_col)).alias("_gross_date")).agg(
+            F.max(week_col).alias("_gross_week")
+        )
+        gross = gross.join(F.broadcast(week_by_date), on="_gross_date", how="left")
+    joined = (
+        daily.withColumn("_gross_date", F.to_date(F.col(date_col)))
+        .join(gross, on=["product_id", "store_id", "_gross_date"], how="full_outer")
+        .withColumn("gross_only", F.col(date_col).isNull())
+    )
+    if civil:
+        joined = joined.withColumn(week_col, F.coalesce(F.col(week_col), F.col("_gross_week"))).drop("_gross_week")
+    return (
+        joined.withColumn(date_col, F.coalesce(F.col(date_col), F.col("_gross_date").cast(date_type)))
+        .withColumn("sales_revenue", F.coalesce(F.col("gross_revenue"), F.lit(0.0)))
+        .withColumn("sales_quantity", F.coalesce(F.col("gross_quantity"), F.lit(0.0)))
+        .withColumn("inventory", F.coalesce(F.col("inventory"), no_inventory))
+        .drop("_gross_date", "gross_revenue", "gross_quantity")
+    )
+
+
 def get_daily_data_raw(ctx) -> DataFrame:
-    """Cached daily-data read (config filters applied once per run), item-family-rolled to
-    parent product_id when ITEM_FAMILY_ROLLUP["daily_data"] is True (default -- see config.py).
+    """Cached daily-data for the report window: input_filters.daily_data applied, rows dated outside
+    [EFFECTIVE_REPORT_START_DATE, REPORT_END_DATE] dropped, rolled to the family main when
+    ITEM_FAMILY_ROLLUP["daily_data"] is True, and only the columns its readers use. With sales_basis "gross"
+    its sales_revenue / sales_quantity are the transactional sales that pass input_filters.transactional_sales,
+    on every transactional day (_with_gross_sales adds the days daily-data has no row for, flagged gross_only),
+    so every reader follows the basis.
 
-    Without this, build_scoped_daily's own join to already-parent-rolled scope_core/
-    ctx.products_attr (pipeline.py) silently DROPS any daily-data row still carrying a
-    child/superseded product_id, since the join has no matching parent-only key for it -- a
-    pre-existing bug this default-on rollup fixes. Applied once here (not at each of this
-    function's call sites) since every consumer (build_scoped_daily, scope.py's
-    read_daily_for_scope, fiscal.py) should see the same parent-rolled id space scope_core
-    itself is already in.
+    Every reader (build_scoped_daily, scope.read_daily_for_scope,
+    fiscal.build_time_grain_from_daily_data) keeps only window dates itself, so the window filter and the
+    column selection drop nothing they read; they only keep the cache small.
 
-    Deliberately does NOT re-aggregate after the mapping, unlike
-    pipeline._get_inventory_warehouse_parent_rolled: a child and its parent both having a row on
-    one date is harmless here, since every consumer either sums those rows (sales, inventory
-    totals) or groups by date before averaging (metrics._mean_stock_frame) or uses countDistinct.
-    inventory_warehouse must re-aggregate because build_dc_inst joins it onto a per-pair date grid,
-    where a duplicate key would fan out grid rows and inflate dc_available_days.
+    The roll-up matters because scope_core and products_attr are already in the family-main id space: a
+    child product_id would drop out of build_scoped_daily's joins. Under "net" a child and its parent on the
+    same date are not re-aggregated here; every reader sums those rows, groups by date first or counts distinct.
     """
     if ctx.daily_data_raw is None:
-        raw = read_daily_data_source(ctx.spark, ctx.settings, quiet=True)
-        if ctx.settings["ITEM_FAMILY_ROLLUP"]["daily_data"]:
-            from kpi_pipeline.pipeline import _roll_to_item_family_parent
-
-            raw = _roll_to_item_family_parent(raw, ctx)
+        s = ctx.settings
+        time_cols = s["DAILY_TIME_COLUMNS"]
+        columns = ["product_id", "store_id", time_cols["date"], "sales_revenue", "sales_quantity", "inventory"]
+        if not s["USE_FISCAL_CALENDAR"]:
+            columns.append(time_cols["week"])
+        raw = read_daily_data_source(ctx.spark, s, quiet=True).filter(
+            F.to_date(F.col(time_cols["date"])).between(
+                F.lit(s["EFFECTIVE_REPORT_START_DATE"]), F.lit(s["REPORT_END_DATE"])
+            )
+        )
+        if s["ITEM_FAMILY_ROLLUP"]["daily_data"]:
+            raw = roll_to_item_family_parent(raw, ctx)
+        raw = raw.select(*columns)
+        if s["SALES_BASIS"] == "gross":
+            raw = _with_gross_sales(raw, ctx)
         ctx.daily_data_raw = raw.cache()
     return ctx.daily_data_raw
 
 
+def get_daily_data_excluded_days(ctx) -> DataFrame:
+    """Cached distinct (product_id, store_id, date) window days whose daily-data row input_filters.daily_data
+    removes (fails, or is null on, a filter), rolled to the family main like get_daily_data_raw; empty
+    without filters. build_scoped_daily drops goods-in-transit-only days on them, so a filtered-out day
+    (e.g. usable = 1) does not re-enter as a zero-sales inventory day. Scope-independent, built once per run.
+    """
+    if ctx.daily_data_excluded_days is None:
+        s = ctx.settings
+        date_col = s["DAILY_TIME_COLUMNS"]["date"]
+        start = s["EFFECTIVE_REPORT_START_DATE"]
+        day_after_end = s["REPORT_END_DATE"] + datetime.timedelta(days=1)
+        kept = F.lit(True)
+        for expr in _input_filters(s, "daily_data"):
+            if expr.strip():
+                kept = kept & F.expr(expr)
+        removed = (
+            ctx.spark.read.format("delta")
+            .load(s["PATH_DAILY_DATA"])
+            .filter(
+                (F.col(date_col) >= F.lit(start.isoformat())) & (F.col(date_col) < F.lit(day_after_end.isoformat()))
+            )
+            .filter(~F.coalesce(kept, F.lit(False)))
+            .select("product_id", "store_id", F.to_date(F.col(date_col)).alias("date"))
+        )
+        if s["ITEM_FAMILY_ROLLUP"]["daily_data"]:
+            removed = roll_to_item_family_parent(removed, ctx)
+        ctx.daily_data_excluded_days = removed.distinct().cache()
+    return ctx.daily_data_excluded_days
+
+
 def read_inventory_warehouse_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
-    """DC/warehouse daily inventory table -- plain product_id/warehouse_id/date/inventory
-    columns, no column-mapping needed (unlike lost_sales_source/instock_source)."""
+    """DC (warehouse) daily inventory: product_id, warehouse_id, date, inventory."""
     path = settings["PATH_INVENTORY_WAREHOUSE"]
     filters = _input_filters(settings, "inventory_warehouse")
     if not quiet:
@@ -356,17 +376,8 @@ def read_inventory_warehouse_source(spark: SparkSession, settings: Dict[str, Any
     return out
 
 
-def get_inventory_warehouse_raw(ctx) -> DataFrame:
-    """Cached inventory_warehouse read (config filters applied once per run)."""
-    if ctx.inventory_warehouse_raw is None:
-        ctx.inventory_warehouse_raw = read_inventory_warehouse_source(ctx.spark, ctx.settings, quiet=True).cache()
-    return ctx.inventory_warehouse_raw
-
-
 def read_item_family_source(spark: SparkSession, settings: Dict[str, Any], quiet: bool = False) -> DataFrame:
-    """Parent/child item-family map -- rolls superseded child products (is_main=false) onto
-    their parent product_id (see README's "dc_instock" section). Read unconditionally whenever
-    inventory_warehouse is configured; is_main=false filtering happens downstream in pipeline.py."""
+    """Item-family map (product_id, parent_id, is_main): superseded children roll onto their parent."""
     path = settings["PATH_ITEM_FAMILY"]
     col_map = settings["ITEM_FAMILY_COLUMN_MAP"]
     filters = _input_filters(settings, "item_family")
@@ -387,6 +398,297 @@ def get_item_family_raw(ctx) -> DataFrame:
     if ctx.item_family_raw is None:
         ctx.item_family_raw = read_item_family_source(ctx.spark, ctx.settings, quiet=True).cache()
     return ctx.item_family_raw
+
+
+def roll_to_item_family_parent(df: DataFrame, ctx) -> DataFrame:
+    """product_id -> coalesce(parent_id, product_id) over item_family's non-main rows: rolls a frame onto the
+    family-main id space scope_core is in, so child-id rows are not dropped by its joins."""
+    child_to_parent = broadcast(
+        get_item_family_raw(ctx).filter(~F.col("is_main")).select("product_id", "parent_id")
+    )
+    return (
+        df.join(child_to_parent, on="product_id", how="left")
+        .withColumn("product_id", F.coalesce(F.col("parent_id"), F.col("product_id")))
+        .drop("parent_id")
+    )
+
+
+def scope_run_date(settings: Dict[str, Any]) -> datetime.date:
+    """scope.run_date, or the latest Sunday on or before today when unset."""
+    configured = settings["SCOPE"]["run_date"]
+    if configured is not None:
+        return configured
+    today = datetime.date.today()
+    return today - datetime.timedelta(days=(today.weekday() + 1) % 7)
+
+
+def read_scope_source(
+    spark: SparkSession,
+    settings: Dict[str, Any],
+    solution_ids: Optional[List[int]],
+    location_col: str,
+    quiet: bool = False,
+) -> DataFrame:
+    """The scope table's rows, renamed to product_id, <location_col> (the store or the warehouse), start_date
+    (columns.start, as a date), and for time="weekly" scope_date (columns.date, as a date) or Year / Week
+    (columns.year / columns.week, as ints); only the configured columns are kept.
+
+    Rows are limited to solution_ids (columns.solution), to the scope run_date (columns.run_date), and to
+    those still open on it (columns.end null or >= run_date); input_filters.scope applies on top. Fails when
+    a solution / run_date filter leaves no row: a wrong solution_id or run_date must not give an empty report.
+    """
+    cfg = settings["SCOPE"]
+    cols = cfg["columns"]
+    path = cfg["path"]
+    filters = _input_filters(settings, "scope")
+    run_date = scope_run_date(settings)
+    if not quiet:
+        detail = f" (solution_id in {solution_ids}, run_date={run_date})" if cols["solution"] or cols["run_date"] else ""
+        print(f"reading scope: {path}{detail}")
+        if filters:
+            print(f"scope filters ({len(filters)}):")
+    rows = apply_input_filters(spark.read.format("delta").load(path), filters, "scope", quiet=quiet)
+    if cols["solution"]:
+        rows = rows.filter(F.col(cols["solution"]).isin(solution_ids))
+    if cols["run_date"]:
+        rows = rows.filter(F.col(cols["run_date"]) == F.lit(run_date))
+    if cols["end"]:
+        rows = rows.filter(F.col(cols["end"]).isNull() | (F.col(cols["end"]) >= F.lit(run_date)))
+    select = [F.col(cols["product"]).alias("product_id")]
+    if cols["store"]:
+        select.append(F.col(cols["store"]).alias(location_col))
+    if cols["start"]:
+        select.append(F.to_date(cols["start"]).alias("start_date"))
+    if cfg["time"] == "weekly":
+        if cols["date"]:
+            select.append(F.to_date(cols["date"]).alias("scope_date"))
+        else:
+            select += [F.col(cols["year"]).cast("int").alias("Year"), F.col(cols["week"]).cast("int").alias("Week")]
+    rows = rows.select(*select)
+    if (cols["solution"] or cols["run_date"]) and rows.limit(1).count() == 0:
+        raise ValueError(
+            f"No scope rows for solution_id in {solution_ids} run_date={run_date} at {path}; "
+            "check scope.solution_id and scope.run_date."
+        )
+    return rows
+
+
+def read_active_product_ids(spark: SparkSession, settings: Dict[str, Any]) -> DataFrame:
+    return (
+        spark.read.format("delta").load(settings["PATH_PRODUCTS"])
+        .filter(F.col("is_active") == True)  # noqa: E712
+        .select("product_id")
+        .distinct()
+    )
+
+
+# Source key columns of each UI blocked-scope kind; destination_id is the store (blocked_scope) or the
+# warehouse (dc_blocked_scope).
+BLOCKED_SCOPE_KINDS = {
+    "product": ["product_id"],
+    "product_destination": ["product_id", "destination_id"],
+    "destination": ["destination_id"],
+}
+
+
+def blocked_scope_keys(kind: str, location_col: str) -> List[str]:
+    """Join keys of one blocked-scope kind, destination_id named location_col (store_id / warehouse_id)."""
+    return [location_col if c == "destination_id" else c for c in BLOCKED_SCOPE_KINDS[kind]]
+
+
+def read_blocked_scope_source(
+    spark: SparkSession, folder: str, solution_ids: List[int], kind: str, location_col: str
+) -> DataFrame:
+    """{folder}/{kind} of a UI blocked-scope snapshot for the solution(s), as (blocked_scope_keys(kind,
+    location_col), block_start, block_end). A missing folder fails the Spark read; a row without
+    start_date fails here."""
+    path = f"{folder}/{kind}"
+    print(f"reading blocked scope {kind} (solution_id in {solution_ids}): {path}")
+    blocks = (
+        spark.read.parquet(path)
+        .filter(F.col("solution_id").isin(solution_ids))
+        .select(
+            *[
+                F.col(source).cast("int").alias(key)
+                for source, key in zip(BLOCKED_SCOPE_KINDS[kind], blocked_scope_keys(kind, location_col))
+            ],
+            F.to_date("start_date").alias("block_start"),
+            F.to_date("end_date").alias("block_end"),
+        )
+    )
+    if blocks.filter(F.col("block_start").isNull()).limit(1).count() > 0:
+        raise ValueError(f"blocked scope {kind} has rows without start_date at {path}")
+    return blocks
+
+
+def read_goods_in_transit_source(spark: SparkSession, settings: Dict[str, Any]) -> DataFrame:
+    """Raw operation/goods_in_transit (snapshot per date; destination_type 0 = store, 1 = warehouse)."""
+    path = settings["PATH_GOODS_IN_TRANSIT"]
+    print(f"reading goods_in_transit: {path}")
+    return spark.read.format("delta").load(path)
+
+
+def _span_rows(df: DataFrame, spans: List[tuple]) -> List[tuple]:
+    """(label, first, last) per (label, column, condition) span of df, from one aggregation; a span with no row
+    has first and last None. A column name is read as a date; a Column expression is used as it is."""
+    aggs = []
+    for index, (_, column, condition) in enumerate(spans):
+        parsed = F.to_date(F.col(column)) if isinstance(column, str) else column
+        value = parsed if condition is None else F.when(condition, parsed)
+        aggs += [F.min(value).alias(f"first_{index}"), F.max(value).alias(f"last_{index}")]
+    bounds = df.agg(*aggs).first()
+    return [(label, bounds[f"first_{i}"], bounds[f"last_{i}"]) for i, (label, _, _) in enumerate(spans)]
+
+
+def _kept_condition(expressions: List[str]):
+    kept = F.lit(True)
+    for expr in expressions:
+        if expr.strip():
+            kept = kept & F.coalesce(F.expr(expr), F.lit(False))
+    return kept
+
+
+def collect_data_coverage(ctx) -> List[Dict[str, Any]]:
+    """What data each source holds and over which dates, for the report's Methodology tab (debugging): per source
+    its table, the (first, last) date of each measure it carries, and the input filters in force. One
+    aggregation per dated source, over the whole table (not only the report window), so the dates show what the
+    source offers, not only what the report uses. Sources that are switched off are left out; the scope has
+    dates only when it is weekly (a daily scope is one scope applied back over the whole window).
+    """
+    s = ctx.settings
+    spark = ctx.spark
+    sources: List[Dict[str, Any]] = []
+
+    def add(title: str, path: Optional[str], rows: List[tuple], filters: List[str], notes: Optional[List[str]] = None):
+        sources.append({"title": title, "path": path, "rows": rows, "filters": filters, "notes": notes or []})
+
+    window = (s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"])
+    add("Report window", None, [("Window the report covers", *window)], [],
+        [f"Run as of {s['AS_OF_DATE']}; report end mode {s['REPORT_END_MODE']}."])
+
+    date_col = s["DAILY_TIME_COLUMNS"]["date"]
+    daily_filters = _input_filters(s, "daily_data")
+    kept = _kept_condition(daily_filters)
+    daily = spark.read.format("delta").load(s["PATH_DAILY_DATA"])
+    add(
+        "Daily data", s["PATH_DAILY_DATA"],
+        _span_rows(daily, [
+            ("Every row in the table", date_col, None),
+            ("Rows kept by the filters", date_col, kept),
+            ("Sales (units above 0), kept rows", date_col, kept & (F.col("sales_quantity") > 0)),
+            ("Inventory recorded, kept rows", date_col, kept & F.col("inventory").isNotNull()),
+        ]),
+        daily_filters,
+        ["Sales and inventory come from this table."] if s["SALES_BASIS"] == "net"
+        else ["Sales basis is gross: sales come from transactional sales (below); inventory comes from this table."],
+    )
+
+    if s["SALES_BASIS"] == "gross":
+        filters = _input_filters(s, "transactional_sales")
+        transactional = spark.read.format("delta").load(s["PATH_TRANSACTIONAL_SALES"])
+        add("Transactional sales (gross sales)", s["PATH_TRANSACTIONAL_SALES"],
+            _span_rows(transactional, [("Every row in the table", "date", None),
+                                       ("Rows kept by the filters", "date", _kept_condition(filters))]),
+            filters)
+
+    lost_sales_filters = _input_filters(s, "lost_sales")
+    lost_sales_col = s["LOST_SALES_COLUMN_MAP"]["lost_sales_col"]
+    lost_sales = read_lost_sales_source(spark, s, quiet=True)
+    add("Lost sales", s["PATH_LOST_SALES"],
+        _span_rows(lost_sales, [("Weeks kept by the filters", "week_start_date", None),
+                                ("Weeks with a lost-sales value", "week_start_date", F.col(lost_sales_col).isNotNull())]),
+        lost_sales_filters,
+        [f"Lost-sales percentage divides by sales narrowed by: {'; '.join(s['LOST_SALES_SALES_FILTER'])}."]
+        if s["LOST_SALES_SALES_FILTER"] else [])
+    if s["LOST_SALES_ENSEMBLE_ENABLED"]:
+        slow = read_lost_sales_source(spark, s, s["PATH_LOST_SALES_SLOW"], quiet=True)
+        add("Lost sales, slow model", s["PATH_LOST_SALES_SLOW"],
+            _span_rows(slow, [("Weeks kept by the filters", "week_start_date", None)]), lost_sales_filters)
+
+    if s["INSTOCK_METHOD"] == "weekly_source":
+        add("In-stock source (weekly)", s["PATH_INSTOCK_SOURCE"],
+            _span_rows(read_instock_source(spark, s, quiet=True), [("Weeks", "week_start_date", None)]), [])
+
+    scope_cfg = s["SCOPE"]
+    scope_filters = _input_filters(s, "scope")
+    scope_notes = [f"Solution(s) {scope_cfg['solution_id']}."] if scope_cfg["solution_id"] else []
+    if scope_cfg["time"] == "weekly":
+        rows_ = read_scope_source(spark, s, scope_cfg["solution_id"], "store_id", quiet=True)
+        if scope_cfg["columns"]["date"]:
+            scope_rows = _span_rows(rows_, [("Weeks in the scope table", "scope_date", None)])
+        else:
+            scope_rows = _span_rows(
+                rows_, [("Weeks in the scope table", F.format_string("%04d-W%02d", F.col("Year"), F.col("Week")), None)]
+            )
+    else:
+        run_date = scope_run_date(s)
+        scope_rows = []
+        scope_notes.append(
+            f"Daily scope: one scope (as of {run_date}) applied back over the whole window, so it has no dates of its own."
+        )
+        if ctx.scope_pairs is not None and "scope_start" in ctx.scope_pairs.columns:
+            scope_rows = _span_rows(ctx.scope_pairs, [("Pair start dates (scope_start)", "scope_start", None)])
+    add("Scope", s["PATH_SCOPE"], scope_rows, scope_filters, scope_notes)
+
+    if s["PATH_INVENTORY_WAREHOUSE"] is not None:
+        filters = _input_filters(s, "inventory_warehouse")
+        warehouse = spark.read.format("delta").load(s["PATH_INVENTORY_WAREHOUSE"])
+        add("DC inventory", s["PATH_INVENTORY_WAREHOUSE"],
+            _span_rows(warehouse, [("Every row in the table", "date", None),
+                                   ("Rows kept by the filters", "date", _kept_condition(filters))]),
+            filters)
+
+    git = s["GOODS_IN_TRANSIT"]
+    if git["date_shift_days"] is not None:
+        transit = spark.read.format("delta").load(s["PATH_GOODS_IN_TRANSIT"])
+        add("Goods in transit", s["PATH_GOODS_IN_TRANSIT"],
+            _span_rows(transit, [("To stores (quantity above 0)", "date", (F.col("destination_type") == 0) & (F.col("quantity") > 0)),
+                                 ("To warehouses (quantity above 0)", "date", (F.col("destination_type") == 1) & (F.col("quantity") > 0))]),
+            [], [f"A snapshot dated D describes the end of day D - ({git['date_shift_days']})."])
+
+    blocked = s["BLOCKED_SCOPE"]
+    blocked_rows = []
+    for label, frame in (("Store blocked days in the window", ctx.blocked_days), ("DC blocked days in the window", ctx.dc_blocked_days)):
+        if frame is not None:
+            first, last = frame.agg(F.min("first_day"), F.max("last_day")).first()
+            blocked_rows.append((label, first, last))
+    if blocked["path"] is not None or blocked["dc_path"] is not None:
+        add("Blocked scope", blocked["path"] or blocked["dc_path"], blocked_rows, [],
+            [f"Rule {blocked['rule']}; store solution(s) {blocked['solution_id']}; kinds {blocked['kinds']}"
+             + (f"; DC solution(s) {blocked['dc_solution_id']}; DC kinds {blocked['dc_kinds']}." if blocked["dc_solution_id"] else ".")])
+
+    if s["PATH_ITEM_FAMILY"] is not None:
+        add("Item family (no dates)", s["PATH_ITEM_FAMILY"], [], _input_filters(s, "item_family"),
+            [f"Rolled to the family main: {[k for k, on in s['ITEM_FAMILY_ROLLUP'].items() if on] or 'none'}."])
+    return sources
+
+
+def get_instock_daily_raw(ctx) -> DataFrame:
+    """noob/daily-data for the daily in-stock metric: product_id, store_id, date, inventory, is_usable
+    (usable == 1; null is unusable), and has_sales (sales_quantity > 0), from instock.daily.history_start
+    to the report end, filtered on the raw date column so Delta file pruning applies. Not cached here
+    (build_instock_daily caches it after its scope join).
+
+    Not get_daily_data_raw: input_filters.daily_data typically drops unusable days, which the daily
+    in-stock method must see to take them out of the store-days. Not rolled to the family main:
+    noob/daily-data is already in the family-main id space.
+    """
+    s = ctx.settings
+    date_col = s["DAILY_TIME_COLUMNS"]["date"]
+    history_start = s["INSTOCK_DAILY"]["history_start"] or s["EFFECTIVE_REPORT_START_DATE"]
+    day_after_end = s["REPORT_END_DATE"] + datetime.timedelta(days=1)
+    raw = ctx.spark.read.format("delta").load(s["PATH_DAILY_DATA"])
+    return (
+        raw.filter((F.col(date_col) >= F.lit(history_start.isoformat())) & (F.col(date_col) < F.lit(day_after_end.isoformat())))
+        .select(
+            "product_id",
+            "store_id",
+            F.to_date(F.col(date_col)).alias("date"),
+            "inventory",
+            (F.coalesce(F.col("usable"), F.lit(0)) == 1).alias("is_usable"),
+            (F.coalesce(F.col("sales_quantity"), F.lit(0)) > 0).alias("has_sales"),
+        )
+    )
 
 
 def preview_input_table(

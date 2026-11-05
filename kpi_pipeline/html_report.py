@@ -1,32 +1,25 @@
-"""Render a standalone HTML KPI report from KPIContext.
+"""Standalone offline HTML KPI report from a KPIContext (render_kpi_html).
 
-Entry point
------------
-    render_kpi_html(ctx, output_path, ...)
-
-Produces a self-contained, offline HTML file with:
-  * Executive-style header (client, reporting window, scope, slices)
-  * CSS-only major tabs: Annual / YTD / Quarter / Monthly / Weekly / Metric Details
-  * Within each period tab: dimension tabs (Overall + every slice column in data)
-  * Within each slice dimension: vertical value tabs (one KPI panel per value)
-  * Quarter/Monthly/Weekly tabs are value trends only, limited to the most recent N periods
-    (configurable, default 5) — no comparison table on these tabs
-  * KPI tables with category row coloring (revenue / service / inventory / scale)
-  * Comparison section on the Annual (YoY) and YTD panels only
-  * Metric Details tab: definition, store scope, and formula for every active metric
-
-Slice dimensions and values are inferred from ``kpi_long`` — no hard-coded brand logic.
+Executive header; period tabs (Annual / YTD / Quarter / Half / Monthly / Weekly) and Metric Details; inside
+each period tab, dimension tabs (Overall + each cut found in kpi_long) and vertical value tabs, every tab
+label upper case (_tab_label). KPI tables are colored by metric category. Annual and YTD panels add the
+YoY / YTD comparison; Quarter / Half / Monthly / Weekly show the most recent N periods' values only. An
+outer root tab level appears with more than one root.
 """
+
 from __future__ import annotations
 
 import calendar
 import datetime
 import html as _html
+import math
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+
+from kpi_pipeline.fiscal import last_saturday_on_or_before
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +60,10 @@ _CAT: Dict[str, str] = {
 DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
     "total_sales_revenue": {
         "label": "Sales Revenue",
-        "definition": "Total net sales revenue across all scoped stores for the period.",
+        "definition": (
+            "Total sales revenue across all scoped stores for the period, net of returns. A product-store-day "
+            "whose returns outweigh its sales is not counted."
+        ),
         "store_scope": "All scoped stores",
         "formula": "Σ(daily_sales_revenue)",
     },
@@ -184,12 +180,10 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
     "dc_in_stock_rate": {
         "label": "DC In-Stock Rate",
         "definition": (
-            "In-stock rate at DC/warehouse level, over an EXPANDED inventory_warehouse grid "
-            "(product x warehouse x date). Each pair's grid runs from its own first stocked day "
-            "to the end of the report window, with every gap 0-filled and counted as a stockout "
-            "-- so a pair that stops being stocked keeps accruing stockout days here, where "
-            "dc_mean_stock/WOS_DC simply go quiet for it. A pair never stocked inside the window "
-            "has no row to anchor a grid to and is absent from all of them alike."
+            "In-stock rate at DC/warehouse level, over a day-by-day grid for each product and warehouse. "
+            "Each grid runs from the pair's first stocked day to the end of the report window, and every "
+            "day without stock counts as a stockout, so a pair that stops being stocked keeps adding "
+            "stockout days. A pair never stocked inside the window is not counted."
         ),
         "store_scope": "DC/warehouse only",
         "formula": "Σ(dc_stocked_days) ÷ Σ(dc_available_days)",
@@ -253,6 +247,155 @@ DEFAULT_METRIC_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "formula": "100 × Σ(lost_sales) ÷ Σ(floor(weekly_sales + lost_sales))",
     },
 }
+
+
+# Metrics that read the store blocked days (scoped daily-data rows, or the daily in-stock / lost-sales
+# sales built from them): each notes the exclusion when it is in blocked_scope.metrics. The DC metrics
+# (_DC_BLOCKED_DAY_METRICS) note DC blocked days; total_mean_stock / WOS_TOTAL / WOS_DC have both sides.
+_BLOCKED_DAY_METRICS = (
+    "total_sales_revenue", "total_sales_quantity", "AUR", "AUC", "distinct_product_count",
+    "distinct_store_count", "distinct_pair_count", "total_inventory", "mean_stock", "mean_stock_retail",
+    "mean_stock_cost", "total_mean_stock", "WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL",
+    "inventory_turnover_rate", "weighted_instock_rate", "lost_sales_pct",
+)
+_DC_BLOCKED_DAY_METRICS = ("dc_mean_stock", "total_mean_stock", "WOS_DC", "WOS_TOTAL")
+
+
+# Metrics that read daily-data's sales columns (the rest of them follow sales_basis): the Metric Details text of
+# each notes the gross basis.
+_SALES_BASIS_METRICS = (
+    "AUR", "AUC", "WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL", "inventory_turnover_rate",
+    "weighted_instock_rate", "lost_sales_pct",
+)
+
+# Inventory metrics that can count goods in transit (goods_in_transit.inventory_metrics) -> what they then count.
+_GIT_METRIC_NOTES: Dict[str, str] = {
+    **{m: "store" for m in (
+        "total_inventory", "mean_stock", "mean_stock_retail", "mean_stock_cost",
+        "WOS", "wos_revenue", "wos_cost", "inventory_turnover_rate",
+    )},
+    **{m: "DC" for m in ("dc_mean_stock", "WOS_DC")},
+    **{m: "store and DC" for m in ("total_mean_stock", "WOS_TOTAL")},
+}
+
+
+def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    """Definition overrides that depend on the run's settings: the gross sales basis (sales_basis "gross"),
+    the daily in-stock method (instock.method "daily"), the blocked-days note on the metrics named in
+    blocked_scope.metrics, the goods-in-transit notes on the inventory metrics
+    (goods_in_transit.inventory_metrics), the lost-sales period and WOS part-week notes (report_end
+    "latest_day") and the DC goods-in-transit / DC blocked-days notes on DC In-Stock Rate (dc_instock)."""
+    out: Dict[str, Dict[str, str]] = {}
+    if settings["SALES_BASIS"] == "gross":
+        filters = settings["INPUT_FILTERS"].get("transactional_sales") or []
+        passing = (
+            "every sales transaction except returns" if filters == ["sales_type != 'return'"]
+            else "sales transactions matching " + (_plain_filters(filters) or "no filter")
+        )
+        out["total_sales_revenue"] = {
+            **DEFAULT_METRIC_DEFINITIONS["total_sales_revenue"],
+            "definition": (
+                "Total gross sales revenue across all scoped stores for the period: " + passing
+                + ", on every day it happened. Before returns."
+            ),
+            "formula": "Σ(daily gross sales revenue)",
+        }
+        out["total_sales_quantity"] = {
+            **DEFAULT_METRIC_DEFINITIONS["total_sales_quantity"],
+            "definition": (
+                "Total gross units sold across all scoped stores for the period: " + passing
+                + ", on every day it happened. Before returns."
+            ),
+            "formula": "Σ(daily gross sales quantity)",
+        }
+        for metric in _SALES_BASIS_METRICS:
+            base = DEFAULT_METRIC_DEFINITIONS[metric]
+            out[metric] = {**base, "definition": base["definition"] + " Sales are gross (before returns)."}
+    blocked_metrics = settings["BLOCKED_SCOPE"]["metrics"]
+    if settings["BLOCKED_SCOPE"]["path"] is not None:
+        for metric in _BLOCKED_DAY_METRICS:
+            if metric in blocked_metrics:
+                base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
+                out[metric] = {
+                    **base,
+                    "definition": base["definition"] + " Days an item was blocked in the planning screens are excluded.",
+                }
+    if settings["BLOCKED_SCOPE"]["dc_solution_id"] is not None and settings["BLOCKED_SCOPE"]["dc_path"] is not None:
+        for metric in _DC_BLOCKED_DAY_METRICS:
+            if metric in blocked_metrics:
+                base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
+                out[metric] = {
+                    **base,
+                    "definition": base["definition"] + " DC days blocked in the planning screens are excluded.",
+                }
+    goods_in_transit = settings["GOODS_IN_TRANSIT"]
+    for metric in goods_in_transit["inventory_metrics"]:
+        base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
+        out[metric] = {
+            **base,
+            "definition": base["definition"]
+            + f" Inventory counts {_GIT_METRIC_NOTES[metric]} goods in transit on top of on-hand.",
+        }
+    if settings["REPORT_END_MODE"] == "latest_day":
+        last_saturday = last_saturday_on_or_before(settings["REPORT_END_DATE"])
+        base = out.get("lost_sales_pct", DEFAULT_METRIC_DEFINITIONS["lost_sales_pct"])
+        out["lost_sales_pct"] = {
+            **base,
+            "definition": base["definition"]
+            + f" Lost sales only has data through the last complete Saturday ({last_saturday}): every tab uses "
+            "whole weeks up to it, and YTD uses weeks 1 to that Saturday's fiscal week of every year, so the "
+            "days after it never dilute the rate.",
+        }
+        # YTD stops on the latest day, mid-week: its last fiscal week counts only the days it covers.
+        for metric in ("WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL"):
+            base = out.get(metric, DEFAULT_METRIC_DEFINITIONS[metric])
+            out[metric] = {
+                **base,
+                "definition": base["definition"]
+                + " In YTD, which ends on the latest day, the last fiscal week counts only its elapsed days: "
+                "its average inventory is weighted by elapsed days / 7.",
+            }
+    cfg = settings["INSTOCK_DAILY"]
+    if settings["INSTOCK_METHOD"] == "daily":
+        in_stock = "stock on hand"
+        if cfg["sales_counts_as_stocked"]:
+            in_stock += ", or the item sold that day"
+        if goods_in_transit["store_instock"]:
+            in_stock += ", or stock on its way to the store"
+        blocked_excluded = settings["BLOCKED_SCOPE"]["path"] is not None and "in_stock_rate" in blocked_metrics
+        excluded = " and ".join(
+            (["Blocked days"] if blocked_excluded else [])
+            + (["unusable days"] if cfg["usable_only"] else [])
+        )
+        excluded = excluded[:1].upper() + excluded[1:]
+        store_scope = "All scoped stores"
+        if cfg["input_filters"]:
+            store_scope += " (" + _plain_filters(cfg["input_filters"]) + ")"
+        if settings["SCOPE"]["instock_main_eligible_only"]:
+            store_scope += "; only stores where the main (new) item itself is eligible"
+        if settings["SCOPE"]["instock_exclude_unsuperseded_sizes"]:
+            store_scope += "; sizes of a superseded class color that are not in the supersession are excluded"
+        out["in_stock_rate"] = {
+            "label": "In-Stock Rate",
+            "definition": (
+                f"Share of counted store-days on which the product was in stock ({in_stock}), "
+                "from daily inventory. Each product-store pair counts from its count start; a day "
+                "without a daily record is out of stock."
+                + (f" {excluded} are excluded." if excluded else "")
+            ),
+            "store_scope": store_scope,
+            "formula": "Σ(in_stock_days) ÷ Σ(available_days)",
+        }
+    if settings["DC_INSTOCK_ENABLED"]:
+        dc_notes = []
+        if goods_in_transit["dc_instock"]:
+            dc_notes.append("A day with goods in transit to the DC also counts as stocked.")
+        if settings["BLOCKED_SCOPE"]["dc_solution_id"] is not None and settings["BLOCKED_SCOPE"]["dc_path"] is not None and "dc_in_stock_rate" in blocked_metrics:
+            dc_notes.append("DC days blocked in the planning screens are excluded.")
+        if dc_notes:
+            base = DEFAULT_METRIC_DEFINITIONS["dc_in_stock_rate"]
+            out["dc_in_stock_rate"] = {**base, "definition": base["definition"] + " " + " ".join(dc_notes)}
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +623,7 @@ _CSS_BASE = """\
   .kpi-table td {
     padding: 9px 13px;
     border-bottom: 1px solid #eef2f8;
-    text-align: right;
+    text-align: center;
     white-space: nowrap;
   }
   .kpi-table thead th {
@@ -492,7 +635,7 @@ _CSS_BASE = """\
     text-transform: uppercase;
   }
   .kpi-table .cell-kpi {
-    text-align: left;
+    text-align: center;
     min-width: 200px;
     max-width: 300px;
     white-space: normal;
@@ -536,15 +679,15 @@ _CSS_BASE = """\
     font-size: .73rem;
     letter-spacing: .04em;
     text-transform: uppercase;
-    text-align: left;
+    text-align: center;
   }
-  .cmp-table td { text-align: right; }
-  .cmp-table td:first-child { text-align: left; }
+  .cmp-table td { text-align: center; }
   .chg-pos { color: var(--good); font-weight: 700; }
   .chg-neg { color: var(--bad);  font-weight: 700; }
 
   /* --- Comparable (like-for-like) group divider: separates it from the value trend / regular
-     comparison tables above it, especially now that "quarter" can render several sub-tables. --- */
+     comparison tables above it, especially now that "quarter" / "half" render one sub-table per
+     period number. --- */
   .cmp-group-divider {
     margin-top: 30px;
     padding-top: 16px;
@@ -557,44 +700,148 @@ _CSS_BASE = """\
     color: var(--ink);
   }
 
+  /* --- One like-for-like block per quarter / half number: heading, then a rule and extra space
+     between consecutive blocks so Q1 / Q2 / ... (H1 / H2) read as separate tables. --- */
+  .cmp-period-block .cmp-section { margin-top: 12px; }
+  .cmp-period-block + .cmp-period-block {
+    margin-top: 36px;
+    padding-top: 22px;
+    border-top: 2px solid var(--border);
+  }
+  .cmp-period-heading {
+    margin: 0 0 4px;
+    font-size: .95rem;
+    font-weight: 800;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--ink);
+  }
+
   /* --- Metric definitions table --- */
   table.def-table {
     width: 100%;
+    table-layout: fixed;
     border-collapse: separate;
     border-spacing: 0;
     font-size: .8125rem;
   }
   .def-table th,
   .def-table td {
-    padding: 10px 14px;
+    padding: 14px 16px;
     border-bottom: 1px solid #eef2f8;
-    vertical-align: top;
+    vertical-align: middle;
+    text-align: center;
+    line-height: 1.5;
+    overflow-wrap: break-word;
   }
+  .def-table th:nth-child(1) { width: 14%; }
+  .def-table th:nth-child(2) { width: 41%; }
+  .def-table th:nth-child(3) { width: 19%; }
+  .def-table th:nth-child(4) { width: 26%; }
   .def-table thead th {
-    background: var(--accent-light);
-    color: var(--accent);
-    font-size: .73rem;
+    background: transparent;
+    color: var(--muted);
+    font-size: .7rem;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: .04em;
-    text-align: left;
+    letter-spacing: .08em;
+    border-bottom: 2px solid var(--border);
   }
-  .def-table td:first-child { font-weight: 600; white-space: nowrap; min-width: 160px; }
+  .def-table tbody tr:hover { background: #f7f9fd; }
+  .def-table td:first-child { font-weight: 700; color: var(--ink); }
+  .def-table td:nth-child(2) { color: var(--ink-soft); }
   .scope-badge {
     display: inline-block;
-    padding: 2px 9px;
-    border-radius: 20px;
+    padding: 3px 10px;
+    border-radius: 14px;
     font-size: .7rem;
     font-weight: 600;
-    white-space: nowrap;
+    line-height: 1.4;
   }
   .scope-all     { background: #eff6ff; color: #1e40af; }
   .scope-service { background: #ecfdf5; color: #065f46; }
   .def-table .formula {
     font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
     font-size: .75rem;
+    color: var(--accent);
+  }
+
+  /* --- Methodology tab --- */
+  .method-lead { margin: 4px 0 18px; font-size: .95rem; color: var(--ink-soft); }
+  .method-grid { columns: 4 270px; column-gap: 14px; margin-bottom: 30px; }
+  .method-card {
+    display: inline-block;
+    width: 100%;
+    margin: 0 0 14px;
+    break-inside: avoid;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-top: 3px solid var(--accent);
+    border-radius: 10px;
+    padding: 14px 18px 12px;
+  }
+  .method-card h4 {
+    margin: 0 0 8px;
+    font-size: .72rem;
+    font-weight: 800;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .method-card ul { margin: 0; padding-left: 17px; }
+  .method-card li { margin: 0 0 6px; font-size: .84rem; line-height: 1.5; color: var(--ink-soft); }
+  .method-heading {
+    margin: 0 0 8px;
+    font-size: .72rem;
+    font-weight: 800;
+    letter-spacing: .08em;
+    text-transform: uppercase;
     color: var(--muted);
   }
+  .method-heading-gap { margin-top: 30px; }
+  .method-path { margin-left: 10px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--ink-soft); }
+  .method-code {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 6px;
+    background: #f4f7fb;
+    color: var(--ink-soft);
+    font-size: .76rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  table.method-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: .8125rem; }
+  .method-table th, .method-table td { padding: 10px 14px; border-bottom: 1px solid #eef2f8; text-align: center; vertical-align: middle; line-height: 1.45; }
+  .method-table thead th {
+    color: var(--muted);
+    font-size: .7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    border-bottom: 2px solid var(--border);
+  }
+  .method-table td:first-child { font-weight: 600; color: var(--ink); }
+  .method-table td { color: var(--ink-soft); }
+  .method-table td:first-child { color: var(--ink); }
+  .method-table td div { margin: 2px 0; }
+  .method-table .method-group td {
+    background: var(--accent-light);
+    color: var(--accent);
+    font-size: .7rem;
+    font-weight: 800;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    padding: 6px 16px;
+  }
+  .method-pill {
+    display: inline-block;
+    min-width: 44px;
+    padding: 2px 12px;
+    border-radius: 14px;
+    font-size: .72rem;
+    font-weight: 700;
+  }
+  .method-pill.on { background: var(--accent-light); color: var(--accent); }
+  .method-pill.off { background: #f1f3f7; color: var(--muted); }
 
   .footnote {
     margin-top: 24px;
@@ -614,16 +861,33 @@ _CSS_BASE = """\
 """
 
 
+def _capitalize_words(text: Any) -> str:
+    """Capitalize each all-lowercase word; words with capitals (LFL, YTD, SMW) stay as they are."""
+    return " ".join(w[:1].upper() + w[1:] if w.islower() else w for w in str(text).split(" "))
+
+
+def _tab_label(text: Any) -> str:
+    """A tab label (root, period, dimension, value or Metric Details tab) in upper case: OVERALL, ANNUAL,
+    BANNER, LFL, METRIC DETAILS. Display only."""
+    return str(text).upper()
+
+
+def _root_display_label(root: str, root_display_labels: Dict[str, str]) -> str:
+    return root_display_labels.get(root, "Overall" if root == "overall" else root)
+
+
 def _safe_id(*parts: str) -> str:
     """Build a CSS-safe id fragment from arbitrary strings."""
     raw = "-".join(str(p) for p in parts)
     return re.sub(r"[^a-zA-Z0-9_-]", "-", raw)
 
 
-def _dim_label(dimension: str) -> str:
+def _dim_label(dimension: str, dimension_labels: Dict[str, str]) -> str:
+    if dimension in dimension_labels:
+        return dimension_labels[dimension]
     if dimension == "overall":
         return "Overall"
-    return dimension.replace("_", " ").title()
+    return _capitalize_words(dimension.replace("_", " "))
 
 
 def _infer_dimensions(kpi_long: pd.DataFrame, configured_slices: List[str]) -> List[str]:
@@ -704,16 +968,14 @@ def _tab_visibility_css(
     return "\n".join(lines)
 
 
-# "Metric Details" is root-independent (just metric definitions), so it's always a peer of
-# whichever tab level is OUTERMOST -- period tabs when there's only one root (today's exact
-# behavior), or the root tabs themselves when there's more than one -- never nested inside a
-# specific root's panel, and never duplicated per root. Emitted once regardless of root count.
-_DETAILS_TAB_CSS = (
-    "  #kpi-tab-details:checked ~ .top-panels .top-panel-details { display: block; }\n"
-    "  #kpi-tab-details:checked ~ .top-tab-bar label[for='kpi-tab-details'] "
-    "{ background: var(--surface); color: var(--ink); "
-    "box-shadow: inset 0 -3px 0 var(--accent); }"
-)
+# "Methodology" and "Metric Details" are root-independent: tabs that are peers of the outermost tab level (the
+# period tabs with one root, the root tabs with several).
+def _extra_tab_css(tab_id: str) -> str:
+    return (
+        f"  #kpi-tab-{tab_id}:checked ~ .top-panels .top-panel-{tab_id} {{ display: block; }}\n"
+        f"  #kpi-tab-{tab_id}:checked ~ .top-tab-bar label[for='kpi-tab-{tab_id}'] "
+        "{ background: var(--surface); color: var(--ink); box-shadow: inset 0 -3px 0 var(--accent); }"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -750,7 +1012,9 @@ def _fmt(metric: str, value: Any) -> str:
         return f"{v:.1f}%"
     if metric in ("distinct_product_count", "distinct_store_count", "distinct_pair_count"):
         return f"{int(v):,}"
-    if metric in ("WOS", "wos_revenue", "wos_cost", "inventory_turnover_rate", "WOS_DC", "WOS_TOTAL"):
+    if metric in ("WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL"):
+        return f"{math.floor(v)}"
+    if metric == "inventory_turnover_rate":
         return f"{v:.1f}"
     return f"{v:,.2f}"
 
@@ -782,32 +1046,16 @@ def _sort_period_labels(
     return sorted(periods)
 
 
-def _display_period_labels(
-    periods: List[str],
-    period_type: str,
-    week_start_by_period: Optional[Dict[str, Any]] = None,
-) -> List[str]:
-    """Return sorted period labels for HTML display (trim already applied to kpi_long at data level)."""
-    return _sort_period_labels(periods, period_type, week_start_by_period)
-
-
 def _month_labels_from_fiscal_cal(ctx: Any) -> Dict[str, str]:
-    """Read the display month label straight off the fiscal_cal upload, verbatim, when available.
-
-    Only produces entries for (Year, Fiscal_Month) periods where the client's fiscal_cal actually
-    carries a usable month-name column (config.py's fiscal_calendar.month_name_col -- e.g.
-    "month_name") -- trusts that source rather than re-deriving one. Whatever periods it doesn't
-    cover (column absent, or null for some weeks) are filled in by the derived fallback in
-    _build_month_display_labels below.
-    """
+    """{"YYYY-MM": label} from the fiscal_cal upload's month-name column (fiscal_calendar.month_name_col),
+    verbatim, for the periods where it is filled; _derive_month_display_labels covers the rest."""
     fw = ctx.fiscal_week
     if "Fiscal_Month_Name" not in fw.columns:
         return {}
     fw_pd = fw.select("Year", "Fiscal_Month", "Fiscal_Month_Name").dropna(subset=["Fiscal_Month_Name"]).distinct().toPandas()
     if fw_pd.empty:
         return {}
-    # A (Year, Fiscal_Month) should carry one consistent name across its weeks; if the upload is
-    # inconsistent, keep the first (alphabetically-arbitrary but deterministic) rather than error.
+    # One name per (Year, Fiscal_Month), even if the upload is inconsistent across its weeks.
     fw_pd = fw_pd.drop_duplicates(subset=["Year", "Fiscal_Month"])
     out: Dict[str, str] = {}
     for row in fw_pd.itertuples(index=False):
@@ -817,22 +1065,9 @@ def _month_labels_from_fiscal_cal(ctx: Any) -> Dict[str, str]:
 
 
 def _derive_month_display_labels(ctx: Any) -> Dict[str, str]:
-    """Map each "YYYY-MM" fiscal-month period key to a derived real-calendar-month display label.
-
-    Fallback used only for periods _month_labels_from_fiscal_cal didn't cover. The fiscal month
-    NUMBER (Fiscal_Month, from fiscal_cal) does not necessarily line up with the real calendar
-    month on a fiscal calendar -- e.g. tbretail's fiscal month 07 has been observed spanning
-    8/2-8/29 (real August), and a 5-week fiscal month can span parts of three real calendar
-    months. So the display name is the majority (by day count) real calendar month across each
-    fiscal month's actual dates, not a lookup on the fiscal month number itself. On the
-    civil-calendar path (USE_FISCAL_CALENDAR=False) Fiscal_Month already IS the real calendar
-    month, so this reduces to a no-op there.
-
-    ctx.fiscal_cal is date-grain (date, Year, Week[, Month]); ctx.fiscal_week carries the
-    resolved Fiscal_Month per (Year, Week). Both are already-cached small reference frames
-    (one row per date / per week for the report window), so pulling them to pandas here is
-    the same pattern already used for week_start_by_period above.
-    """
+    """{"YYYY-MM": label} naming each fiscal month after the real calendar month holding most of its days:
+    a fiscal month number need not match the calendar month (tbretail's fiscal month 07 spanned 8/2-8/29,
+    real August). On the civil calendar Fiscal_Month already is the calendar month."""
     fw_pd = ctx.fiscal_week.select("Year", "Week", "Fiscal_Month").distinct().toPandas()
     fc_pd = ctx.fiscal_cal.select("Year", "Week", "date").toPandas()
     fc_pd["calendar_month"] = pd.to_datetime(fc_pd["date"]).dt.month
@@ -853,14 +1088,7 @@ def _derive_month_display_labels(ctx: Any) -> Dict[str, str]:
 
 
 def _build_month_display_labels(ctx: Any) -> Dict[str, str]:
-    """Map each "YYYY-MM" fiscal-month period key to its Monthly-tab display label.
-
-    Prefers the fiscal_cal upload's own month-name column, verbatim, when the client's fiscal_cal
-    has one (see _month_labels_from_fiscal_cal / config.py's fiscal_calendar.month_name_col);
-    derives the rest from actual dates (_derive_month_display_labels). Each client's fiscal_cal
-    may or may not carry a usable month-name column -- both paths are always attempted so a
-    partial upload (some periods labelled, some not) still resolves every period.
-    """
+    """{"YYYY-MM": Monthly-tab label}: the upload's own month name where present, else the derived one."""
     from_source = _month_labels_from_fiscal_cal(ctx)
     derived = _derive_month_display_labels(ctx)
     return {**derived, **from_source}
@@ -871,23 +1099,9 @@ def _period_th_label(
     period_type: Optional[str],
     month_display_by_period: Optional[Dict[str, str]] = None,
 ) -> str:
-    """Column-header text for one period value.
-
-    Display-only: the underlying `period` string (e.g. "2026-08" for monthly) stays as-is
-    everywhere else -- kpi_long storage, incremental-save merge keys, and both the trimming
-    sort in kpi_long.trim_periods_to_recent and _sort_period_labels above depend on it being
-    lexically sortable ("YYYY-MM"), which a month name is not. Only this header text swaps to
-    a real calendar-month name.
-
-    "2026-08" is the FISCAL month key (Year + Fiscal_Month from fiscal_cal), which does NOT
-    line up with calendar month numbers on tbretail's (and possibly other clients') fiscal
-    calendar -- e.g. fiscal month 07 has been observed spanning 8/2-8/29 (real August), and a
-    5-week fiscal month can span parts of three real calendar months. So the display name is
-    looked up in month_display_by_period (built from the actual dates in fiscal_cal/fiscal_week
-    -- see render_kpi_html), never derived by feeding the fiscal month NUMBER into a month-name
-    table. If a period is missing from that map (should not normally happen), the raw fiscal
-    key is shown rather than guessing a name.
-    """
+    """Column-header text of one period. Display only: ``period`` stays the sortable "YYYY-MM" fiscal key
+    everywhere else. A monthly header comes from month_display_by_period (actual dates), never from the
+    fiscal month number; an unmapped period shows its raw key."""
     if period_type == "monthly":
         mapped = (month_display_by_period or {}).get(str(period))
         if mapped:
@@ -910,7 +1124,7 @@ def _pivot_single_value(
     ].copy()
     if sub.empty:
         return pd.DataFrame(), []
-    periods = _display_period_labels(
+    periods = _sort_period_labels(
         sub["period"].unique().tolist(),
         period_type,
         week_start_by_period,
@@ -973,19 +1187,8 @@ def _comparison_wide_html(
     period_type: Optional[str] = None,
     month_display_by_period: Optional[Dict[str, str]] = None,
 ) -> str:
-    """One consolidated YoY/YTD table: the same value columns _kpi_table_html renders (one per
-    period present in kpi_long, e.g. 2024/2025/2026 -- passed in pre-pivoted as ``value_sub``/
-    ``periods`` since _value_panel_content already computes them for the plain table) plus one
-    delta column per consecutive-period link present in ``comp_df`` (e.g. Delta 2025,
-    Delta 2026) -- same value+delta layout _comparable_wide_html established for the
-    comparable-pairs path. Previously this table carried delta columns only, with the value
-    trend shown separately in the plain _kpi_table_html panel directly above it -- a delta with
-    no value next to it isn't useful on its own, so the two are now one table whenever a
-    comparison exists for this period_type (comp_df is only ever populated for annual/ytd; see
-    _value_panel_content's fallback to the plain value-only table otherwise). Replaces the old
-    per-link stacked mini-tables (one 4-column Metric/prior/current/Change table per link) with
-    this single table.
-    """
+    """One YoY / YTD table: the panel's value columns (``value_sub`` / ``periods``, already pivoted) plus one
+    delta column per consecutive-period link in ``comp_df``; "" without a comparison for this value."""
     if comp_df is None or comp_df.empty or value_sub.empty or not periods:
         return ""
     comp_sub = comp_df[
@@ -1053,15 +1256,11 @@ def _comparable_wide_html(
     comp_label: str,
     period_type: Optional[str] = None,
     month_display_by_period: Optional[Dict[str, str]] = None,
+    title: Optional[str] = None,
 ) -> str:
-    """One consolidated comparable-pairs (like-for-like) YTD table: N value columns (one per
-    year in the report window, from comparable_kpi_long -- reuses _pivot_single_value, the same
-    wide-value pattern _kpi_table_html renders) plus N-1 delta columns (one per consecutive-year
-    link, from comparable_comparison_ytd's own per-link change_display) laid out side by side in
-    ONE table, instead of N-1 separate 2-column stacked tables. Same value+delta layout as
-    _comparison_wide_html's regular-comparison table, just sourced from comparable_kpi_long (a
-    separate restricted population) instead of the panel's own already-pivoted value table.
-    """
+    """One comparable-pairs (like-for-like) table: a value column per year from ``comparable_kpi_long`` (its
+    own restricted population) plus a delta column per consecutive-year link. ``title`` replaces the
+    default "<comp_label> Comparison" caption (the per-quarter / per-half blocks)."""
     if comparable_comp_df is None or comparable_comp_df.empty:
         return ""
     comp_sub = comparable_comp_df[
@@ -1079,9 +1278,7 @@ def _comparable_wide_html(
         return '<p style="color:#64748b;font-size:.875rem">No data for this selection.</p>'
     value_grp = value_sub.set_index("period")
 
-    # One delta column per consecutive-year link present for this dimension/value, ascending by
-    # the link's current (later) year -- same grouping _comparison_wide_html uses below, just
-    # alongside the value columns here instead of on its own.
+    # One delta column per consecutive-year link, ascending by the link's current year.
     links = comp_sub[["prior_period", "current_period"]].drop_duplicates().sort_values("current_period")
     link_pairs = list(zip(links["prior_period"], links["current_period"]))
 
@@ -1117,9 +1314,14 @@ def _comparable_wide_html(
             f"</tr>"
         )
 
+    caption = (
+        f"<p class='cmp-label cmp-period-heading'>{_esc(title)}</p>"
+        if title
+        else f"<p class='cmp-label'>{_esc(comp_label)} Comparison</p>"
+    )
     return (
         "<div class='cmp-section'>"
-        f"<p class='cmp-label'>{_esc(comp_label)} Comparison</p>"
+        f"{caption}"
         "<div class='table-wrap'>"
         f"<table class='cmp-table'>{head}<tbody>{''.join(rows)}</tbody></table>"
         "</div>"
@@ -1127,43 +1329,46 @@ def _comparable_wide_html(
     )
 
 
-def _comparable_quarter_section_html(
+_NUMBERED_PERIOD_PREFIX = {"quarter": "Q", "half": "H"}
+
+
+def _comparable_numbered_section_html(
     comparable_kpi_long: Optional[pd.DataFrame],
     comparable_comp_df: Optional[pd.DataFrame],
     dimension: str,
     dimension_value: str,
     metric_cols: List[str],
     labels: Dict[str, str],
+    period_type: str,
     month_display_by_period: Optional[Dict[str, str]] = None,
 ) -> str:
-    """One narrow value+delta table PER quarter number (Q1, Q2, ...) via _comparable_wide_html,
-    instead of a single table mixing every quarter's periods and links together -- each quarter
-    number has its own independent same-pairs population and year-set (see comparable.py's
-    build_comparable_pairs), and a combined table would grow a value column per quarter-year and
-    a delta column per quarter-link, quickly becoming unreadable. A quarter with no qualifying
-    data (fewer than 2 years having it, or 0 common pairs) simply contributes no table."""
+    """One value + delta block per quarter / half number (each has its own pair universe and years); a
+    number without qualifying data adds no block."""
+    prefix = _NUMBERED_PERIOD_PREFIX[period_type]
+    tag_col = f"{period_type}_number"
     if (
         comparable_comp_df is None
         or comparable_comp_df.empty
-        or "quarter_number" not in comparable_comp_df.columns
+        or tag_col not in comparable_comp_df.columns
     ):
         return ""
     sections: List[str] = []
-    for q in sorted(int(q) for q in comparable_comp_df["quarter_number"].dropna().unique()):
-        comp_q = comparable_comp_df[comparable_comp_df["quarter_number"] == q]
-        kpi_q = (
-            comparable_kpi_long[comparable_kpi_long["quarter_number"] == q]
+    for n in sorted(int(n) for n in comparable_comp_df[tag_col].dropna().unique()):
+        comp_n = comparable_comp_df[comparable_comp_df[tag_col] == n]
+        kpi_n = (
+            comparable_kpi_long[comparable_kpi_long[tag_col] == n]
             if comparable_kpi_long is not None
             and not comparable_kpi_long.empty
-            and "quarter_number" in comparable_kpi_long.columns
+            and tag_col in comparable_kpi_long.columns
             else pd.DataFrame()
         )
         html = _comparable_wide_html(
-            kpi_q, comp_q, dimension, dimension_value, metric_cols, labels,
-            f"Q{q}", "quarter", month_display_by_period,
+            kpi_n, comp_n, dimension, dimension_value, metric_cols, labels,
+            f"{prefix}{n}", period_type, month_display_by_period,
+            title=f"{prefix}{n} · Like-for-like",
         )
         if html:
-            sections.append(html)
+            sections.append(f"<div class='cmp-period-block'>{html}</div>")
     return "".join(sections)
 
 
@@ -1186,17 +1391,15 @@ def _value_panel_content(
         kpi_long, period_type, dimension, dimension_value, metric_cols,
         week_start_by_period,
     )
-    # A comparison only ever exists for annual/ytd (comp_df is None otherwise -- see
-    # render_kpi_html's comp_map). When it does, show ONE value+delta table instead of the plain
-    # value table followed by a delta-only table: a delta with no value next to it isn't useful.
+    # annual / ytd with a comparison: one value + delta table; otherwise the plain value table.
     table = _comparison_wide_html(
         sub, periods, comp_df, dimension, dimension_value, metric_cols, labels, comp_label,
         period_type, month_display_by_period,
     ) or _kpi_table_html(sub, periods, metric_cols, labels, period_type, month_display_by_period)
-    if period_type == "quarter":
-        comparable_cmp = _comparable_quarter_section_html(
+    if period_type in _NUMBERED_PERIOD_PREFIX:
+        comparable_cmp = _comparable_numbered_section_html(
             comparable_kpi_long, comparable_comp_df, dimension, dimension_value, metric_cols, labels,
-            month_display_by_period,
+            period_type, month_display_by_period,
         )
     else:
         comparable_cmp = _comparable_wide_html(
@@ -1246,7 +1449,7 @@ def _value_tabs_html(
 
     tab_labels = "".join(
         f"<label for='kpi-val-{_safe_id(root, period_type, dimension, str(i))}' class='value-tab'>"
-        f"{_esc(str(v))}</label>"
+        f"{_esc(_tab_label(v))}</label>"
         for i, v in enumerate(values)
     )
 
@@ -1282,6 +1485,8 @@ def _period_tab_html(
     month_display_by_period: Optional[Dict[str, str]] = None,
     root: str = "overall",
     comparable_kpi_long: Optional[pd.DataFrame] = None,
+    *,
+    dimension_labels: Dict[str, str],
 ) -> str:
     pt_id = _safe_id(root, period_type)
 
@@ -1293,7 +1498,7 @@ def _period_tab_html(
 
     tab_labels = "".join(
         f"<label for='kpi-dim-{_safe_id(root, period_type, dim)}' class='dim-tab'>"
-        f"{_esc(_dim_label(dim))}</label>"
+        f"{_esc(_tab_label(_dim_label(dim, dimension_labels)))}</label>"
         for dim in dims
     )
     tab_bar = f"<div class='dim-tab-bar dim-tab-bar-{pt_id}'>{tab_labels}</div>"
@@ -1342,14 +1547,14 @@ def _build_root_period_tabs(
     comparable_comp_map: Dict[str, Optional[pd.DataFrame]],
     week_start_by_period: Dict[str, Any],
     month_display_by_period: Dict[str, str],
-    extra_tab: Optional[Tuple[str, str, str]] = None,
+    extra_tabs: Optional[List[Tuple[str, str, str]]] = None,
     comparable_kpi_long_map: Optional[Dict[str, Optional[pd.DataFrame]]] = None,
+    *,
+    dimension_labels: Dict[str, str],
 ) -> Tuple[str, str]:
-    """Build (css, body_html) for one root's Annual/Quarter/Month/YTD/Weekly tab group, already
-    filtered to that root's rows. `extra_tab` (id, label, panel_html) -- used for "Metric Details"
-    when there's only one root (see render_kpi_html) -- is appended into the SAME radio group so
-    it sits as a peer of the period tabs, exactly matching the pre-roots layout; with more than
-    one root, Details instead becomes a peer of the root tabs themselves (extra_tab=None here)."""
+    """(css, body_html) of one root's period tab group, from that root's rows. ``extra_tabs`` (id, label,
+    panel_html), Methodology and Metric Details with a single root, join the same radio group as peers of the
+    period tabs."""
     dims_by_period = {pt: dims for pt in period_types}
     values_by_dim: Dict[str, List[str]] = {}
     for pt in period_types:
@@ -1365,23 +1570,22 @@ def _build_root_period_tabs(
         for i, pt in enumerate(period_types)
     )
     tab_labels = "".join(
-        f"<label for='kpi-tab-{_safe_id(root, pt)}' class='top-tab'>{_esc(_PERIOD_LABELS.get(pt, pt.title()))}</label>"
+        f"<label for='kpi-tab-{_safe_id(root, pt)}' class='top-tab'>{_esc(_tab_label(_PERIOD_LABELS.get(pt, pt)))}</label>"
         for pt in period_types
     )
     comparable_kpi_long_map = comparable_kpi_long_map or {}
     period_panels = "".join(
         f"<div class='top-panel top-panel-{_safe_id(root, pt)}'>"
-        f"{_period_tab_html(kpi_long_root, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period, comparable_comp_map.get(pt), _COMPARABLE_LABELS.get(pt, ''), month_display_by_period, root, comparable_kpi_long_map.get(pt))}"
+        f"{_period_tab_html(kpi_long_root, pt, dims, metric_cols, labels, comp_map.get(pt), _PERIOD_COMP_LABEL.get(pt, ''), week_start_by_period, comparable_comp_map.get(pt), _COMPARABLE_LABELS.get(pt, ''), month_display_by_period, root, comparable_kpi_long_map.get(pt), dimension_labels=dimension_labels)}"
         f"</div>"
         for pt in period_types
     )
 
-    if extra_tab is not None:
-        extra_id, extra_label, extra_panel_html = extra_tab
+    for extra_id, extra_label, extra_panel_html in extra_tabs or []:
         radios += f"<input type='radio' class='top-tab-anchor' name='{group_name}' id='kpi-tab-{extra_id}'>"
-        tab_labels += f"<label for='kpi-tab-{extra_id}' class='top-tab'>{_esc(extra_label)}</label>"
+        tab_labels += f"<label for='kpi-tab-{extra_id}' class='top-tab'>{_esc(_tab_label(extra_label))}</label>"
         period_panels += f"<div class='top-panel top-panel-{extra_id}'>{extra_panel_html}</div>"
-        css += "\n" + _DETAILS_TAB_CSS
+        css += "\n" + _extra_tab_css(extra_id)
 
     tab_bar = f"<div class='top-tab-bar'>{tab_labels}</div>"
     body = radios + tab_bar + f"<div class='top-panels'>{period_panels}</div>"
@@ -1422,6 +1626,238 @@ def _metric_details_html(
     )
 
 
+_LOGIC_SALES_METRICS = ("total_sales_quantity", "total_sales_revenue", "AUR", "AUC", "distinct_product_count",
+                        "distinct_store_count", "distinct_pair_count")
+_LOGIC_DC_METRICS = ("dc_mean_stock", "total_mean_stock", "WOS_DC", "WOS_TOTAL")
+_LOGIC_GROUPS = (("revenue", "Sales"), ("inventory", "Inventory and supply"), ("service", "Service level"),
+                 ("scale", "Range size"))
+
+
+def _plain_filters(filters: Any) -> str:
+    """A filter list in business words: "store_id NOT IN (a, b)" reads "stores a, b excluded"; any other
+    expression is shown as written."""
+    parts = []
+    for expr in filters or []:
+        match = re.fullmatch(r"\s*store_id\s+NOT\s+IN\s*\((.*)\)\s*", expr, re.IGNORECASE)
+        parts.append(f"stores {match.group(1)} excluded" if match else expr)
+    return "; ".join(parts)
+
+
+def _population_text(dim: str, rule: Dict[str, Any], settings: Dict[str, Any]) -> str:
+    """A metric population filter in business words: a yes/no root dimension reads "non-LFL products left out" /
+    "LFL products only"; any other filter reads "{dim} = values left out" / "only".
+    """
+    include = "include" in rule
+    values = [str(v) for v in (rule.get("include") if include else rule.get("exclude"))]
+    root_label = next(
+        (settings["HTML_REPORT_ROOT_LABELS"].get(root, root)
+         for spec in settings["ROOT_SPECS"] if spec["dim_col"] == dim for root in spec["root_values"].values()),
+        None,
+    )
+    if root_label is not None and len(values) == 1 and values[0] in ("yes", "no"):
+        who = f"{root_label} products" if values[0] == "yes" else f"non-{root_label} products"
+        return f"{who} {'only' if include else 'left out'}"
+    return f"{dim} = {', '.join(values)} {'only' if include else 'left out'}"
+
+
+def _upper_first(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def _metric_names(metrics: List[str], metric_cols: List[str], labels: Dict[str, str]) -> str:
+    return ", ".join(_metric_display_label(m, labels) for m in metric_cols if m in metrics)
+
+
+def _instock_rules(settings: Dict[str, Any]) -> List[str]:
+    """The in-stock rules of the run in business words, one line per rule, each switched on by its setting."""
+    if settings["INSTOCK_METHOD"] != "daily":
+        return ["In-stock days come from the weekly in-stock source of the forecasting data."]
+    cfg, scope, git = settings["INSTOCK_DAILY"], settings["SCOPE"], settings["GOODS_IN_TRANSIT"]
+    stocked = "A store-day counts as in stock when the store has stock on hand"
+    if cfg["sales_counts_as_stocked"]:
+        stocked += ", or sold the item that day"
+    if git["store_instock"]:
+        stocked += ", or has stock on its way to the store"
+    start = {
+        "earliest": "the earlier of its assortment start date and its first inventory record",
+        "scope_start": "its assortment start date",
+        "first_daily_row": "its first inventory record",
+    }[cfg["count_start"]]
+    rules = [
+        stocked + ".",
+        f"Each product-store is counted from {start}.",
+        "Days the data flags as unusable are left out." if cfg["usable_only"] else "",
+        "Product-stores with no daily records at all are left out." if cfg["require_daily_data"] else "",
+        f"Store filter: {_plain_filters(cfg['input_filters'])}." if cfg["input_filters"] else "",
+        "Stores where only a replacement (sub) item is assorted are left out." if scope["instock_main_eligible_only"] else "",
+        "Sizes outside an item supersession are left out." if scope["instock_exclude_unsuperseded_sizes"] else "",
+    ]
+    for dim, rule in settings["METRIC_POPULATION_FILTERS"].get("in_stock_rate", {}).items():
+        rules.append(_upper_first(_population_text(dim, rule, settings)) + ".")
+    return [r for r in rules if r]
+
+
+def _methodology_cards(settings: Dict[str, Any], metric_cols: List[str], labels: Dict[str, str]) -> List[Tuple[str, List[str]]]:
+    """(title, lines) cards of what applies to the run, in business words, each line read from the settings."""
+    scope, blocked, git = settings["SCOPE"], settings["BLOCKED_SCOPE"], settings["GOODS_IN_TRANSIT"]
+    blocked_metrics = blocked["metrics"] if blocked["path"] is not None or blocked["dc_path"] is not None else []
+    gross = settings["SALES_BASIS"] == "gross"
+    sales = [
+        "Sales are counted before returns: every sales transaction except returns, on every day it happened."
+        if gross else
+        "Sales are net of returns. A day where returns outweigh sales is not counted.",
+    ]
+    if blocked_metrics and "total_sales_quantity" not in blocked_metrics:
+        sales.append("Blocked days still count for sales, prices and counts: a blocked item can sell its remaining stock.")
+    cards: List[Tuple[str, List[str]]] = [
+        ("Sales", sales),
+        ("What is included", [
+            f"Product-store pairs in the assortment (planning scope) on each day, at {scope['grain'].replace('_', '-')} level.",
+            "New items are counted under their family's main item." if scope["roll_to_family_main"] else "",
+            "Inactive products are excluded." if scope["active_only"] else "",
+        ]),
+        ("Reporting period", [
+            f"Data from {settings['EFFECTIVE_REPORT_START_DATE']} to {settings['REPORT_END_DATE']}.",
+            "Year-to-date runs to the latest day, compared with the same fiscal day of earlier years; all other views show complete periods only."
+            if settings["REPORT_END_MODE"] == "latest_day" else "All views show complete months.",
+        ]),
+        ("Views", [
+            "Populations: Overall" + "".join(
+                f", {settings['HTML_REPORT_ROOT_LABELS'].get(root, root)}"
+                for spec in settings["ROOT_SPECS"] for root in spec["root_values"].values()
+            ) + ".",
+            "Split by " + ", ".join(
+                settings["HTML_REPORT_DIMENSION_LABELS"].get(dim, dim)
+                for dim in settings["SLICE_DIMENSIONS"] + list(settings["DERIVED_SLICE_DIMENSIONS"])
+            ) + ".",
+        ]),
+    ]
+    if blocked_metrics:
+        cards.append(("Blocked days", [
+            "Days an item was blocked in the planning screens are removed from: "
+            + _metric_names(blocked_metrics, metric_cols, labels) + ".",
+        ]))
+    gated = [m for m in git["inventory_metrics"] if m in metric_cols]
+    if gated or git["store_instock"]:
+        cards.append(("Stock in transit", [
+            "Stock on its way to a store or distribution centre counts as inventory in: "
+            + _metric_names(gated, metric_cols, labels) + "." if gated else "",
+            "In transit stock counts as being in stock." if git["store_instock"] else "",
+        ]))
+    if "in_stock_rate" in metric_cols:
+        cards.append(("In-stock rate", _instock_rules(settings)))
+    if "lost_sales_pct" in metric_cols:
+        lost = ["Lost sales are the demand the forecasting model estimates was missed while an item was out of stock."]
+        if settings["LOST_SALES_SALES_FILTER"]:
+            lost.append(f"Sales in the percentage's denominator use the same stores as the model ({_plain_filters(settings['LOST_SALES_SALES_FILTER'])}).")
+        cards.append(("Lost sales", lost))
+    if settings["COMPARABLE_PAIRS_ENABLED"]:
+        cards.append(("Like-for-like", [
+            "Compares only product-stores that traded in every compared year"
+            f" ({', '.join(settings['COMPARABLE_KINDS'])} views), so range changes do not distort the trend.",
+        ]))
+    return [(title, [line for line in lines if line]) for title, lines in cards]
+
+
+def _metric_basis(metric: str, settings: Dict[str, Any]) -> Tuple[str, List[str], bool, bool]:
+    """(based on, filters, blocked days removed, stock in transit included) of one metric in business words."""
+    gross = settings["SALES_BASIS"] == "gross"
+    blocked = settings["BLOCKED_SCOPE"]
+    git = settings["GOODS_IN_TRANSIT"]
+    sales = "Sales transactions, before returns" if gross else "Daily store sales, net of returns"
+    filters: List[str] = []
+    if metric in _LOGIC_SALES_METRICS:
+        based_on = sales
+    elif metric in _LOGIC_DC_METRICS:
+        based_on = "Store and DC inventory" if metric in ("total_mean_stock", "WOS_TOTAL") else "DC inventory"
+        if metric in ("WOS_DC", "WOS_TOTAL"):
+            based_on += " and store sales"
+    elif metric in ("in_stock_rate", "weighted_instock_rate"):
+        based_on = "Daily store inventory" if settings["INSTOCK_METHOD"] == "daily" else "Weekly in-stock source"
+        filters = [_upper_first(rule) for rule in _instock_rules(settings)[1:]]
+    elif metric == "dc_in_stock_rate":
+        based_on = "Daily DC inventory"
+    elif metric == "lost_sales_pct":
+        based_on = "Forecasting lost-sales model and store sales"
+        if settings["LOST_SALES_SALES_FILTER"]:
+            filters = [_upper_first(_plain_filters(settings["LOST_SALES_SALES_FILTER"]))]
+    else:
+        based_on = "Daily store inventory" + (" and sales" if metric in _SALES_BASIS_METRICS else "")
+    if metric not in ("in_stock_rate", "weighted_instock_rate"):
+        for dim, rule in settings["METRIC_POPULATION_FILTERS"].get(metric, {}).items():
+            filters.append(_upper_first(_population_text(dim, rule, settings)))
+    blocked_folder = blocked["dc_path"] if metric in ("dc_mean_stock", "WOS_DC", "dc_in_stock_rate") else blocked["path"]
+    blocked_on = blocked_folder is not None and metric in blocked["metrics"]
+    git_on = (
+        metric in git["inventory_metrics"]
+        or (metric in ("in_stock_rate", "weighted_instock_rate") and git["store_instock"])
+        or (metric == "dc_in_stock_rate" and git["dc_instock"])
+    )
+    return based_on, filters, blocked_on, git_on
+
+
+def _coverage_html(coverage: List[Dict[str, Any]]) -> str:
+    """The Methodology tab's data section: per source its table, the first and last date of each measure and the
+    input filters in force, as inputs.collect_data_coverage found them."""
+    rows = ""
+    for source in coverage:
+        path = f" <span class='method-path'>{_esc(source['path'])}</span>" if source["path"] else ""
+        rows += f"<tr class='method-group'><td colspan='3'>{_esc(source['title'])}{path}</td></tr>"
+        for label, first, last in source["rows"]:
+            rows += f"<tr><td>{_esc(label)}</td><td>{_esc(first) if first is not None else '—'}</td><td>{_esc(last) if last is not None else '—'}</td></tr>"
+        if source["filters"]:
+            code = "".join(f"<div><code class='method-code'>{_esc(f)}</code></div>" for f in source["filters"])
+            rows += f"<tr><td>Filters applied</td><td colspan='2'>{code}</td></tr>"
+        else:
+            rows += "<tr><td>Filters applied</td><td colspan='2'>None</td></tr>"
+        for note in source["notes"]:
+            rows += f"<tr><td>Note</td><td colspan='2'>{_esc(note)}</td></tr>"
+    return (
+        "<h4 class='method-heading method-heading-gap'>Data available, by source (for checking)</h4>"
+        "<div class='table-wrap'><table class='method-table'>"
+        "<thead><tr><th>Data</th><th>First date</th><th>Last date</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></div>"
+    )
+
+
+def _methodology_html(
+    metric_cols: List[str], labels: Dict[str, str], settings: Dict[str, Any], coverage: Optional[List[Dict[str, Any]]] = None
+) -> str:
+    """The Methodology tab: how the numbers are built, for the client. Cards of what applies to the whole
+    report, then per metric what it is based on and which adjustments it carries. Generated from the settings."""
+    cards = "".join(
+        f"<div class='method-card'><h4>{_esc(title)}</h4><ul>"
+        + "".join(f"<li>{_esc(line)}</li>" for line in lines) + "</ul></div>"
+        for title, lines in _methodology_cards(settings, metric_cols, labels)
+    )
+    groups = []
+    for cat, title in _LOGIC_GROUPS:
+        rows = ""
+        for metric in (m for m in metric_cols if _CAT.get(m) == cat):
+            based_on, filters, blocked_on, git_on = _metric_basis(metric, settings)
+            filter_cell = "".join(f"<div>{_esc(f)}</div>" for f in filters) or "No extra filters"
+            rows += (
+                f"<tr><td>{_esc(_metric_display_label(metric, labels))}</td><td>{_esc(based_on)}</td>"
+                f"<td>{filter_cell}</td>"
+                f"<td><span class='method-pill {'on' if blocked_on else 'off'}'>{'Yes' if blocked_on else 'No'}</span></td>"
+                f"<td><span class='method-pill {'on' if git_on else 'off'}'>{'Yes' if git_on else 'No'}</span></td></tr>"
+            )
+        if rows:
+            groups.append(f"<tr class='method-group'><td colspan='5'>{_esc(title)}</td></tr>" + rows)
+    return (
+        "<div class='method'>"
+        "<p class='method-lead'>How the numbers in this report are built. Every figure follows these rules.</p>"
+        f"<div class='method-grid'>{cards}</div>"
+        "<h4 class='method-heading'>What each metric is based on</h4>"
+        "<div class='table-wrap'><table class='method-table'>"
+        "<thead><tr><th>Metric</th><th>Based on</th><th>Filters and conditions</th><th>Blocked days removed</th>"
+        "<th>Stock in transit included</th></tr></thead>"
+        f"<tbody>{''.join(groups)}</tbody></table></div>"
+        + (_coverage_html(coverage) if coverage else "")
+        + "</div>"
+    )
+
+
 def _report_info_html(
     settings: Dict[str, Any],
     active_slice_dimensions: Optional[List[str]] = None,
@@ -1431,13 +1867,22 @@ def _report_info_html(
     as_of = settings.get("AS_OF_DATE", "—")
     report_start = settings.get("EFFECTIVE_REPORT_START_DATE", "—")
     report_end = settings.get("REPORT_END_DATE", "—")
-    scope_mode = (
-        "Hybrid"
-        if settings.get("USE_HYBRID_SCOPE")
-        else "Defined only"
-    )
+    scope_mode = "Hybrid" if settings["SCOPE"]["use_hybrid_scope"] else "Scope table only"
+    period_basis_card = ""
+    if settings["REPORT_END_MODE"] == "latest_day":
+        period_basis = (
+            f"YTD to {report_end} (same fiscal day every year); other tabs: complete periods only; "
+            f"lost sales through {last_saturday_on_or_before(settings['REPORT_END_DATE'])}"
+        )
+        period_basis_card = f"""
+      <div class="meta-card">
+        <span class="meta-label">Period basis</span>
+        <span class="meta-value">{_esc(period_basis)}</span>
+      </div>"""
     slice_dims = inferred_dimensions or active_slice_dimensions or settings.get("SLICE_DIMENSIONS") or []
-    slice_labels = ", ".join(_dim_label(d) for d in slice_dims if d != "overall") or "Overall only"
+    slice_labels = ", ".join(
+        _capitalize_words(_dim_label(d, settings["HTML_REPORT_DIMENSION_LABELS"])) for d in slice_dims if d != "overall"
+    ) or "Overall only"
     generated = datetime.datetime.now().strftime("%d %b %Y, %H:%M")
 
     return f"""<div class="header-top">
@@ -1454,7 +1899,7 @@ def _report_info_html(
       <div class="meta-card">
         <span class="meta-label">Reporting window</span>
         <span class="meta-value">{_esc(str(report_start))} – {_esc(str(report_end))}</span>
-      </div>
+      </div>{period_basis_card}
       <div class="meta-card">
         <span class="meta-label">Client</span>
         <span class="meta-value">{_esc(str(customer))}</span>
@@ -1474,8 +1919,15 @@ def _report_info_html(
     </div>"""
 
 
-_PERIOD_ORDER = ["annual", "ytd", "quarter", "monthly", "weekly"]
-_PERIOD_LABELS = {"annual": "Annual", "ytd": "YTD", "quarter": "Quarter", "monthly": "Monthly", "weekly": "Weekly"}
+_PERIOD_ORDER = ["annual", "ytd", "quarter", "half", "monthly", "weekly"]
+_PERIOD_LABELS = {
+    "annual": "Annual",
+    "ytd": "YTD",
+    "quarter": "Quarter",
+    "half": "Half",
+    "monthly": "Monthly",
+    "weekly": "Weekly",
+}
 _PERIOD_COMP_LABEL = {"annual": "YoY", "ytd": "YTD"}
 _COMPARABLE_LABELS = {"ytd": "Comparable YTD", "annual": "Comparable YoY"}
 
@@ -1483,6 +1935,7 @@ _TURNOVER_PERIOD_LABELS = {
     "annual": "Annual Inventory Turnover Rate",
     "ytd": "YTD Inventory Turnover Rate",
     "quarter": "Quarterly Inventory Turnover Rate",
+    "half": "Half-Yearly Inventory Turnover Rate",
     "monthly": "Monthly Inventory Turnover Rate",
     "weekly": "Weekly Inventory Turnover Rate",
 }
@@ -1509,14 +1962,9 @@ def render_kpi_html(
     report_title: Optional[str] = None,
     metric_definitions: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> str:
-    """
-    Render a standalone, offline HTML KPI report from a completed KPIContext.
-
-    Slice dimensions and values are inferred from ``ctx.kpi_long`` automatically.
-    """
-    # Prefer the trimmed-for-display copy (see KPIContext.kpi_long_display); ctx.kpi_long
-    # itself stays full so it always reflects exactly what was saved to Delta. Falls back to
-    # ctx.kpi_long for callers that build a KPIContext directly without going through KPIRunner.
+    """Write the standalone HTML report of a completed KPIContext to ``output_path``; slice dimensions and
+    values come from kpi_long."""
+    # The display copy trimmed to recent periods; ctx.kpi_long for a KPIContext built without KPIRunner.
     kpi_long = ctx.kpi_long_display if ctx.kpi_long_display is not None else ctx.kpi_long
     settings = ctx.settings
 
@@ -1528,6 +1976,7 @@ def render_kpi_html(
 
     defs: Dict[str, Dict[str, str]] = {
         **DEFAULT_METRIC_DEFINITIONS,
+        **_settings_metric_definitions(settings),
         **(metric_definitions or {}),
     }
 
@@ -1539,9 +1988,7 @@ def render_kpi_html(
     ]
     labels: Dict[str, str] = settings.get("METRIC_LABELS") or {}
 
-    # Root-defining dimension_source columns are NOT cuts (they're what "root" partitions on) --
-    # use cut_dimensions, not active_slice_dimensions, so e.g. IS_NVROUT doesn't also render as
-    # its own flat dimension tab now that it drives the root tabs instead.
+    # cut_dimensions, not active_slice_dimensions: a root column (e.g. IS_NVROUT) is not a dimension tab.
     configured_slices = list(settings.get("SLICE_DIMENSIONS") or [])
     active_dims = list(getattr(ctx, "cut_dimensions", None) or [])
     slice_source = active_dims or configured_slices
@@ -1551,21 +1998,19 @@ def render_kpi_html(
     period_types = [pt for pt in _PERIOD_ORDER if pt in present_period_types]
 
     if not period_types:
-        raise ValueError("kpi_long contains no recognised period_types (annual/quarter/monthly/weekly).")
+        raise ValueError("kpi_long contains no recognised period_types (annual/quarter/half/monthly/weekly).")
 
-    # Quarter/Monthly/Weekly tabs show the raw value trend only (no comparison table) — the
-    # display-trimmed period tabs already cover "recent quarters/months/weeks" reporting.
+    # Quarter / Half / Monthly / Weekly tabs show values only, no comparison table.
     comp_map: Dict[str, Optional[pd.DataFrame]] = {
         "annual": ctx.comparison_yoy,
         "ytd": getattr(ctx, "comparison_ytd", None),
         "quarter": None,
+        "half": None,
         "monthly": None,
         "weekly": None,
     }
 
-    # Gated comparable (like-for-like) tables, one per comparable_pairs.kinds entry (config.py) --
-    # comparable_kpi_long is a SHARED table tagged by comparison_type, split per kind here so each
-    # tab only sees its own rows. No-ops on an empty/None frame when disabled or no data.
+    # comparable_kpi_long holds every kind (comparison_type); each tab gets its own kind's rows.
     _full_comparable_kpi_long = getattr(ctx, "comparable_kpi_long", None)
 
     def _comparable_kpi_long_for(comparison_type: str) -> Optional[pd.DataFrame]:
@@ -1579,6 +2024,7 @@ def render_kpi_html(
         "annual": getattr(ctx, "comparable_comparison_yoy", None),
         "ytd": getattr(ctx, "comparable_comparison_ytd", None),
         "quarter": getattr(ctx, "comparable_comparison_quarter", None),
+        "half": getattr(ctx, "comparable_comparison_half", None),
         "monthly": None,
         "weekly": None,
     }
@@ -1586,6 +2032,7 @@ def render_kpi_html(
         "annual": _comparable_kpi_long_for("yoy"),
         "ytd": _comparable_kpi_long_for("ytd"),
         "quarter": _comparable_kpi_long_for("quarter"),
+        "half": _comparable_kpi_long_for("half"),
         "monthly": None,
         "weekly": None,
     }
@@ -1599,24 +2046,20 @@ def render_kpi_html(
     if "monthly" in period_types and getattr(ctx, "fiscal_cal", None) is not None and getattr(ctx, "fiscal_week", None) is not None:
         month_display_by_period = _build_month_display_labels(ctx)
 
-    # Roots: "overall" plus one per ctx.root_definitions (e.g. "nvrout", "comp" -- see
-    # fiscal._resolve_root_definitions), restricted to whatever actually has rows in this
-    # kpi_long (defensive; should normally be all of them). A single root (the common case for a
-    # client with no root-producing dimension_sources configured) renders exactly as before --
-    # no extra tab layer. More than one root gets its own outer tab, each containing its own
-    # complete Annual/Quarter/Month/YTD/Weekly tab set, mirroring kpi-skill-toolkit's NVROUT/COMP
-    # major tabs (see kpi_pipeline/kpi_long.build_kpi_long for how these rows were produced).
+    # Roots with rows in kpi_long: one root renders without a root tab level; several get an outer tab each,
+    # holding a complete period tab set.
+    root_display_labels: Dict[str, str] = settings["HTML_REPORT_ROOT_LABELS"]
+    dimension_labels: Dict[str, str] = settings["HTML_REPORT_DIMENSION_LABELS"]
     present_roots = set(kpi_long["root"].unique()) if "root" in kpi_long.columns else {"overall"}
     roots = [r for r in (["overall"] + [rd["root"] for rd in ctx.root_definitions]) if r in present_roots]
     if not roots:
         roots = ["overall"]
 
-    # Raw table markup, no top-panel wrapper of its own -- each call site below wraps it exactly
-    # once with whatever class its own CSS actually makes visible (see the multi-root bug this
-    # replaced: wrapping it here AND at the multi-root call site nested two .top-panel elements,
-    # and only the outer one's class had a display:block override, so the inner one's
-    # display:none from the base .top-panel rule was never lifted -- the tab looked empty).
+    # Unwrapped: each call site wraps it once in the panel class its CSS shows (a nested .top-panel stays
+    # hidden).
     metric_details_html = _metric_details_html(metric_cols, labels, defs)
+    methodology_html = _methodology_html(metric_cols, labels, settings, getattr(ctx, "data_coverage", None))
+    extra_tabs = [("methodology", "Methodology", methodology_html), ("details", "Metric Details", metric_details_html)]
 
     if len(roots) == 1:
         root = roots[0]
@@ -1625,8 +2068,9 @@ def render_kpi_html(
             kpi_long_root, root, period_types, dims, metric_cols, labels,
             _comp_df_for_root(comp_map, root), _comp_df_for_root(comparable_comp_map, root),
             week_start_by_period, month_display_by_period,
-            extra_tab=("details", "Metric Details", metric_details_html),
+            extra_tabs=extra_tabs,
             comparable_kpi_long_map=_comp_df_for_root(comparable_kpi_long_map, root),
+            dimension_labels=dimension_labels,
         )
         main_panel = f"<div class='panel'>{body}</div>"
     else:
@@ -1639,6 +2083,7 @@ def render_kpi_html(
                 _comp_df_for_root(comp_map, root), _comp_df_for_root(comparable_comp_map, root),
                 week_start_by_period, month_display_by_period,
                 comparable_kpi_long_map=_comp_df_for_root(comparable_kpi_long_map, root),
+                dimension_labels=dimension_labels,
             )
             css_parts.append(css)
             root_panels.append((root, body))
@@ -1648,21 +2093,24 @@ def render_kpi_html(
             f"id='kpi-root-{_safe_id(root)}'{' checked' if i == 0 else ''}>"
             for i, (root, _) in enumerate(root_panels)
         )
-        root_radios += "<input type='radio' class='top-tab-anchor' name='kpi-root' id='kpi-root-details'>"
+        for extra_id, _, _ in extra_tabs:
+            root_radios += f"<input type='radio' class='top-tab-anchor' name='kpi-root' id='kpi-root-{extra_id}'>"
 
-        root_labels = "".join(
+        root_labels_html = "".join(
             f"<label for='kpi-root-{_safe_id(root)}' class='top-tab'>"
-            f"{_esc('Overall' if root == 'overall' else root)}</label>"
+            f"{_esc(_tab_label(_root_display_label(root, root_display_labels)))}</label>"
             for root, _ in root_panels
         )
-        root_labels += "<label for='kpi-root-details' class='top-tab'>Metric Details</label>"
-        root_tab_bar = f"<div class='top-tab-bar'>{root_labels}</div>"
+        for extra_id, extra_label, _ in extra_tabs:
+            root_labels_html += f"<label for='kpi-root-{extra_id}' class='top-tab'>{_esc(_tab_label(extra_label))}</label>"
+        root_tab_bar = f"<div class='top-tab-bar'>{root_labels_html}</div>"
 
         root_panels_html = "".join(
             f"<div class='top-panel top-panel-root-{_safe_id(root)}'><div class='panel'>{body}</div></div>"
             for root, body in root_panels
         )
-        root_panels_html += f"<div class='top-panel top-panel-root-details'>{metric_details_html}</div>"
+        for extra_id, _, extra_html in extra_tabs:
+            root_panels_html += f"<div class='top-panel top-panel-root-{extra_id}'>{extra_html}</div>"
 
         root_css_lines: List[str] = []
         for root, _ in root_panels:
@@ -1674,13 +2122,14 @@ def render_kpi_html(
                 f"  #kpi-root-{rid}:checked ~ .top-tab-bar label[for='kpi-root-{rid}'] "
                 f"{{ background: var(--surface); color: var(--ink); box-shadow: inset 0 -3px 0 var(--accent); }}"
             )
-        root_css_lines.append(
-            "  #kpi-root-details:checked ~ .top-panels .top-panel-root-details { display: block; }"
-        )
-        root_css_lines.append(
-            "  #kpi-root-details:checked ~ .top-tab-bar label[for='kpi-root-details'] "
-            "{ background: var(--surface); color: var(--ink); box-shadow: inset 0 -3px 0 var(--accent); }"
-        )
+        for extra_id, _, _ in extra_tabs:
+            root_css_lines.append(
+                f"  #kpi-root-{extra_id}:checked ~ .top-panels .top-panel-root-{extra_id} {{ display: block; }}"
+            )
+            root_css_lines.append(
+                f"  #kpi-root-{extra_id}:checked ~ .top-tab-bar label[for='kpi-root-{extra_id}'] "
+                "{ background: var(--surface); color: var(--ink); box-shadow: inset 0 -3px 0 var(--accent); }"
+            )
 
         dyn_css = "\n".join(css_parts) + "\n" + "\n".join(root_css_lines)
         main_panel = (

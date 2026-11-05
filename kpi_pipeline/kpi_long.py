@@ -1,6 +1,6 @@
 """Tidy long KPI output across slices and periods.
 
-Each row: period_type | period | dimension | dimension_value | METRIC_COLS...
+Each row: period_type | period | root | dimension | dimension_value | METRIC_COLS...
 """
 
 from __future__ import annotations
@@ -10,14 +10,17 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
+from pyspark.sql.types import StringType
 
-from kpi_pipeline.context import KPIContext
-from kpi_pipeline.filters import apply_value_filter as _apply_value_filter
-from kpi_pipeline.metrics import build_kpi_table
+from kpi_pipeline.context import KPIContext, release_frames
+from kpi_pipeline.filters import value_filter_condition
+from kpi_pipeline.fiscal import _period_key_columns, last_saturday_on_or_before, week_day_counts
+from kpi_pipeline.metrics import KPI_FRAMES, build_kpi_table, collapse_frames
 
 PERIODS: List[Tuple[str, str]] = [
     ("annual", "Year"),
     ("quarter", "period_key"),
+    ("half", "half_key"),
     ("monthly", "month_key"),
     ("weekly", "Year_Week"),
     ("ytd", "Year"),
@@ -26,6 +29,10 @@ PERIODS: List[Tuple[str, str]] = [
 
 def _with_period_key(df: DataFrame) -> DataFrame:
     return df.withColumn("period_key", F.concat_ws("-", F.col("Year").cast("string"), F.col("Fiscal_Quarter").cast("string")))
+
+
+def _with_half_key(df: DataFrame) -> DataFrame:
+    return df.withColumn("half_key", F.concat_ws("-", F.col("Year").cast("string"), F.col("Fiscal_Half").cast("string")))
 
 
 def _with_month_key(df: DataFrame) -> DataFrame:
@@ -39,65 +46,96 @@ def _with_ytd_filter(df: DataFrame, available_months: List[int]) -> DataFrame:
     return df.filter(F.col("Fiscal_Month").isin(available_months))
 
 
-# The metric-source frames build_kpi_table reads — the same five frames _VALUE_FILTERED_FRAMES
-# lists below. scope_pairs/scope_pair_weeks are excluded on purpose: they carry no fiscal period
-# column and feed no metric.
-_PERIOD_METRIC_FRAMES = ("scoped_daily", "inst_data", "lost_base", "dc_daily", "dc_inst")
+# The metric frames, period-framed alike before metrics.collapse_frames (scope_pairs / scope_pair_weeks feed
+# no metric).
+_METRIC_FRAMES = ("scoped_daily", "inst_data", "lost_base", "dc_daily", "dc_inst")
 
 
 def _drop_incomplete_periods(
     ctx: KPIContext, frames: Dict[str, DataFrame], period_col: str
 ) -> Dict[str, DataFrame]:
-    """Drop every row belonging to a (Year, ``period_col``) that has not fully elapsed as of
-    REPORT_END_DATE (fiscal.complete_fiscal_periods).
-
-    Why the Quarter/Monthly trend tabs need it: REPORT_END_DATE is a week boundary that almost
-    never lands on a quarter or month boundary, so without this the trailing row of those tabs is
-    routinely a period only a week or two in — a 1-week "quarter" plotted next to full 13-week
-    ones. That row now simply doesn't appear until the period closes.
-
-    Weekly needs no equivalent (REPORT_END_DATE is the last completed Saturday, so the trailing
-    week is always whole), and YTD has its own apples-to-apples quarter filter above.
+    """Keep only the rows of (Year, ``period_col``) periods fully inside the window
+    (fiscal.complete_fiscal_periods), so the Quarter / Half / Monthly tabs never show a trailing period
+    only a week or two in. report_end="latest_day" also uses it for "Year" (Annual: the current fiscal
+    year is in YTD only) and "Week" (Weekly: the trailing partial week is dropped).
     """
     complete = F.broadcast(ctx.complete_fiscal_periods[period_col])
     out = dict(frames)
-    for key in _PERIOD_METRIC_FRAMES:
-        out[key] = out[key].join(complete, on=["Year", period_col], how="left_semi")
+    for key in _METRIC_FRAMES:
+        out[key] = out[key].join(complete, on=_period_key_columns(period_col), how="left_semi")
     return out
 
 
+def _drop_partial_trailing_week(ctx: KPIContext, frames: Dict[str, DataFrame]) -> Dict[str, DataFrame]:
+    """Weekly tab: keep only the weeks ending on or before the last Saturday on or before REPORT_END_DATE
+    (report_end="complete_month" on the civil calendar cuts at a month end, usually mid-week)."""
+    last_saturday = last_saturday_on_or_before(ctx.settings["REPORT_END_DATE"])
+    whole_weeks = F.broadcast(
+        ctx.fiscal_week.filter(F.col("week_end_date") <= F.lit(last_saturday)).select("Year_Week")
+    )
+    out = dict(frames)
+    for key in _METRIC_FRAMES:
+        out[key] = out[key].join(whole_weeks, on="Year_Week", how="left_semi")
+    return out
+
+
+def _ytd_latest_day_frames(ctx: KPIContext, frames: Dict[str, DataFrame]) -> Dict[str, DataFrame]:
+    """report_end="latest_day" YTD: days 1..K of the fiscal year (K = ctx.ytd_through_day) of every year in
+    ctx.ytd_years. Daily frames filter on day_index, the pair-week in-stock frames on last_day_index (the
+    week containing K was split at K when built). Lost sales is weekly and only reaches the last Saturday,
+    so its YTD is whole weeks 1..ctx.ytd_lost_sales_last_week.
+    """
+    in_ytd_year = F.col("Year").isin(ctx.ytd_years)
+    through_day = ctx.ytd_through_day
+    # The YTD part of the week containing K has fewer than 7 days; WOS weights by it (week_days).
+    ytd_week_days = F.broadcast(
+        week_day_counts(ctx).select("Year", "Week", F.col("ytd_week_days").alias("week_days"))
+    )
+    out = dict(frames)
+    out["scoped_daily"] = (
+        frames["scoped_daily"]
+        .filter(in_ytd_year & (F.col("day_index") <= through_day))
+        .drop("week_days")
+        .join(ytd_week_days, on=["Year", "Week"], how="inner")
+    )
+    out["dc_daily"] = frames["dc_daily"].filter(in_ytd_year & (F.col("day_index") <= through_day))
+    out["inst_data"] = frames["inst_data"].filter(in_ytd_year & (F.col("last_day_index") <= through_day))
+    out["dc_inst"] = frames["dc_inst"].filter(in_ytd_year & (F.col("last_day_index") <= through_day))
+    out["lost_base"] = frames["lost_base"].filter(in_ytd_year & (F.col("Week") <= ctx.ytd_lost_sales_last_week))
+    return out
+
+
+# quarter / half / monthly: the period-key column each frame gets, and the fiscal column its
+# completeness set (ctx.complete_fiscal_periods) is keyed on.
+_PERIOD_KEYED = {
+    "quarter": (_with_period_key, "Fiscal_Quarter"),
+    "half": (_with_half_key, "Fiscal_Half"),
+    "monthly": (_with_month_key, "Fiscal_Month"),
+}
+
+
 def _period_frames(ctx: KPIContext, frames: Dict[str, DataFrame], period_name: str) -> Dict[str, DataFrame]:
-    if period_name == "quarter":
+    latest_day = ctx.settings["REPORT_END_MODE"] == "latest_day"
+    if latest_day and period_name == "annual":
+        return _drop_incomplete_periods(ctx, frames, "Year")
+    if latest_day and period_name == "weekly":
+        return _drop_incomplete_periods(ctx, frames, "Week")
+    if latest_day and period_name == "ytd":
+        return _ytd_latest_day_frames(ctx, frames)
+    if period_name == "weekly" and ctx.settings["REPORT_END_MODE"] == "complete_month" and not ctx.settings["USE_FISCAL_CALENDAR"]:
+        return _drop_partial_trailing_week(ctx, frames)
+    if period_name in _PERIOD_KEYED:
+        with_key, period_col = _PERIOD_KEYED[period_name]
         out = dict(frames)
-        out["scoped_daily"] = _with_period_key(frames["scoped_daily"])
-        out["inst_data"] = _with_period_key(frames["inst_data"])
-        out["lost_base"] = _with_period_key(frames["lost_base"])
-        out["dc_daily"] = _with_period_key(frames["dc_daily"])
-        out["dc_inst"] = _with_period_key(frames["dc_inst"])
-        return _drop_incomplete_periods(ctx, out, "Fiscal_Quarter")
-    if period_name == "monthly":
-        out = dict(frames)
-        out["scoped_daily"] = _with_month_key(frames["scoped_daily"])
-        out["inst_data"] = _with_month_key(frames["inst_data"])
-        out["lost_base"] = _with_month_key(frames["lost_base"])
-        out["dc_daily"] = _with_month_key(frames["dc_daily"])
-        out["dc_inst"] = _with_month_key(frames["dc_inst"])
-        return _drop_incomplete_periods(ctx, out, "Fiscal_Month")
+        for key in _METRIC_FRAMES:
+            out[key] = with_key(frames[key])
+        return _drop_incomplete_periods(ctx, out, period_col)
     if period_name == "ytd":
-        # Only the fiscal MONTHS that have fully elapsed for the latest year (see
-        # fiscal._compute_available_fiscal_months), applied identically to every year, so
-        # summing by "Year" alone below gives an apples-to-apples YTD window across years.
-        # Month-grain, not quarter-grain: a quarter still in progress can still have one or more
-        # of its own months already fully closed (e.g. Q3 in progress but its first month done) —
-        # quarter-grain would have stopped YTD at the end of the PRIOR quarter instead, understating
-        # it by up to two months' worth of otherwise-complete data.
+        # The fiscal months fully elapsed in the latest year, applied to every year (apples-to-apples YTD).
         available_months = ctx.available_fiscal_months or []
         out = dict(frames)
-        out["scoped_daily"] = _with_ytd_filter(frames["scoped_daily"], available_months)
-        out["inst_data"] = _with_ytd_filter(frames["inst_data"], available_months)
-        out["lost_base"] = _with_ytd_filter(frames["lost_base"], available_months)
-        out["dc_daily"] = _with_ytd_filter(frames["dc_daily"], available_months)
-        out["dc_inst"] = _with_ytd_filter(frames["dc_inst"], available_months)
+        for key in _METRIC_FRAMES:
+            out[key] = _with_ytd_filter(frames[key], available_months)
         return out
     return frames
 
@@ -108,6 +146,9 @@ def _period_label(period_name: str, row: pd.Series) -> str:
     if period_name == "quarter":
         y, q = str(row["period_key"]).split("-")
         return f"{int(y)}-Q{int(q)}"
+    if period_name == "half":
+        y, h = str(row["half_key"]).split("-")
+        return f"{int(y)}-H{int(h)}"
     if period_name == "monthly":
         return str(row["month_key"])
     if period_name == "ytd":
@@ -116,12 +157,14 @@ def _period_label(period_name: str, row: pd.Series) -> str:
 
 
 def trim_periods_to_recent(kpi_long: pd.DataFrame, ctx: KPIContext) -> pd.DataFrame:
-    """Trim each period_type to the N most recent periods in kpi_long and saved Delta."""
+    """kpi_long with each period_type cut to its N most recent periods (html_report's *_display_* settings),
+    for the HTML report; weekly counts fiscal weeks, not only the weeks present."""
     settings = ctx.settings
     trim_cfg: List[Tuple[str, object, bool]] = [
         ("weekly", settings.get("HTML_REPORT_WEEKLY_DISPLAY_WEEKS"), True),
         ("monthly", settings.get("HTML_REPORT_MONTHLY_DISPLAY_MONTHS"), False),
         ("quarter", settings.get("HTML_REPORT_QUARTERLY_DISPLAY_QUARTERS"), False),
+        ("half", settings["HTML_REPORT_HALF_DISPLAY_HALVES"], False),
         ("annual", settings.get("HTML_REPORT_YEARLY_DISPLAY_YEARS"), False),
     ]
 
@@ -139,7 +182,13 @@ def trim_periods_to_recent(kpi_long: pd.DataFrame, ctx: KPIContext) -> pd.DataFr
             continue
 
         if use_fiscal_week:
-            fw_pd = ctx.fiscal_week.select("Year_Week", "week_start_date").toPandas()
+            fiscal_week = ctx.fiscal_week
+            if settings["REPORT_END_MODE"] == "latest_day":
+                # The trailing partial week is not a Weekly column and takes no slot.
+                fiscal_week = fiscal_week.filter(
+                    F.col("week_end_date") <= F.lit(last_saturday_on_or_before(settings["REPORT_END_DATE"]))
+                )
+            fw_pd = fiscal_week.select("Year_Week", "week_start_date").toPandas()
             recent = set(fw_pd.sort_values("week_start_date", ascending=False).head(n)["Year_Week"].tolist())
         else:
             all_periods = sorted(chunk["period"].unique(), reverse=True)
@@ -150,77 +199,127 @@ def trim_periods_to_recent(kpi_long: pd.DataFrame, ctx: KPIContext) -> pd.DataFr
     return pd.concat(parts, ignore_index=True) if parts else kpi_long.iloc[0:0].copy()
 
 
-# Frames that carry the slice dimension columns and therefore get value-filtered.
-_VALUE_FILTERED_FRAMES = ("scoped_daily", "inst_data", "lost_base", "dc_daily", "dc_inst")
+# kpi_rows' group keys besides the period column: the root's and the cut's position in its roots / cuts
+# lists, and the cut's value as a string ("ALL" on the "overall" cut).
+_COMBO_KEYS = ["_root", "_dimension", "_dimension_value"]
 
 
-def _filter_frames_for_dimension(
-    frames: Dict[str, DataFrame], dim: str, value_filters: Dict[str, object]
+def _stack_roots_and_cuts(
+    ctx: KPIContext,
+    frames: Dict[str, DataFrame],
+    roots: List[Optional[Dict[str, str]]],
+    cuts: List[Optional[str]],
 ) -> Dict[str, DataFrame]:
-    """Restrict a slice's frames to the dimension values configured in ``value_filters``.
+    """The collapsed frames (metrics.KPI_FRAMES) with one copy of each row per (root, cut) that keeps it,
+    labelled with _COMBO_KEYS, so one aggregation grouped by them gives every root x cut exactly the rows and
+    groups of its own.
 
-    Only a per-slice breakdown is filtered; the 'overall' totals never pass through here
-    (build_kpi_long / comparable._comparable_period_rows call this only when a slice
-    dimension is present). See ``_normalize_value_filter`` for the accepted shapes: a plain
-    list (include-only) or a dict with include / exclude / keep_null.
+    A row is in (root, cut) when the root's filter (its dim_col equal to its value, NULL dropped) and the
+    cut's slices.value_filters entry (none on the "overall" cut or a cut without one) both keep it: the rows
+    left by filtering on the root and then on the cut. _dimension_value is the cut column cast to string,
+    NULL for a NULL value (keep_null), so a NULL group joins its metric families as when the cut column was
+    the group key (null-safe for the pair counts only); "ALL" on the "overall" cut, which had no group key.
+    Every original column stays, for metrics.population_filters.
+
+    A cut column must be a string: its values are reported as they come, and one string column holds every
+    cut's value (a number, date or boolean cut fails here; cast it in slices.derived_dimensions).
     """
-    if dim not in value_filters:
-        return frames
-    spec = value_filters[dim]
-    out = dict(frames)
-    for key in _VALUE_FILTERED_FRAMES:
-        df = out.get(key)
-        if df is None:
-            continue
-        out[key] = _apply_value_filter(df, dim, spec)
-    return out
+    schema = frames["scoped_daily"].schema
+    non_string = [c for c in cuts if c is not None and not isinstance(schema[c].dataType, StringType)]
+    if non_string:
+        raise ValueError(
+            f"slice dimension(s) {non_string} must be string columns: cast them in slices.derived_dimensions, "
+            "e.g. CAST(col AS STRING)"
+        )
+    value_filters = ctx.settings.get("SLICE_VALUE_FILTERS", {}) or {}
+    labels = []
+    for root_pos, root_def in enumerate(roots):
+        root_keep = (
+            F.lit(True) if root_def is None else value_filter_condition(root_def["dim_col"], [root_def["value"]])
+        )
+        for cut_pos, cut in enumerate(cuts):
+            keep, value = root_keep, F.lit("ALL")
+            if cut is not None:
+                if cut in value_filters:
+                    keep = keep & value_filter_condition(cut, value_filters[cut])
+                value = F.col(cut).cast("string")
+            labels.append(
+                F.when(
+                    keep,
+                    F.struct(
+                        F.lit(root_pos).alias("_root"),
+                        F.lit(cut_pos).alias("_dimension"),
+                        value.alias("_dimension_value"),
+                    ),
+                )
+            )
+    combo = F.explode(F.array(*labels)).alias("_combo")
+    return {
+        key: frames[key]
+        .select("*", combo)
+        .filter(F.col("_combo").isNotNull())
+        .select(*frames[key].columns, "_combo.*")
+        for key in KPI_FRAMES
+    }
 
 
 def build_kpi_long(ctx: KPIContext, frames: Dict[str, DataFrame]) -> pd.DataFrame:
-    """Build kpi_long for every (root, cut) combination across annual/quarter/monthly/weekly/ytd periods.
+    """kpi_long for every (root, cut) across the annual / quarter / half / monthly / weekly / ytd periods (half
+    only with fiscal_calendar.half_periods; complete periods per _period_frames).
 
-    Roots: "overall" (no restriction, always first) plus one per ctx.root_definitions entry (e.g.
-    "nvrout", "comp") -- each restricts the population to rows where that dimension_source's
-    column equals the configured/discovered value (see fiscal._resolve_root_definitions). Cuts:
-    "overall" (the root's own total, no further breakdown) plus each of ctx.cut_dimensions (e.g.
-    "brand", "smw") -- applied identically within EVERY root, including "overall" itself, so
-    every root gets both its own aggregate total and a breakdown by each cut dimension (mirrors
-    kpi-skill-toolkit's segment x {none, brand, smw} cut_specs).
-
-    Root population restriction reuses _filter_frames_for_dimension (an include-only value_filter
-    of exactly one value) -- the same machinery that already restricts a cut's own breakdown.
+    Roots: "overall" plus one per ctx.root_definitions entry, each restricting the population to one
+    dimension_source value. Cuts: "overall" plus each of ctx.cut_dimensions, within every root.
     """
-    metric_cols = ctx.settings["METRIC_COLS"]
-    cuts: List[Tuple[str, List[str]]] = [("overall", [])] + [
-        (dim, [dim]) for dim in ctx.cut_dimensions
-    ]
-    roots: List[Optional[Dict[str, str]]] = [None] + list(ctx.root_definitions)
-    value_filters = ctx.settings.get("SLICE_VALUE_FILTERS", {}) or {}
     rows: List[dict] = []
     for period_name, period_col in PERIODS:
+        if period_name == "half" and not ctx.settings["HALF_PERIODS"]:
+            continue
         pf = _period_frames(ctx, frames, period_name)
-        for root_def in roots:
-            if root_def is None:
-                root_name, rf = "overall", pf
-            else:
-                root_name = root_def["root"]
-                rf = _filter_frames_for_dimension(
-                    pf, root_def["dim_col"], {root_def["dim_col"]: [root_def["value"]]}
-                )
-            for cut_name, gk in cuts:
-                sf = _filter_frames_for_dimension(rf, gk[0], value_filters) if gk else rf
-                tbl = build_kpi_table(ctx, sf, period_col, gk)
-                for _, r in tbl.iterrows():
-                    rec = {
-                        "period_type": period_name,
-                        "period": _period_label(period_name, r),
-                        "root": root_name,
-                        "dimension": cut_name,
-                        "dimension_value": ("ALL" if not gk else r[gk[0]]),
-                    }
-                    for m in metric_cols:
-                        rec[m] = r.get(m)
-                    rows.append(rec)
+        ctx.progress.section = period_name
+        rows.extend(kpi_rows(ctx, pf, period_name, period_col, F.lit(True)))
+    return kpi_long_frame(ctx, rows)
+
+
+def kpi_rows(
+    ctx: KPIContext, frames: Dict[str, DataFrame], period_type: str, period_col: str, period_filter
+) -> List[dict]:
+    """kpi_long records of one period type for every (root, cut) of the period-framed ``frames`` (shared with
+    comparable._comparable_period_rows). Their ``period_filter`` rows are collapsed to product level once
+    (metrics.collapse_frames, cached, released after) and every root x cut is one aggregation of them
+    (_stack_roots_and_cuts): one aggregation and one toPandas.
+
+    Records come root by root and cut by cut, each (root, cut)'s from a table of its own rows and columns (the
+    period, its cut value, the metrics) sorted by period then cut value, read row by row; iterrows makes an
+    all-numeric row (the "overall" cut of a numeric period) float, as when each was its own table.
+    """
+    metric_cols = ctx.settings["METRIC_COLS"]
+    roots: List[Optional[Dict[str, str]]] = [None] + list(ctx.root_definitions)
+    cuts: List[Optional[str]] = [None] + list(ctx.cut_dimensions)
+    collapsed = collapse_frames(ctx, frames, period_col, period_filter)
+    table = build_kpi_table(ctx, _stack_roots_and_cuts(ctx, collapsed, roots, cuts), period_col, _COMBO_KEYS)
+    release_frames(collapsed)
+    ctx.progress.table_done(f"{len(roots)} roots x {len(cuts)} cuts")
+    rows: List[dict] = []
+    for (root_pos, cut_pos), combo in table.groupby(["_root", "_dimension"]):
+        root_def, cut = roots[root_pos], cuts[cut_pos]
+        gk = [] if cut is None else ["_dimension_value"]
+        combo = combo.drop(columns=["_root", "_dimension", *([] if gk else ["_dimension_value"])])
+        for _, r in combo.sort_values([period_col] + gk).iterrows():
+            rec = {
+                "period_type": period_type,
+                "period": _period_label(period_type, r),
+                "root": "overall" if root_def is None else root_def["root"],
+                "dimension": "overall" if cut is None else cut,
+                "dimension_value": "ALL" if cut is None else r["_dimension_value"],
+            }
+            for m in metric_cols:
+                rec[m] = r.get(m)
+            rows.append(rec)
+    return rows
+
+
+def kpi_long_frame(ctx: KPIContext, rows: List[dict]) -> pd.DataFrame:
+    """kpi_long-shaped pandas frame of ``kpi_rows`` records."""
     return pd.DataFrame(
-        rows, columns=["period_type", "period", "root", "dimension", "dimension_value"] + metric_cols
+        rows, columns=["period_type", "period", "root", "dimension", "dimension_value"] + ctx.settings["METRIC_COLS"]
     )
