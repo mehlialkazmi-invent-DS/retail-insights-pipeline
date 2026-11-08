@@ -426,7 +426,7 @@ def instock_daily_pairs(ctx: KPIContext, scope_pairs: DataFrame) -> DataFrame:
         # Client rule: stores where only a sub item (not the main) is eligible leave in-stock only.
         pairs = pairs.join(ctx.instock_sub_only_pairs, on=["product_id", "store_id"], how="left_anti")
     if ctx.settings["SCOPE"]["instock_exclude_unsuperseded_sizes"]:
-        # Client rule: sizes of a superseded class color outside the supersession (likely NGF) leave in-stock only.
+        # Client rule: sizes outside the supersession of a superseded group (likely NGF) leave in-stock only.
         pairs = pairs.join(broadcast(ctx.instock_unsuperseded_products), on="product_id", how="left_anti")
     return pairs
 
@@ -579,7 +579,7 @@ def build_instock_daily(ctx: KPIContext, scope_core: DataFrame, scope_pairs: Dat
 
 def _unsuperseded_sizes(ctx: KPIContext) -> DataFrame:
     """product_ids in no item_family row whose group (products column scope.instock_unsuperseded_group_column,
-    option_code = the class color at tbretail) has a size in item_family: the sizes left out of a superseded
+    option_code at tbretail) has a size in item_family: the sizes left out of a superseded
     group's supersession (scope.instock_exclude_unsuperseded_sizes)."""
     group_col = ctx.settings["SCOPE"]["instock_unsuperseded_group_column"]
     family_ids = get_item_family_raw(ctx).select("product_id").distinct()

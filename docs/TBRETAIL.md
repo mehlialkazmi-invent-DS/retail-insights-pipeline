@@ -2,7 +2,7 @@
 
 Notes behind `tbretail_config.py` (its comments point here).
 
-**One-time CSV exports** (Databricks cell; CSVs under `/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/KPI-NEW/data/`):
+**One-time CSV exports** (Databricks cell; CSVs under a Workspace folder of your choice, e.g. `/Workspace/Users/you@invent.ai/KPI-NEW/data/`; point `dimension_sources["ngf_comp_split"].path` at it):
 
 1. NON-COMP (NFG list) product IDs (`dimension_sources["ngf_comp_split"]`, file `non_comp_ids_20260817.csv`): join an NFG Excel list (`itemcode` column, `Grand Total` row dropped) against products and write the `product_id` values.
 

@@ -155,10 +155,10 @@ CONFIG: Dict[str, Any] = {
         # In-stock only at stores where the main item itself is eligible (sub-only stores stay in every
         # other metric). Needs columns.start, roll_to_family_main and instock.method "daily".
         "instock_main_eligible_only": False,
-        # In-stock leaves out sizes not in a supersession whose class color is (likely NGF); they stay
+        # In-stock leaves out sizes outside the supersession of a superseded group (likely NGF); they stay
         # in every other metric. Needs instock.method "daily".
         "instock_exclude_unsuperseded_sizes": False,
-        # products column that groups the sizes of one class color for that removal (option_code at tbretail).
+        # products column that groups the sizes for that removal (option_code at tbretail).
         "instock_unsuperseded_group_column": "option_code",
         "backfill_leading_gap": True,  # weekly only
         "use_hybrid_scope": False,  # True also backfills the weeks the scope table leaves uncovered

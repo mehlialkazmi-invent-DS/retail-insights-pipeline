@@ -9,7 +9,7 @@ What the pipeline produces, where it saves it, and how the save modes behave. Co
 | `kpi_long`                              | One tidy table: `period_type` (annual / **ytd** / quarter / half / monthly / weekly; `half` only with `fiscal_calendar.half_periods`), `period`, `root`, `dimension`, `dimension_value`, plus all configured metrics. `root` is `"overall"` plus one per [dimension_source root](LOGIC_FLOW.md#roots-and-cuts-report-structure); `dimension`/`dimension_value` is the cut within that root. Filter it to reproduce any root/cut/period panel. |
 | `comparison_yoy / ytd`                  | Prior vs current period with formatted display columns, per root × cut. YoY = last two annual periods; YTD = the **same** elapsed window **across years**, chained across every consecutive year pair (see [Selecting which comparisons to run](CONFIG.md#selecting-which-comparisons-to-run)). With `report_end = "latest_day"` annual periods are complete fiscal years only and YTD is the same fiscal day of every year ([Latest-day report end](LOGIC_FLOW.md#latest-day-report-end-report_end--latest_day)). No QoQ/MoM/WoW table; use the Quarter/Half/Monthly/Weekly `kpi_long` rows for trends. Recomputed from the full merged kpi_long on incremental saves. |
 | `scope_diff`                            | Side-by-side annual KPIs for **scope-table-only** vs **score-only** scope (sanity check, only with `scope.run_scope_diff=True`), computed on the scope-table and score scopes; its columns are `Year, metric, scope, score, abs_diff, pct_diff`. Its years are the Annual tab's. |
-| `comparable_kpi_long` / `comparable_comparison_{ytd,yoy,quarter}` | Like-for-like metrics over only the pairs present in every qualifying year, per root × cut. Gated on `comparable_pairs.enabled=True`; kinds via `comparable_pairs.kinds` (default `["ytd"]`). See [Comparable pairs](LOGIC_FLOW.md#comparable-pairs-like-for-like-ytd--yoy--quarter--half). |
+| `comparable_kpi_long` / `comparable_comparison_{ytd,yoy,quarter,half}` | Like-for-like metrics over only the pairs present in every qualifying year, per root × cut. Gated on `comparable_pairs.enabled=True`; kinds via `comparable_pairs.kinds` (default `["ytd"]`). See [Comparable pairs](LOGIC_FLOW.md#comparable-pairs-like-for-like-ytd--yoy--quarter--half). |
 | **HTML report**                         | Standalone offline tabbed HTML (outer root tab when more than one root), Metric Details, client/period info panel ([HTML report](HTML_REPORT.md#html-report)). |
 
 Delta tables are saved under `PATH_OUTPUT_ROOT`, partitioned by `run_date` per table:
@@ -28,7 +28,7 @@ Results persist to Delta under one root:
 {bucket}/{output.path_segments}/{table_name}/run_date={run_date}/
 ```
 
-Default: `/mnt/invent-{customer}-datastore/analysis/kpi_reports/outputs/kpi_long/run_date=2026-06-15/`. `run_date` defaults to `reporting_window.as_of_date`; override with `output.run_date` / `KPI_OUTPUT_RUN_DATE` to load a specific snapshot (`html_only` uses the same partition). `output.save_outputs` defaults to `False`; when it is on, the notebook's `run(save=True)` writes each table as soon as its step builds it.
+Default: `/mnt/invent-{customer}-datastore/analysis/kpi_reports/outputs/kpi_long/run_date=2026-06-15/`. `run_date` defaults to `reporting_window.as_of_date`; override with `output.run_date` / `KPI_OUTPUT_RUN_DATE` to load a specific snapshot (`html_only` uses the same partition). `output.save_outputs` is `True` in `config.py` (nothing is written when it is `False`); when it is on, the notebook's `run(save=True)` writes each table as soon as its step builds it.
 
 **`kpi_long` is saved in full, never trimmed.** The HTML display limits (`weekly_display_weeks` etc., see [HTML report](HTML_REPORT.md#html-report)) only narrow a separate in-memory `ctx.kpi_long_display`; `ctx.kpi_long` and the save always hold every computed period.
 
@@ -62,10 +62,10 @@ Example: run 1 (`as_of_date=2026-06-15`) saves 2024–2026 into `run_date=2026-0
 
 | Value | Incremental behaviour on overlapping merge keys |
 | ----- | ----------------------------------------------- |
-| `False` (default) | Skip overlapping rows, keep saved values; the save plan prints `skipped_rows` and a warning. |
-| `True` | Drop existing rows with matching keys and write the new ones; the save plan prints `overwrite_rows`. |
+| `False` | Skip overlapping rows, keep saved values; the save plan prints `skipped_rows` and a warning. |
+| `True` (`config.py` and `tbretail_config.py` ship this value) | Drop existing rows with matching keys and write the new ones; the save plan prints `overwrite_rows`. |
 
-Use `True` to re-run an already saved week or period (scope fix, data correction).
+Use `True` to re-run an already saved week or period (scope fix, data correction). If the key is left out of `output`, the config loader uses `False`.
 
 ### Run metadata columns
 
@@ -123,11 +123,11 @@ If Cell 4 shows skipped rows and you meant to replace those periods, set `allow_
 
 ```python
 "output": {
-    "save_outputs": False,          # True to write Delta tables
+    "save_outputs": True,           # False = write nothing
     "path_segments": ["analysis", "kpi_reports", "outputs"],
     "run_date": None,               # null = use reporting_window.as_of_date for run_date= partition
-    "save_mode": "incremental",     # initial | incremental | full_refresh
-    "allow_overwrite_existing": False,
+    "save_mode": "initial",         # initial | incremental | full_refresh
+    "allow_overwrite_existing": True,
     "recompute_comparisons_from_history": True,  # incremental: recompute YoY/YTD from merged kpi_long
 }
 ```

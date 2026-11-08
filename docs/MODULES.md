@@ -21,7 +21,7 @@ retail-insights-pipeline/
     ├── metrics.py      # KPI aggregation (sales, WOS, instock, lost sales %, …)
     ├── kpi_long.py     # Long-format output across periods and slices
     ├── comparisons.py  # YoY / YTD + scope vs score diff
-    ├── comparable.py   # Gated like-for-like YTD comparison (all-years pair restriction)
+    ├── comparable.py   # Gated like-for-like comparisons: ytd, yoy, quarter, half (all-years pair restriction)
     ├── io.py           # Incremental Delta saves + save plan preview
     ├── html_report.py  # Standalone HTML renderer (offline, tabbed report)
     └── context.py      # Shared runtime state (KPIContext)

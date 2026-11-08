@@ -13,16 +13,17 @@
 #
 # What this config turns on:
 #   Scope       the platform scope table (solution 21, family mains, active products) at product_store grain,
-#               daily, nothing added or removed; NVROUT, COMP and NON-COMP are labels from dimension_sources
+#               daily, no score backfill; NVROUT, COMP and NON-COMP are labels from dimension_sources
 #   Sales       sales_basis "net": noob/daily-data sales, net of returns ("gross" reads operation/transactional_sales)
 #   Window      report_end "latest_day": YTD runs to as_of_date, other views show complete periods; Half tab on
-#   In-stock    instock.method "daily" (on-hand or store GIT, count start "earliest", ECOM stores left out);
+#   In-stock    instock.method "daily" (on-hand or store GIT, count start "earliest"; ECOM stores, sub-only
+#               stores and unsuperseded sizes left out);
 #               metrics.population_filters leaves NON-COMP out of in_stock_rate only
 #   Lost sales  report_dfu through lost_sales_source (ECOM stores left out of the sales denominator);
 #               lost_sales_ensemble OFF
 #   Blocked     blocked_scope (store solution 21, DC solution 22, rule after_scope_start): blocked days leave
 #               the inventory, WOS, in-stock metrics; sales, AUR / AUC, distinct counts and lost_sales_pct keep them
-#   GIT         goods_in_transit (shift -1): daily in-stock day, DC in-stock day and every inventory metric
+#   GIT         goods_in_transit (shift -1): daily in-stock day (DC in-stock day inert, dc_instock OFF) and every inventory metric
 #   Comparable  like-for-like ytd / yoy / quarter / half over an all-years pair universe
 #   Dimensions  IS_NVROUT (NVROUT root), IS_COMP (LFL root), brand (shown as Banner), SMW
 #   Report      TBretail KPI Report; wos_revenue, weighted_instock_rate, dc_in_stock_rate not reported
@@ -159,10 +160,10 @@ CONFIG: Dict[str, Any] = {
         # In-stock only at stores where the main item itself is eligible (sub-only stores stay in every
         # other metric). Needs columns.start, roll_to_family_main and instock.method "daily".
         "instock_main_eligible_only": True,
-        # In-stock leaves out sizes not in a supersession whose class color is (likely NGF); they stay
+        # In-stock leaves out sizes outside the supersession of a superseded group (likely NGF); they stay
         # in every other metric. Needs instock.method "daily".
         "instock_exclude_unsuperseded_sizes": True,
-        # products column that groups the sizes of one class color for that removal (option_code at tbretail).
+        # products column that groups the sizes for that removal (option_code at tbretail).
         "instock_unsuperseded_group_column": "option_code",
         "backfill_leading_gap": False,  # weekly only
         "use_hybrid_scope": False,  # True also backfills the weeks the scope table leaves uncovered
@@ -291,10 +292,7 @@ CONFIG: Dict[str, Any] = {
             "enabled": True,
             "label": "ngf_comp_split",
             "source": "csv",
-            "path": (
-                "/Workspace/Users/mehlial.kazmi@invent.ai/scripts/tickets and tasks/"
-                "KPI-NEW/data/non_comp_ids_20260817.csv"
-            ),
+            "path": "/Workspace/Users/you@invent.ai/KPI-NEW/data/non_comp_ids_20260817.csv",  # set to your copy before a run
             "location": "workspace",
             "csv_options": {"header": True, "inferSchema": True},
             "join_key": "product_id",

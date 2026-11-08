@@ -29,7 +29,7 @@ Every metric uses all scoped stores; there is no global store-exclusion key. The
 
 **DC In-Stock Rate** = `F.greatest(0.0, sum(dc_stocked_days) / sum(dc_available_days))` at DC/warehouse level (gated by `dc_instock.enabled`, [`dc_instock`](CONFIG.md#dc_instock)). Unlike other DC metrics **the denominator is an expanded grid, not a row count**: each pair's daily rows run from its first `inventory_warehouse` row to `REPORT_END_DATE` with gaps 0-filled as stockouts, whereas `dc_mean_stock`/`WOS_DC` average existing rows. A pair that **stops** being stocked keeps adding stockout days here while the others go quiet for it; a pair **never stocked** in the window is absent from all. With `enabled=False` (default) it is a literal `null` column.
 
-**Inventory Turnover Rate** = Sales Units ÷ Mean Stock for the same period grain (mean stock includes GIT when named in `goods_in_transit.inventory_metrics`, sales units never; both drop blocked days when named in `blocked_scope.metrics`). The HTML report labels it per tab: **Annual**, **YTD**, **Quarterly**, **Monthly**, or **Weekly** Inventory Turnover Rate.
+**Inventory Turnover Rate** = Sales Units ÷ Mean Stock for the same period grain (mean stock includes GIT when named in `goods_in_transit.inventory_metrics`, sales units never; both drop blocked days when named in `blocked_scope.metrics`). The HTML report labels it per tab: **Annual**, **YTD**, **Quarterly**, **Half-Yearly**, **Monthly**, or **Weekly** Inventory Turnover Rate.
 
 ## Inventory metrics: blocked days and goods in transit
 

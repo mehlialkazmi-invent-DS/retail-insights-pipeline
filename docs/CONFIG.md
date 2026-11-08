@@ -146,7 +146,7 @@ One section for the whole scope definition (tbretail's deployed values shown):
     "active_only": True,
     "instock_main_eligible_only": True,             # in-stock only where the main itself is eligible
     "instock_exclude_unsuperseded_sizes": True,     # in-stock leaves out sizes not in a supersession
-    "instock_unsuperseded_group_column": "option_code",  # products column grouping the sizes of one class color
+    "instock_unsuperseded_group_column": "option_code",  # products column grouping the sizes removed together
     "backfill_leading_gap": False,                  # weekly only
     "use_hybrid_scope": False,   # False = scope table alone; True = hybrid (covered weeks + score backfill)
     "run_scope_diff": False,     # True = compute score scope and the scope-vs-score annual diff
@@ -170,7 +170,7 @@ The generic `config.py` reads a client table: `columns` = `product_id` / `store_
 When `run_scope_diff=False` (default), score-scope computation is skipped unless `use_hybrid_scope=True` (hybrid backfill needs it). The notebook scope-diff cell and `scope_diff` Delta output are omitted.
 
 - **`instock_main_eligible_only`** (tbretail `True`, generic `False`): in-stock (and weighted in-stock) counts only stores where the main item itself is eligible; a store where only a superseded (sub) item is eligible was intentionally not assorted the new item (client rule). Those stores stay in every other metric. The pair's start is still the earliest of the main and sub rows. Built from `ctx.scope_pairs.main_eligible`, applied in `pipeline.build_instock_daily`.
-- **`instock_exclude_unsuperseded_sizes`** (tbretail `True`, generic `False`): in-stock leaves out sizes "not created in the supersession": a product in no `item_family` row whose group has at least one size in `item_family` (main or sub); the group is the `products` column `scope.instock_unsuperseded_group_column` (`option_code` = the class color at tbretail; another client names its own column). Treated like NGF: out of in-stock, still in every other metric (`pipeline._unsuperseded_sizes`).
+- **`instock_exclude_unsuperseded_sizes`** (tbretail `True`, generic `False`): in-stock leaves out sizes "not created in the supersession": a product in no `item_family` row whose group has at least one size in `item_family` (main or sub); the group is the `products` column `scope.instock_unsuperseded_group_column` (`option_code` at tbretail; another client names its own column). Treated like NGF: out of in-stock, still in every other metric (`pipeline._unsuperseded_sizes`).
 
 Block product_ids are **not** rolled: only blocks on the main's own `product_id` apply, as in the client reference script.
 
@@ -491,8 +491,8 @@ See [Output saves](OUTPUTS.md#output-saves) for mode behaviour, merge keys, work
     "save_outputs": True,
     "path_segments": ["analysis", "kpi_reports", "outputs"],
     "run_date": None,
-    "save_mode": "incremental",
-    "allow_overwrite_existing": False,
+    "save_mode": "initial",
+    "allow_overwrite_existing": True,  # key left out = False
     "recompute_comparisons_from_history": True,
 }
 ```

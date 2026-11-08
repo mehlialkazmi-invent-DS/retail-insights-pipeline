@@ -495,7 +495,7 @@ def build_scope_removals(ctx: KPIContext) -> None:
     * ctx.instock_sub_only_pairs (instock.method "daily" + scope.instock_main_eligible_only): scope pairs
       where only a sub item, not the main, is eligible.
     * ctx.instock_unsuperseded_products (instock.method "daily" + scope.instock_exclude_unsuperseded_sizes):
-      sizes of a superseded class color outside the supersession.
+      sizes outside the supersession of a superseded group (scope.instock_unsuperseded_group_column).
     """
     from kpi_pipeline.pipeline import _unsuperseded_sizes
 

@@ -374,7 +374,7 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
         if settings["SCOPE"]["instock_main_eligible_only"]:
             store_scope += "; only stores where the main (new) item itself is eligible"
         if settings["SCOPE"]["instock_exclude_unsuperseded_sizes"]:
-            store_scope += "; sizes of a superseded class color that are not in the supersession are excluded"
+            store_scope += "; sizes outside the supersession of a superseded group are excluded"
         out["in_stock_rate"] = {
             "label": "In-Stock Rate",
             "definition": (
@@ -1752,10 +1752,28 @@ def _methodology_cards(settings: Dict[str, Any], metric_cols: List[str], labels:
             lost.append(f"Sales in the percentage's denominator use the same stores as the model ({_plain_filters(settings['LOST_SALES_SALES_FILTER'])}).")
         cards.append(("Lost sales", lost))
     if settings["COMPARABLE_PAIRS_ENABLED"]:
+        unit = "product-stores" if settings["COMPARABLE_PAIRS_GRAIN"] == "product_store" else "products"
         cards.append(("Like-for-like", [
-            "Compares only product-stores that traded in every compared year"
+            f"Compares only {unit} that traded in every compared year"
             f" ({', '.join(settings['COMPARABLE_KINDS'])} views), so range changes do not distort the trend.",
         ]))
+    reading = [
+        "This report is an observational study, not a controlled experiment. There is no control group, so changes over"
+        " time are associations and cannot be attributed to the replenishment system alone. Season, promotions,"
+        " assortment, pricing and the wider market also move the numbers.",
+    ]
+    if settings["COMPARABLE_PAIRS_ENABLED"]:
+        reading.append(
+            f"Like-for-like views compare the same {unit} in every compared period ({', '.join(settings['COMPARABLE_KINDS'])})."
+            " This removes the effect of items entering or leaving the range, but it does not control for the other drivers."
+        )
+        reading.append("The other views are not restricted to a fixed set of items: the items counted can differ between periods.")
+    if scope["time"] == "daily":
+        reading.append(
+            "The planning scope is applied to every day of the report as it stands now, so items added to or removed from it"
+            " since are counted for earlier periods too."
+        )
+    cards.append(("Reading the trends", reading))
     return [(title, [line for line in lines if line]) for title, lines in cards]
 
 

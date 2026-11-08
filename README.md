@@ -26,7 +26,7 @@ Upload these to one Databricks workspace folder:
 - `config.py`
 - the entire `kpi_pipeline/` folder
 
-`config.py` is a generic reference template, not any customer's deployed config. Every optional feature ships disabled with a placeholder, so copy it per client and replace `customer`, every `path_segments` entry, `scope.columns` and the business rules (dimension sources, population filters). tbretail's deployed config is `tbretail_config.py`; the copies one directory up (`../tbretail_config.py`, `../tbretail_config_2.py`) are older versions and must be replaced by it before a run. The notebook loads its config with `%run ./config` in Cell 1; change that line to use another file. See [docs/TBRETAIL.md](docs/TBRETAIL.md) for the tbretail setup notes.
+`config.py` is a generic reference template, not any customer's deployed config. Every optional feature ships disabled with a placeholder, so copy it per client and replace `customer`, every `path_segments` entry, `scope.columns` and the business rules (dimension sources, population filters). tbretail's deployed config is `tbretail_config.py`. The notebook loads its config with `%run ./config` in Cell 1; change that line to use another file. See [docs/TBRETAIL.md](docs/TBRETAIL.md) for the tbretail setup notes.
 
 ## Config keys to set first
 
