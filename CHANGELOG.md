@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-08
+
+First release. The entries below record the development leading up to it.
+
 #### Methodology "Reading the trends" card (observational study) and prose accuracy pass - 2026-11-08
 
 The Methodology tab has a new "Reading the trends" card: the report is an observational study, not a controlled experiment, so changes over time are associations that cannot be attributed to the replenishment system alone (season, promotions, assortment, pricing and the market also move the numbers). With `comparable_pairs.enabled` it adds that like-for-like compares the same product-stores (or products) in every compared period, which removes the mix effect of items entering or leaving but controls for none of those drivers, and that the other views can count different items per period; with `scope.time = "daily"` it notes that the current scope list is applied to every day of the report. Mirrored in `docs/HTML_REPORT.md`, `docs/LOGIC_FLOW.md` (comparable section) and the skill. Prose fixes, no behaviour change: stale `file:line` references in `docs/LOGIC_FLOW.md` re-pointed (config.py, pipeline.py, html_report.py, tbretail_config.py, inputs.py, metrics.py, runner.py), "class color" reworded to the `scope.instock_unsuperseded_group_column` group in docs, comments and the in-stock Metric Details text, `docs/ORBIT_METRICS_COMPARISON.md` brought up to date (comparable kinds, `dc_in_stock_rate`), wrong defaults corrected (`html_report.yearly_display_years`, `report_title`, `output.save_outputs` / `save_mode` / `allow_overwrite_existing`), the pair-presence column (`has_sales_row`) and `comparable_comparison_half` listed, the one-laptop `../tbretail_config*.py` note dropped from the README, and `tbretail_config.py` header comments aligned with the config. The existing "Like-for-like" card now says "products" instead of "product-stores" under `comparable_pairs.grain = "product"`. The docs now say that `output.allow_overwrite_existing` falls back to `False` when the key is left out (both shipped configs set `True`). The personal Workspace path of the NON-COMP CSV in `tbretail_config.py` (`dimension_sources["ngf_comp_split"].path`) and `docs/TBRETAIL.md` is replaced by a `you@invent.ai` placeholder: set it to your own copy before a tbretail run.
@@ -524,7 +528,7 @@ sub-item) and earlier scope starts, so more blocks pass the `after_scope_start` 
 
 **Date:** 2026-10-02
 
-## [Released]
+## Pre-1.0 history
 
 ### 🐛 Fixed
 
