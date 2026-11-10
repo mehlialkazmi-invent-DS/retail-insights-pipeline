@@ -703,10 +703,11 @@ Environment override: `KPI_RUN_MODE=html_only`
     "yearly_display_years": None,      # Annual tab: most recent N years; None = all
     "root_labels": {},                 # root id -> tab label, e.g. {"comp": "LFL", "nvrout": "NVROUT"}
     "dimension_labels": {},            # slice dimension name -> tab label (display only), e.g. {"brand": "Banner"}; dict of str -> str or materialize() raises
-    "banner_division_tab": {           # Banner x Division tab per root; disabled in config.py, enabled for tbretail (docs/HTML_REPORT.md)
-        "enabled": False, "label": "Banner x Division",
-        "banner_dimension": "...", "banner_division_dimension": "...",  # slice dims; the second is derived: <banner><separator><division>
-        "separator": " | ", "banner_order": [], "division_order": [], "division_labels": {},
+    "group_breakdown_tab": {           # groups x subgroups tab per root (any two columns; tbretail: Banner x Division); disabled in config.py (docs/HTML_REPORT.md)
+        "enabled": False, "label": "Group breakdown",
+        "group_dimension": "...", "group_subgroup_dimension": "...",  # slice dims; the second is derived: <group><separator><subgroup>
+        "separator": " | ", "group_order": [], "subgroup_order": [], "subgroup_labels": {},
+        "subgroups_label": "subgroups",  # word for subgroups in the section notes (tbretail "divisions")
         "quarters": 4, "halves": 4, "years": 2,  # recent complete periods per sub-tab (Quarters / Halves / YTD / Years radios; YTD uses years), independent of *_display_*; each sub-tab has a like-for-like table below from comparable_comparison_* (kinds not in comparable_pairs.kinds show a note)
     },
     # No display-count trim setting for the YTD tab yet — it always shows every year present.
@@ -1226,7 +1227,7 @@ For a quick distinct product/store count of the scope at each removal stage (ove
 | `KPI_HTML_QUARTERLY_QUARTERS` | `html_report.quarterly_display_quarters` (`null`/empty = all) |
 | `KPI_HTML_HALF_HALVES` | `html_report.half_display_halves` (`null`/empty = all) |
 | `KPI_HTML_YEARLY_YEARS` | `html_report.yearly_display_years` (`null`/empty = all) |
-| `KPI_HTML_BANNER_DIVISION_ENABLED`, `_QUARTERS`, `_HALVES`, `_YEARS` | `html_report.banner_division_tab.enabled` / `quarters` / `halves` / `years` |
+| `KPI_HTML_GROUP_BREAKDOWN_ENABLED`, `_QUARTERS`, `_HALVES`, `_YEARS` | `html_report.group_breakdown_tab.enabled` / `quarters` / `halves` / `years` |
 | `KPI_RUN_MODE` | `run.mode` (`full` or `html_only`) |
 
 ---

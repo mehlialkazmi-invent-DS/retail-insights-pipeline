@@ -651,69 +651,69 @@ _CSS_BASE = """\
   tr.cat-scale .cell-kpi    { border-left-color: #6b21a8; }
   tr.cat-general .cell-kpi  { border-left-color: #475569; }
 
-  /* --- Banner x Division tab: banner sub-tabs, period-kind sub-tabs, stacked root sections --- */
-  .bd-anchor { position: absolute; opacity: 0; pointer-events: none; }
-  .bd-controls {
+  /* --- Group breakdown tab: group sub-tabs, period-kind sub-tabs, values then like-for-like --- */
+  .gb-anchor { position: absolute; opacity: 0; pointer-events: none; }
+  .gb-controls {
     position: sticky; top: 0; z-index: 6; background: var(--surface);
     padding: 4px 0 14px; margin-bottom: 18px; border-bottom: 1px solid var(--border);
   }
-  .bd-seg {
+  .gb-seg {
     display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 4px;
     background: var(--neutral-bg); border: 1px solid var(--border); border-radius: 999px;
   }
-  .bd-seg-btn {
+  .gb-seg-btn {
     padding: 6px 16px; border-radius: 999px; font-size: .8125rem; font-weight: 600; color: var(--muted);
     cursor: pointer; user-select: none; transition: background .12s, color .12s;
   }
-  .bd-seg-btn:hover { color: var(--ink); }
-  .bd-brand-bar .bd-seg-btn { padding: 8px 20px; font-size: .9rem; letter-spacing: .02em; }
-  .bd-count {
+  .gb-seg-btn:hover { color: var(--ink); }
+  .gb-group-bar .gb-seg-btn { padding: 8px 20px; font-size: .9rem; letter-spacing: .02em; }
+  .gb-count {
     display: inline-block; margin-left: 8px; padding: 0 7px; border-radius: 999px; font-size: .7rem;
     line-height: 1.5; background: rgba(107,122,148,.14); color: inherit;
   }
-  .bd-subbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin-top: 12px; }
-  .bd-chip-group { display: none; flex-wrap: wrap; align-items: center; gap: 6px; }
-  .bd-chip-caption {
+  .gb-subbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin-top: 12px; }
+  .gb-chip-group { display: none; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .gb-chip-caption {
     margin-right: 2px; font-size: .7rem; font-weight: 700; letter-spacing: .06em;
     text-transform: uppercase; color: var(--muted);
   }
-  .bd-chip {
+  .gb-chip {
     padding: 4px 11px; border: 1px solid var(--accent); border-radius: 999px; font-size: .78rem;
     font-weight: 600; color: var(--accent); background: var(--accent-light); cursor: pointer; user-select: none;
   }
-  .bd-brand-panel, .bd-kind-panel { display: none; }
-  .bd-section + .bd-section { margin-top: 30px; }
-  .bd-section-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px; }
-  .bd-section-title { font-size: .95rem; font-weight: 700; color: var(--ink); }
-  .bd-section-note { font-size: .78rem; color: var(--muted); }
-  .bd-scroll { border: 1px solid var(--border); border-radius: var(--radius); }
-  .bd-row { display: flex; width: max-content; }
-  .bd-block { flex: none; border-left: 1px solid var(--border); }
-  .bd-fixed + .bd-block { border-left: none; }
-  .bd-fixed {
+  .gb-group-panel, .gb-kind-panel { display: none; }
+  .gb-section + .gb-section { margin-top: 30px; }
+  .gb-section-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px; }
+  .gb-section-title { font-size: .95rem; font-weight: 700; color: var(--ink); }
+  .gb-section-note { font-size: .78rem; color: var(--muted); }
+  .gb-scroll { border: 1px solid var(--border); border-radius: var(--radius); }
+  .gb-row { display: flex; width: max-content; }
+  .gb-block { flex: none; border-left: 1px solid var(--border); }
+  .gb-fixed + .gb-block { border-left: none; }
+  .gb-fixed {
     position: sticky; left: 0; z-index: 3; background: var(--surface); border-left: none;
     border-right: 1px solid var(--border); box-shadow: 6px 0 8px -6px rgba(12,18,34,.22);
   }
-  .bd-title {
+  .gb-title {
     height: 34px; box-sizing: border-box; padding: 8px 12px; font-size: .78rem; font-weight: 700;
     color: var(--ink); background: var(--neutral-bg); border-bottom: 1px solid var(--border); white-space: nowrap;
   }
-  .bd-fixed .bd-title { background: var(--accent); color: #fff; }
-  table.bd-table { min-width: 0; width: auto; font-size: .8125rem; }
-  .bd-table thead th {
+  .gb-fixed .gb-title { background: var(--accent); color: #fff; }
+  table.gb-table { min-width: 0; width: auto; font-size: .8125rem; }
+  .gb-table thead th {
     background: var(--surface); color: var(--muted); font-size: .68rem; border-bottom: 1px solid var(--border);
   }
-  .bd-table th, .bd-table td {
+  .gb-table th, .gb-table td {
     height: 34px; box-sizing: border-box; min-width: 80px; padding: 6px 12px;
     text-align: right; font-variant-numeric: tabular-nums;
   }
-  .bd-table .bd-src-delta, .bd-table .bd-src-lfl_delta { background: #f4f7fb; }
-  .bd-table td.bd-src-lfl_prior { color: var(--muted); }
-  .bd-note {
+  .gb-table .gb-src-delta, .gb-table .gb-src-lfl_delta { background: #f4f7fb; }
+  .gb-table td.gb-src-lfl_prior { color: var(--muted); }
+  .gb-note {
     margin: 0; padding: 12px 14px; font-size: .8125rem; color: var(--muted); background: var(--neutral-bg);
     border: 1px dashed var(--border); border-radius: var(--radius);
   }
-  .bd-table .cell-kpi {
+  .gb-table .cell-kpi {
     width: 210px; min-width: 210px; max-width: 210px; text-align: left;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
@@ -1603,26 +1603,26 @@ def _comp_df_for_root(comp_map: Dict[str, Optional[pd.DataFrame]], root: str) ->
     return out
 
 
-# Banner x Division tab: (period_type, banner_division_tab key holding how many recent periods it shows).
-_BD_PERIOD_KINDS = (("quarter", "quarters"), ("half", "halves"), ("ytd", "years"), ("annual", "years"))
-_BD_PERIOD_KIND_LABELS = {"quarter": "Quarters", "half": "Halves", "ytd": "YTD", "annual": "Years"}
+# Group breakdown tab: (period_type, group_breakdown_tab key holding how many recent periods it shows).
+_GB_PERIOD_KINDS = (("quarter", "quarters"), ("half", "halves"), ("ytd", "years"), ("annual", "years"))
+_GB_PERIOD_KIND_LABELS = {"quarter": "Quarters", "half": "Halves", "ytd": "YTD", "annual": "Years"}
 # period_type -> comparable_pairs.kinds entry that produces its like-for-like rows.
-_BD_COMPARABLE_KIND = {"quarter": "quarter", "half": "half", "ytd": "ytd", "annual": "yoy"}
+_GB_COMPARABLE_KIND = {"quarter": "quarter", "half": "half", "ytd": "ytd", "annual": "yoy"}
 
 
-def _bd_hidden_dimension(settings: Dict[str, Any]) -> Optional[str]:
-    """The derived banner x division dimension while the tab is enabled: the tab shows it, so it gets no
+def _gb_hidden_dimension(settings: Dict[str, Any]) -> Optional[str]:
+    """The derived group x subgroup dimension while the tab is enabled: the tab shows it, so it gets no
     dimension tab of its own."""
-    tab = settings["HTML_REPORT_BANNER_DIVISION_TAB"]
-    return tab["banner_division_dimension"] if tab["enabled"] else None
+    tab = settings["HTML_REPORT_GROUP_BREAKDOWN_TAB"]
+    return tab["group_subgroup_dimension"] if tab["enabled"] else None
 
 
-def _bd_ordered(values: List[str], first: List[str]) -> List[str]:
+def _gb_ordered(values: List[str], first: List[str]) -> List[str]:
     """``values`` with those listed in ``first`` leading, in that order; the rest sorted."""
     return [v for v in first if v in values] + sorted(v for v in values if v not in first)
 
 
-def _bd_period_key(period_type: str, label: str) -> str:
+def _gb_period_key(period_type: str, label: str) -> str:
     """kpi_long ``period`` of a comparison row's prior_period / current_period label: "2025" (annual),
     "2025 YTD" -> "YTD-2025", "2026 Q3" -> "2026-Q3", "2026 H1" -> "2026-H1"."""
     if period_type == "ytd":
@@ -1630,7 +1630,7 @@ def _bd_period_key(period_type: str, label: str) -> str:
     return label.replace(" ", "-")
 
 
-def _bd_comparison_lookup(
+def _gb_comparison_lookup(
     comp_df: Optional[pd.DataFrame], period_type: str, dimensions: List[str]
 ) -> Dict[Tuple[str, str, str, str], Any]:
     """(dimension, dimension_value, metric_key, current period key) -> comparison row, for ``dimensions``."""
@@ -1638,12 +1638,12 @@ def _bd_comparison_lookup(
         return {}
     comp = comp_df[comp_df["dimension"].isin(dimensions)]
     return {
-        (r.dimension, str(r.dimension_value), r.metric_key, _bd_period_key(period_type, str(r.current_period))): r
+        (r.dimension, str(r.dimension_value), r.metric_key, _gb_period_key(period_type, str(r.current_period))): r
         for r in comp.itertuples()
     }
 
 
-def _bd_block_html(
+def _gb_block_html(
     title: str,
     cell: Any,
     columns: List[Tuple[str, str, str, str]],
@@ -1651,11 +1651,11 @@ def _bd_block_html(
     labels: Dict[str, str],
     with_metric_column: bool,
 ) -> str:
-    """One block of a Banner x Division table: the columns of one banner total or division, one row per
+    """One block of a group breakdown table: the columns of one group total or subgroup, one row per
     metric. ``columns`` are (class key, header text, source, period); ``cell(metric, source, period)`` gives a
     cell's (text, css class). Only the first block carries the metric names."""
     head_cells = "".join(
-        f"<th class='bdp-{_esc(key)} bd-src-{_esc(source)}'>{_esc(header)}</th>" for key, header, source, _ in columns
+        f"<th class='gbp-{_esc(key)} gb-src-{_esc(source)}'>{_esc(header)}</th>" for key, header, source, _ in columns
     )
     metric_head = "<th class='cell-kpi'>Metric</th>" if with_metric_column else ""
     rows: List[str] = []
@@ -1663,21 +1663,21 @@ def _bd_block_html(
         cells: List[str] = []
         for key, _, source, period in columns:
             text, cls = cell(metric, source, period)
-            cells.append(f"<td class='bdp-{_esc(key)} bd-src-{_esc(source)} {_esc(cls)}'>{_esc(text)}</td>")
+            cells.append(f"<td class='gbp-{_esc(key)} gb-src-{_esc(source)} {_esc(cls)}'>{_esc(text)}</td>")
         metric_cell = (
             f"<td class='cell-kpi'>{_esc(_metric_display_label(metric, labels))}</td>" if with_metric_column else ""
         )
         rows.append(f"<tr class='cat-{_esc(_CAT.get(metric, 'general'))}'>{metric_cell}{''.join(cells)}</tr>")
     return (
-        f"<div class='bd-block{' bd-fixed' if with_metric_column else ''}'>"
-        f"<div class='bd-title' title='{_esc(title)}'>{_esc(title)}</div>"
-        f"<table class='kpi-table bd-table'><thead><tr>{metric_head}{head_cells}</tr></thead>"
+        f"<div class='gb-block{' gb-fixed' if with_metric_column else ''}'>"
+        f"<div class='gb-title' title='{_esc(title)}'>{_esc(title)}</div>"
+        f"<table class='kpi-table gb-table'><thead><tr>{metric_head}{head_cells}</tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
         "</div>"
     )
 
 
-def _banner_division_tab_html(
+def _group_breakdown_tab_html(
     kpi_long_root: pd.DataFrame,
     root: str,
     tab: Dict[str, Any],
@@ -1687,10 +1687,11 @@ def _banner_division_tab_html(
     comparable_by_type: Dict[str, Optional[pd.DataFrame]],
     root_label: str,
 ) -> Tuple[str, str]:
-    """(css, panel_html) of the Banner x Division tab of one root. CSS-only radio sub-tabs per banner, then
-    per period kind (Quarters / Halves / YTD / Years, in _BD_PERIOD_KINDS order, a kind without periods
-    skipped); the kind choice carries across banners. Each panel holds two wide tables of the banner, metrics
-    as rows, the banner total as a sticky left block, then one block per division:
+    """(css, panel_html) of the group breakdown tab of one root (tbretail: Banner x Division). CSS-only radio
+    sub-tabs per group, then per period kind (Quarters / Halves / YTD / Years, in _GB_PERIOD_KINDS order, a
+    kind without periods skipped); the kind choice carries across groups. Each panel holds two wide tables of
+    the group, metrics as rows, the group total as a sticky left block, then one block per subgroup
+    (``tab["subgroups_label"]`` names them in the notes):
 
     * the root's values: the most recent complete periods of the kind from ``tab`` (kpi_long holds complete
       periods only), plus a change column per link of ``comp_by_type`` (YoY for years), as the period tabs;
@@ -1700,62 +1701,62 @@ def _banner_division_tab_html(
 
     Each period has a CSS-only checkbox that hides its columns in both tables (its like-for-like columns
     included)."""
-    banner_dim, division_dim, separator = tab["banner_dimension"], tab["banner_division_dimension"], tab["separator"]
-    dimensions = [banner_dim, division_dim]
-    banner_division_rows = kpi_long_root[kpi_long_root["dimension"] == division_dim]
-    if banner_division_rows.empty:
+    group_dim, subgroup_dim, separator = tab["group_dimension"], tab["group_subgroup_dimension"], tab["separator"]
+    dimensions = [group_dim, subgroup_dim]
+    subgroup_rows = kpi_long_root[kpi_long_root["dimension"] == subgroup_dim]
+    if subgroup_rows.empty:
         raise ValueError(
-            f"html_report.banner_division_tab is enabled but kpi_long has no {division_dim!r} rows for root {root!r}; "
+            f"html_report.group_breakdown_tab is enabled but kpi_long has no {subgroup_dim!r} rows for root {root!r}; "
             "rerun the pipeline with the dimension in slices.derived_dimensions."
         )
     frame = kpi_long_root[kpi_long_root["dimension"].isin(dimensions)]
 
     shown_by_type: Dict[str, List[str]] = {}
-    for period_type, count_key in _BD_PERIOD_KINDS:
+    for period_type, count_key in _GB_PERIOD_KINDS:
         periods = frame.loc[frame["period_type"] == period_type, "period"].unique().tolist()
         shown_by_type[period_type] = _sort_period_labels(periods, period_type)[-tab[count_key]:]
 
-    split = {v: v.split(separator, 1) for v in banner_division_rows["dimension_value"].astype(str).unique()}
-    banners = _bd_ordered(sorted({b for b, _ in split.values()}), tab["banner_order"])
-    banner_divisions = {
-        b: _bd_ordered([d for bb, d in split.values() if bb == b], tab["division_order"]) for b in banners
+    split = {v: v.split(separator, 1) for v in subgroup_rows["dimension_value"].astype(str).unique()}
+    groups = _gb_ordered(sorted({b for b, _ in split.values()}), tab["group_order"])
+    group_subgroups = {
+        b: _gb_ordered([d for gg, d in split.values() if gg == b], tab["subgroup_order"]) for b in groups
     }
     def indexed_values(period_type: str, dimension: str, value: str) -> Optional[pd.DataFrame]:
         sub = _pivot_single_value(frame, period_type, dimension, value, metric_cols)[0]
         return None if sub.empty else sub.set_index("period")
 
     pivots: Dict[Tuple[str, str], Dict[str, Optional[pd.DataFrame]]] = {
-        (dimension, value): {pt: indexed_values(pt, dimension, value) for pt, _ in _BD_PERIOD_KINDS}
-        for banner in banners
-        for dimension, value in [(banner_dim, banner)]
-        + [(division_dim, f"{banner}{separator}{d}") for d in banner_divisions[banner]]
+        (dimension, value): {pt: indexed_values(pt, dimension, value) for pt, _ in _GB_PERIOD_KINDS}
+        for group in groups
+        for dimension, value in [(group_dim, group)]
+        + [(subgroup_dim, f"{group}{separator}{d}") for d in group_subgroups[group]]
     }
 
     def column_key(period_type: str, period: str) -> str:
-        return _safe_id(root, "bd", period_type, period)
+        return _safe_id(root, "gb", period_type, period)
 
-    kinds = [pt for pt, _ in _BD_PERIOD_KINDS if shown_by_type[pt]]
+    kinds = [pt for pt, _ in _GB_PERIOD_KINDS if shown_by_type[pt]]
     changes: Dict[str, Dict[Tuple[str, str, str, str], Any]] = {}
     lfl: Dict[str, Dict[Tuple[str, str, str, str], Any]] = {}
     value_columns: Dict[str, List[Tuple[str, str, str, str]]] = {}
     lfl_columns: Dict[str, List[Tuple[str, str, str, str]]] = {}
     for period_type in kinds:
         shown = shown_by_type[period_type]
-        changes[period_type] = _bd_comparison_lookup(comp_by_type.get(period_type), period_type, dimensions)
-        lfl[period_type] = _bd_comparison_lookup(comparable_by_type.get(period_type), period_type, dimensions)
+        changes[period_type] = _gb_comparison_lookup(comp_by_type.get(period_type), period_type, dimensions)
+        lfl[period_type] = _gb_comparison_lookup(comparable_by_type.get(period_type), period_type, dimensions)
         value_columns[period_type] = [
             (column_key(period_type, p), _period_th_label(p, period_type), "value", p) for p in shown
         ]
         # A change column per link whose prior and current periods are both shown, as the Annual tab.
         linked = {
-            k[3] for k, r in changes[period_type].items() if _bd_period_key(period_type, str(r.prior_period)) in shown
+            k[3] for k, r in changes[period_type].items() if _gb_period_key(period_type, str(r.prior_period)) in shown
         }
         value_columns[period_type] += [
             (column_key(period_type, p), f"Δ {_period_th_label(p, period_type)}", "delta", p)
             for p in shown
             if p in linked
         ]
-        prior_label = {k[3]: _bd_period_key(period_type, str(r.prior_period)) for k, r in lfl[period_type].items()}
+        prior_label = {k[3]: _gb_period_key(period_type, str(r.prior_period)) for k, r in lfl[period_type].items()}
         lfl_columns[period_type] = [
             col
             for p in shown
@@ -1783,116 +1784,116 @@ def _banner_division_tab_html(
 
         return cell
 
-    def table_html(period_type: str, banner: str, columns: List[Tuple[str, str, str, str]]) -> str:
+    def table_html(period_type: str, group: str, columns: List[Tuple[str, str, str, str]]) -> str:
         blocks = [
-            _bd_block_html(
-                f"{banner} total", cell_fn(period_type, banner_dim, banner), columns, metric_cols, labels,
+            _gb_block_html(
+                f"{group} total", cell_fn(period_type, group_dim, group), columns, metric_cols, labels,
                 with_metric_column=True,
             )
         ] + [
-            _bd_block_html(
-                tab["division_labels"].get(d, d), cell_fn(period_type, division_dim, f"{banner}{separator}{d}"),
+            _gb_block_html(
+                tab["subgroup_labels"].get(d, d), cell_fn(period_type, subgroup_dim, f"{group}{separator}{d}"),
                 columns, metric_cols, labels, with_metric_column=False,
             )
-            for d in banner_divisions[banner]
+            for d in group_subgroups[group]
         ]
-        return f"<div class='table-wrap bd-scroll'><div class='bd-row'>{''.join(blocks)}</div></div>"
+        return f"<div class='table-wrap gb-scroll'><div class='gb-row'>{''.join(blocks)}</div></div>"
 
     def section_head(title: str, note: str) -> str:
         return (
-            f"<div class='bd-section-head'><span class='bd-section-title'>{_esc(title)}</span>"
-            f"<span class='bd-section-note'>{_esc(note)}</span></div>"
+            f"<div class='gb-section-head'><span class='gb-section-title'>{_esc(title)}</span>"
+            f"<span class='gb-section-note'>{_esc(note)}</span></div>"
         )
 
-    def kind_panel_html(period_type: str, banner: str) -> str:
-        n_divisions = len(banner_divisions[banner])
+    def kind_panel_html(period_type: str, group: str) -> str:
+        n_subgroups = len(group_subgroups[group])
         main = (
-            "<section class='bd-section'>"
-            + section_head(root_label, f"{banner} · {n_divisions} divisions")
-            + table_html(period_type, banner, value_columns[period_type])
+            "<section class='gb-section'>"
+            + section_head(root_label, f"{group} · {n_subgroups} {tab['subgroups_label']}")
+            + table_html(period_type, group, value_columns[period_type])
             + "</section>"
         )
-        kind_name = _BD_PERIOD_KIND_LABELS[period_type].lower()
+        kind_name = _GB_PERIOD_KIND_LABELS[period_type].lower()
         if lfl_columns[period_type]:
             with_lfl = sum(
-                1 for d in banner_divisions[banner]
-                if any(k[0] == division_dim and k[1] == f"{banner}{separator}{d}" for k in lfl[period_type])
+                1 for d in group_subgroups[group]
+                if any(k[0] == subgroup_dim and k[1] == f"{group}{separator}{d}" for k in lfl[period_type])
             )
             body = (
                 section_head(
                     "Like-for-like",
-                    f"products and stores present in both periods · {with_lfl} of {n_divisions} divisions",
+                    f"products and stores present in both periods · {with_lfl} of {n_subgroups} {tab['subgroups_label']}",
                 )
-                + table_html(period_type, banner, lfl_columns[period_type])
+                + table_html(period_type, group, lfl_columns[period_type])
             )
         elif not lfl[period_type]:
             body = section_head("Like-for-like", "") + (
-                f"<p class='bd-note'>Not in the saved outputs for {kind_name}: add "
-                f"\"{_BD_COMPARABLE_KIND[period_type]}\" to comparable_pairs.kinds and rerun the pipeline.</p>"
+                f"<p class='gb-note'>Not in the saved outputs for {kind_name}: add "
+                f"\"{_GB_COMPARABLE_KIND[period_type]}\" to comparable_pairs.kinds and rerun the pipeline.</p>"
             )
         else:
             body = section_head("Like-for-like", "") + (
-                f"<p class='bd-note'>No like-for-like link ends in the {kind_name} shown.</p>"
+                f"<p class='gb-note'>No like-for-like link ends in the {kind_name} shown.</p>"
             )
-        return main + f"<section class='bd-section bd-lfl'>{body}</section>"
+        return main + f"<section class='gb-section gb-lfl'>{body}</section>"
 
     active = "{ background: var(--accent); color: #fff; box-shadow: 0 1px 3px rgba(12,18,34,.18); }"
     css_lines: List[str] = []
     anchors = ""
-    brand_labels = ""
+    group_labels = ""
     kind_labels = ""
     chip_groups = ""
-    for i, banner in enumerate(banners):
-        brand_id = _safe_id(root, "bd", "brand", banner)
+    for i, group in enumerate(groups):
+        group_id = _safe_id(root, "gb", "group", group)
         anchors += (
-            f"<input type='radio' class='bd-anchor' name='bd-brand-{_safe_id(root)}' id='bdb-{brand_id}'"
+            f"<input type='radio' class='gb-anchor' name='gb-group-{_safe_id(root)}' id='gbb-{group_id}'"
             f"{' checked' if i == 0 else ''}>"
         )
-        brand_labels += (
-            f"<label for='bdb-{brand_id}' class='bd-seg-btn'>{_esc(banner)}"
-            f"<span class='bd-count'>{len(banner_divisions[banner])}</span></label>"
+        group_labels += (
+            f"<label for='gbb-{group_id}' class='gb-seg-btn'>{_esc(group)}"
+            f"<span class='gb-count'>{len(group_subgroups[group])}</span></label>"
         )
-        css_lines.append(f"  #bdb-{brand_id}:checked ~ .bd-panels .bd-brand-panel-{brand_id} {{ display: block; }}")
-        css_lines.append(f"  #bdb-{brand_id}:checked ~ .bd-controls label[for='bdb-{brand_id}'] {active}")
+        css_lines.append(f"  #gbb-{group_id}:checked ~ .gb-panels .gb-group-panel-{group_id} {{ display: block; }}")
+        css_lines.append(f"  #gbb-{group_id}:checked ~ .gb-controls label[for='gbb-{group_id}'] {active}")
     for i, period_type in enumerate(kinds):
-        kind_id = _safe_id(root, "bd", period_type)
+        kind_id = _safe_id(root, "gb", period_type)
         anchors += (
-            f"<input type='radio' class='bd-anchor' name='bd-kind-{_safe_id(root)}' id='bdk-{kind_id}'"
+            f"<input type='radio' class='gb-anchor' name='gb-kind-{_safe_id(root)}' id='gbk-{kind_id}'"
             f"{' checked' if i == 0 else ''}>"
         )
-        kind_labels += f"<label for='bdk-{kind_id}' class='bd-seg-btn'>{_BD_PERIOD_KIND_LABELS[period_type]}</label>"
-        css_lines.append(f"  #bdk-{kind_id}:checked ~ .bd-panels .bd-kind-panel-{kind_id} {{ display: block; }}")
-        css_lines.append(f"  #bdk-{kind_id}:checked ~ .bd-controls .bd-chips-{kind_id} {{ display: flex; }}")
-        css_lines.append(f"  #bdk-{kind_id}:checked ~ .bd-controls label[for='bdk-{kind_id}'] {active}")
-        chips = "<span class='bd-chip-caption'>Show</span>"
+        kind_labels += f"<label for='gbk-{kind_id}' class='gb-seg-btn'>{_GB_PERIOD_KIND_LABELS[period_type]}</label>"
+        css_lines.append(f"  #gbk-{kind_id}:checked ~ .gb-panels .gb-kind-panel-{kind_id} {{ display: block; }}")
+        css_lines.append(f"  #gbk-{kind_id}:checked ~ .gb-controls .gb-chips-{kind_id} {{ display: flex; }}")
+        css_lines.append(f"  #gbk-{kind_id}:checked ~ .gb-controls label[for='gbk-{kind_id}'] {active}")
+        chips = "<span class='gb-chip-caption'>Show</span>"
         for p in shown_by_type[period_type]:
             key = column_key(period_type, p)
-            anchors += f"<input type='checkbox' class='bd-anchor' id='bdt-{key}' checked>"
-            chips += f"<label for='bdt-{key}' class='bd-chip'>{_esc(_period_th_label(p, period_type))}</label>"
-            css_lines.append(f"  #bdt-{key}:not(:checked) ~ .bd-panels .bdp-{key} {{ display: none; }}")
+            anchors += f"<input type='checkbox' class='gb-anchor' id='gbt-{key}' checked>"
+            chips += f"<label for='gbt-{key}' class='gb-chip'>{_esc(_period_th_label(p, period_type))}</label>"
+            css_lines.append(f"  #gbt-{key}:not(:checked) ~ .gb-panels .gbp-{key} {{ display: none; }}")
             css_lines.append(
-                f"  #bdt-{key}:not(:checked) ~ .bd-controls label[for='bdt-{key}'] "
+                f"  #gbt-{key}:not(:checked) ~ .gb-controls label[for='gbt-{key}'] "
                 "{ color: var(--muted); background: transparent; border-color: var(--border); text-decoration: line-through; }"
             )
-        chip_groups += f"<div class='bd-chip-group bd-chips-{kind_id}'>{chips}</div>"
+        chip_groups += f"<div class='gb-chip-group gb-chips-{kind_id}'>{chips}</div>"
 
     panels = ""
-    for banner in banners:
-        brand_id = _safe_id(root, "bd", "brand", banner)
+    for group in groups:
+        group_id = _safe_id(root, "gb", "group", group)
         kind_panels = "".join(
-            f"<div class='bd-kind-panel bd-kind-panel-{_safe_id(root, 'bd', period_type)}'>"
-            f"{kind_panel_html(period_type, banner)}</div>"
+            f"<div class='gb-kind-panel gb-kind-panel-{_safe_id(root, 'gb', period_type)}'>"
+            f"{kind_panel_html(period_type, group)}</div>"
             for period_type in kinds
         )
-        panels += f"<div class='bd-brand-panel bd-brand-panel-{brand_id}'>{kind_panels}</div>"
+        panels += f"<div class='gb-group-panel gb-group-panel-{group_id}'>{kind_panels}</div>"
 
     html = (
-        f"<div class='bd-wrap'>{anchors}"
-        "<div class='bd-controls'>"
-        f"<div class='bd-seg bd-brand-bar'>{brand_labels}</div>"
-        f"<div class='bd-subbar'><div class='bd-seg'>{kind_labels}</div>{chip_groups}</div>"
+        f"<div class='gb-wrap'>{anchors}"
+        "<div class='gb-controls'>"
+        f"<div class='gb-seg gb-group-bar'>{group_labels}</div>"
+        f"<div class='gb-subbar'><div class='gb-seg'>{kind_labels}</div>{chip_groups}</div>"
         "</div>"
-        f"<div class='bd-panels'>{panels}</div></div>"
+        f"<div class='gb-panels'>{panels}</div></div>"
     )
     return "\n".join(css_lines), html
 
@@ -1915,7 +1916,7 @@ def _build_root_period_tabs(
     root_tabs: Optional[List[Tuple[str, str, str, str]]] = None,
 ) -> Tuple[str, str]:
     """(css, body_html) of one root's period tab group, from that root's rows. ``root_tabs`` (id, label,
-    panel_html, css), this root's own extra tabs (Banner x Division), and ``extra_tabs`` (id, label,
+    panel_html, css), this root's own extra tabs (the group breakdown tab), and ``extra_tabs`` (id, label,
     panel_html), Methodology and Metric Details with a single root, join the same radio group as peers of the
     period tabs."""
     dims_by_period = {pt: dims for pt in period_types}
@@ -2098,7 +2099,7 @@ def _methodology_cards(settings: Dict[str, Any], metric_cols: List[str], labels:
             "Split by " + ", ".join(
                 settings["HTML_REPORT_DIMENSION_LABELS"].get(dim, dim)
                 for dim in settings["SLICE_DIMENSIONS"] + list(settings["DERIVED_SLICE_DIMENSIONS"])
-                if dim != _bd_hidden_dimension(settings)
+                if dim != _gb_hidden_dimension(settings)
             ) + ".",
         ]),
     ]
@@ -2381,8 +2382,8 @@ def render_kpi_html(
     active_dims = list(getattr(ctx, "cut_dimensions", None) or [])
     slice_source = active_dims or configured_slices
     dims = _infer_dimensions(kpi_long, slice_source)
-    bd_hidden_dimension = _bd_hidden_dimension(settings)
-    dims = [d for d in dims if d != bd_hidden_dimension]
+    gb_hidden_dimension = _gb_hidden_dimension(settings)
+    dims = [d for d in dims if d != gb_hidden_dimension]
 
     present_period_types = kpi_long["period_type"].unique().tolist()
     period_types = [pt for pt in _PERIOD_ORDER if pt in present_period_types]
@@ -2451,19 +2452,19 @@ def render_kpi_html(
     methodology_html = _methodology_html(metric_cols, labels, settings, getattr(ctx, "data_coverage", None))
     extra_tabs = [("methodology", "Methodology", methodology_html), ("details", "Metric Details", metric_details_html)]
 
-    # Banner x Division: from the untrimmed kpi_long (its own period counts), one tab inside every root.
-    bd_tab = settings["HTML_REPORT_BANNER_DIVISION_TAB"]
+    # Group breakdown: from the untrimmed kpi_long (its own period counts), one tab inside every root.
+    gb_tab = settings["HTML_REPORT_GROUP_BREAKDOWN_TAB"]
 
-    def banner_division_root_tabs(root: str) -> List[Tuple[str, str, str, str]]:
-        if not bd_tab["enabled"]:
+    def group_breakdown_root_tabs(root: str) -> List[Tuple[str, str, str, str]]:
+        if not gb_tab["enabled"]:
             return []
         full = ctx.kpi_long[ctx.kpi_long["root"] == root] if "root" in ctx.kpi_long.columns else ctx.kpi_long
-        bd_css, bd_html = _banner_division_tab_html(
-            full, root, bd_tab, metric_cols, labels,
+        gb_css, gb_html = _group_breakdown_tab_html(
+            full, root, gb_tab, metric_cols, labels,
             _comp_df_for_root(comp_map, root), _comp_df_for_root(comparable_comp_map, root),
             _root_display_label(root, root_display_labels),
         )
-        return [(_safe_id(root, "banner-division"), bd_tab["label"], bd_html, bd_css)]
+        return [(_safe_id(root, "group-breakdown"), gb_tab["label"], gb_html, gb_css)]
 
     if len(roots) == 1:
         root = roots[0]
@@ -2475,7 +2476,7 @@ def render_kpi_html(
             extra_tabs=extra_tabs,
             comparable_kpi_long_map=_comp_df_for_root(comparable_kpi_long_map, root),
             dimension_labels=dimension_labels,
-            root_tabs=banner_division_root_tabs(root),
+            root_tabs=group_breakdown_root_tabs(root),
         )
         main_panel = f"<div class='panel'>{body}</div>"
     else:
@@ -2489,7 +2490,7 @@ def render_kpi_html(
                 week_start_by_period, month_display_by_period,
                 comparable_kpi_long_map=_comp_df_for_root(comparable_kpi_long_map, root),
                 dimension_labels=dimension_labels,
-                root_tabs=banner_division_root_tabs(root),
+                root_tabs=group_breakdown_root_tabs(root),
             )
             css_parts.append(css)
             root_panels.append((root, body))
