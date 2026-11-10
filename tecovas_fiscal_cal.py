@@ -1,11 +1,11 @@
-# Writes Tecovas' calendar as the fiscal_cal Delta table tecovas_config.py reads (path_segments.fiscal).
+# Writes Tecovas' calendar as the fiscal_cal Delta table config.py reads (path_segments.fiscal).
 #
 # Tecovas weeks run Monday-Sunday and noob/daily-data's year / week are ISO 8601 (2025-12-29 is 2026 week 1,
 # 2023-01-01 is 2022 week 52), so Year / Week here are datetime.date.isocalendar(). Tecovas has no fiscal month
 # of its own: a week belongs to the month (and quarter) of its Thursday, the day that also fixes its ISO year,
 # so every month and quarter is whole weeks and a year is 52 or 53 of them.
 #
-# How to use (Databricks, Tecovas workspace, next to tecovas_config.py), once and whenever the range runs out:
+# How to use (Databricks, Tecovas workspace, next to config.py), once and whenever the range runs out:
 #     %run ./tecovas_fiscal_cal
 #     write_tecovas_fiscal_cal(spark, fund.paste)
 
@@ -14,7 +14,7 @@ from typing import Callable
 
 FIRST_DAY = datetime.date(2022, 1, 3)  # Monday, ISO 2022 week 1; before daily-data's first day (2023-01-01)
 LAST_DAY = datetime.date(2028, 1, 2)  # Sunday, ISO 2027 week 52; the upload must extend past every window
-PATH_SEGMENTS = ["temp", "firatg", "retail_insights_kpi", "fiscal_cal"]  # = tecovas_config path_segments.fiscal
+PATH_SEGMENTS = ["temp", "firatg", "retail_insights_kpi", "fiscal_cal"]  # = config.py path_segments.fiscal
 
 
 def tecovas_calendar_rows():

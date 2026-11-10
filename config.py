@@ -1,28 +1,30 @@
-# Retail-insights-pipeline config: the generic TEMPLATE for a new customer, not any customer's deployed values.
-# Copy it and replace the placeholders. docs/CONFIG.md documents every key in depth.
+# Retail-insights-pipeline config: Tecovas values on the tecovas-kpi-report branch (main holds the generic template).
+# docs/CONFIG.md documents every key in depth.
 #
-# How to use (Databricks, next to main.ipynb):
+# How to use (Databricks, Tecovas workspace, next to main.ipynb):
 #     %run ./config
 #     settings = materialize(fund.paste)
 #
-# Layout: reference lists -> CONFIG (the only part you edit) -> helpers -> materialize(). materialize() checks
-# CONFIG, applies any KPI_* environment overrides (docs/CONFIG.md: Environment variable overrides) and returns the flat
-# settings dict the pipeline reads. Every section and key stays in the file; unused ones are switched off.
-#
-# First edits: customer, path_segments (scope, daily_data, products, lost_sales at minimum),
-# scope.columns, reporting_window.as_of_date. Before each run: reporting_window.as_of_date.
+# Before each run: set CHANNEL below and reporting_window.as_of_date (a day noob/daily-data has reached).
+# One run = one HTML report. Run once per CHANNEL ("all", "retail", "ecom") for the channel split: the
+# pipeline's slices are product-level only, so a store channel cannot be a tab of a single report.
 #
 # What this config turns on:
-#   Scope       the scope table at product_store grain, daily
-#   Sales       sales_basis "net": noob/daily-data sales, net of returns ("gross" reads operation/transactional_sales)
-#   Window      report_end "as_of": YTD from the week of Jan 1 to the last complete Sun-Sat week; Half tab OFF
-#   In-stock    instock.method "lost_sales_source" (read from the lost-sales table)
-#   Lost sales  noob lost-sales table through lost_sales_source; lost_sales_ensemble OFF
+#   Scope       operation/scope, store RPL solutions 21 + 24, product_store grain, daily, family mains
+#   Sales       sales_basis "net": noob/daily-data sales, net of returns
+#   Channel     CHANNEL filters scope, daily-data and lost sales to the channel's stores (master-data/stores
+#               channel_type: 57 eCommerce, 71 Wholesale, 82 Corporate Sales, every other store Retail)
+#   Calendar    Tecovas' own calendar: Monday-Sunday weeks, year / week as in noob/daily-data (ISO), months of
+#               whole weeks (tecovas_fiscal_cal.py writes it; Tecovas has no one_time_uploads/fiscal_cal)
+#   Window      2024-01-01 (Monday) to the last complete Monday-Sunday week
+#   In-stock    instock.method "lost_sales_source" (noob/lost-sales model_id=top_down)
+#   Lost sales  noob/lost-sales model_id=top_down; lost_sales_ensemble OFF
 #   Blocked     blocked_scope OFF
 #   GIT         goods_in_transit OFF
-#   Comparable  YoY and YTD comparisons; like-for-like comparable_pairs OFF
-#   Dimensions  brand plus one example derived slice; dimension_sources OFF
-#   Report      KPI Report with every metric of METRICS_ALL; dc_in_stock_rate needs dc_instock (OFF)
+#   Comparable  YoY and YTD comparisons; like-for-like comparable_pairs ytd + yoy (product x store)
+#   Dimensions  division (products.product_group_1_description); dimension_sources OFF
+#   Output      Delta saves to temp/firatg/retail_insights_kpi/<channel>, never to analysis/
+#   Report      Tecovas KPI Report; dc_in_stock_rate not reported (dc_instock OFF)
 
 import copy
 import datetime
@@ -64,22 +66,45 @@ SALES_BASES = ("net", "gross")
 # The day every week starts on: fiscal_calendar.week_start_day, as its Python weekday.
 WEEK_START_DAYS = {"sunday": 6, "monday": 0}
 
+# =============================================================================
+# CHANNEL -- which Tecovas stores one run reports on (one HTML per channel)
+# =============================================================================
+CHANNEL = os.environ.get("KPI_CHANNEL", "all")  # "all" | "retail" | "ecom"; os.environ["KPI_CHANNEL"] before %run
+
+_NON_RETAIL_STORE_IDS = "57, 71, 82"  # master-data/stores: 57 eCommerce, 71 Wholesale, 82 Corporate Sales
+_ECOM_STORE_IDS = "57"
+_CHANNEL_STORE_FILTER = {
+    "all": None,
+    "retail": f"NOT IN ({_NON_RETAIL_STORE_IDS})",
+    "ecom": f"IN ({_ECOM_STORE_IDS})",
+}
+_CHANNEL_LABEL = {"all": "All Channels", "retail": "Retail", "ecom": "eCommerce"}
+if CHANNEL not in _CHANNEL_STORE_FILTER:
+    raise ValueError(f"CHANNEL={CHANNEL!r}; expected one of {sorted(_CHANNEL_STORE_FILTER)}")
+
+
+def _channel_filter(store_col: str) -> List[str]:
+    """The CHANNEL's store filter on ``store_col``, as an input_filters list (empty for "all")."""
+    condition = _CHANNEL_STORE_FILTER[CHANNEL]
+    return [f"{store_col} {condition}"] if condition else []
+
+
 CONFIG: Dict[str, Any] = {
     # =============================================================================
     # 1. RUN & DATES -- whose data, which days, which calendar
     # =============================================================================
-    "customer": "your_customer",  # datastore bucket: /mnt/invent-{customer}-datastore
+    "customer": "tecovas",  # datastore bucket: /mnt/invent-{customer}-datastore
     "run": {
         "mode": "full",  # "full" computes from the source tables; "html_only" renders saved outputs
     },
     "reporting_window": {  # docs/LOGIC_FLOW.md: Reporting window and report end
-        "as_of_date": "2026-09-01",  # last day of data to report; update before each run
-        "run_min_date": None,  # None = YTD from Jan 1; "2024-01-01" for multi-year
+        "as_of_date": "2026-11-08",  # last day of data to report; update before each run
+        "run_min_date": "2024-01-01",  # Monday, first day of Tecovas year 2024; lost-sales starts 2023-12-25
         "report_end": "as_of",  # "as_of" | "complete_month" | "latest_day" ("latest_day" needs instock.method "daily")
     },
     "fiscal_calendar": {  # docs/LOGIC_FLOW.md: Fiscal calendar vs native time grain
-        "week_start_day": "sunday",  # a WEEK_START_DAYS key: weeks run Sunday-Saturday or Monday-Sunday
-        "use_fiscal_calendar": True,  # True = periods from the fiscal_cal upload; False = from daily-data dates
+        "week_start_day": "monday",  # a WEEK_START_DAYS key: Tecovas weeks run Monday-Sunday (noob week_start_day 1)
+        "use_fiscal_calendar": True,  # Tecovas' own calendar, built by tecovas_fiscal_cal.py (path_segments.fiscal)
         "half_periods": False,  # True adds the Half tab and the "half" comparable kind
         "column_map": {  # fiscal_cal upload columns; set month_name_col when the fiscal year is offset
             "quarter_col": "Quarter",
@@ -95,23 +120,23 @@ CONFIG: Dict[str, Any] = {
     # 2. SOURCE TABLES -- where each input lives and how it is read
     # =============================================================================
     "path_segments": {  # folders under the datastore bucket
-        "fiscal": ["one_time_uploads", "fiscal_cal"],  # fiscal calendar upload
+        "fiscal": ["temp", "firatg", "retail_insights_kpi", "fiscal_cal"],  # written by tecovas_fiscal_cal.py
         "daily_data": ["noob", "daily-data"],  # store x product daily sales and inventory
         "inventory_warehouse": ["operation", "inventory_warehouse"],  # DC daily inventory
         "item_family": ["operation", "item_family"],  # parent / child product map
-        "scope": ["analysis", "instock_rate", "instock_rate_scope"],  # the scope table
+        "scope": ["operation", "scope"],  # the scope table (platform operation/scope)
         "goods_in_transit": ["operation", "goods_in_transit"],  # destination_type 0 = store, 1 = warehouse
         "products": ["master-data", "products"],  # product attributes: slice dimensions, active flag
-        "lost_sales": ["noob", "lost-sales"],  # add a model_id=... segment if partitioned by model
+        "lost_sales": ["noob", "lost-sales", "model_id=top_down"],  # the model Tecovas reporting reads
         "product_planning_level": ["operation", "product_planning_level"],  # product_agg_level -> product_id map
         "transactional_sales": ["operation", "transactional_sales"],  # read only with sales_basis "gross" (non-return rows)
     },
     # Spark SQL expressions applied when reading each source (docs/CONFIG.md: input_filters). To keep a store out of
     # every metric, filter it in daily_data here and, for the daily in-stock, in instock.daily.input_filters.
-    "input_filters": {
-        "scope": [],
-        "lost_sales": [],  # also applied to lost_sales_ensemble.slow_path_segments
-        "daily_data": ["usable = 1"],
+    "input_filters": {  # CHANNEL's store filter on every store-level source (scope reads raw location_id)
+        "scope": _channel_filter("location_id"),
+        "lost_sales": _channel_filter("store_id"),  # also applied to lost_sales_ensemble.slow_path_segments
+        "daily_data": ["usable = 1"] + _channel_filter("store_id"),
         "inventory_warehouse": [],
         "item_family": [],
         "transactional_sales": ["sales_type != 'return'"],  # read only with sales_basis "gross"; return rows are stored positive
@@ -142,19 +167,19 @@ CONFIG: Dict[str, Any] = {
         "grain": "product_store",  # "product" | "product_store"; daily in-stock needs stores
         "columns": {  # column names of path_segments.scope; None = column not used
             "product": "product_id",
-            "store": "store_id",  # required for grain product_store; for scope.dc_solution_id it holds the warehouse
-            "start": None,  # daily only: rows open on the run date, scope_start = earliest start
-            "end": None,  # daily only: null or on / after the run date = open
-            "solution": None,  # rows of scope.solution_id / dc_solution_id only
-            "run_date": None,  # rows of the run date only
+            "store": "location_id",  # required for grain product_store; for scope.dc_solution_id it holds the warehouse
+            "start": "start_date",  # daily only: rows open on the run date, scope_start = earliest start
+            "end": "end_date",  # daily only: null or on / after the run date = open
+            "solution": "solution_id",  # rows of scope.solution_id / dc_solution_id only
+            "run_date": "run_date",  # rows of the run date only (prod keeps ~30 days of run_dates)
             "date": None,  # weekly only: the row's week as a date, OR year + week below
             "year": None,
             "week": None,
         },
-        "solution_id": 21,  # store scope solution(s), int or list (blocks: blocked_scope.solution_id); needs columns.solution
+        "solution_id": [21, 24],  # store RPL solutions (reporting's store_rpl_solution_ids; 25 has no rows); needs columns.solution
         "dc_solution_id": None,  # DC (network) scope: DC metrics' warehouse pairs, among the store scope's products; DC blocks
         "run_date": None,  # "YYYY-MM-DD" Sunday; None = latest Sunday on or before today; needs columns.run_date / end
-        "roll_to_family_main": False,  # roll each scope row onto its family main (opt-in safety net)
+        "roll_to_family_main": True,  # roll each scope row onto its family main, like item_family_rollup.daily_data
         "active_only": False,  # drop pairs of inactive products
         # In-stock only at stores where the main item itself is eligible (sub-only stores stay in every
         # other metric). Needs columns.start, roll_to_family_main and instock.method "daily".
@@ -255,8 +280,8 @@ CONFIG: Dict[str, Any] = {
     # 6. BREAKDOWNS -- slice dimensions and root tabs
     # =============================================================================
     "slices": {  # breakdown dimensions from the products table (docs/LOGIC_FLOW.md: Roots and cuts)
-        "dimensions": ["brand"],
-        "derived_dimensions": {"example_derived": "CASE WHEN brand = 'A' THEN 'Group A' ELSE 'Other' END"},
+        "dimensions": ["product_group_1_description"],  # Tecovas division (shown as "Division")
+        "derived_dimensions": {},
         "value_filters": {},  # per-dimension include / exclude of values (docs/LOGIC_FLOW.md: Value filters)
     },
     "dimension_sources": [  # external tables that add slice dimensions and root tabs (docs/LOGIC_FLOW.md: Dimension sources)
@@ -281,13 +306,13 @@ CONFIG: Dict[str, Any] = {
             "distinct_product_count", "distinct_store_count", "distinct_pair_count",
             "mean_stock", "mean_stock_retail", "mean_stock_cost", "dc_mean_stock", "total_mean_stock",
             "WOS", "wos_revenue", "wos_cost", "WOS_DC", "WOS_TOTAL", "inventory_turnover_rate",
-            "in_stock_rate", "weighted_instock_rate", "dc_in_stock_rate", "lost_sales_pct",
+            "in_stock_rate", "weighted_instock_rate", "lost_sales_pct",
         ],
         "scope_diff_metrics": [  # metrics in the scope diff (scope.run_scope_diff), from metric_cols
             "total_sales_quantity", "total_sales_revenue", "total_inventory",
             "distinct_product_count", "distinct_pair_count",
             "WOS", "WOS_DC", "WOS_TOTAL",
-            "in_stock_rate", "dc_in_stock_rate", "lost_sales_pct",
+            "in_stock_rate", "lost_sales_pct",
         ],
         "labels": {  # display name per metric
             "total_sales_revenue": "Sales Revenue",
@@ -325,8 +350,8 @@ CONFIG: Dict[str, Any] = {
         "enabled": ["yoy", "ytd"],  # any of COMPARISON_KINDS_ALL
     },
     "comparable_pairs": {  # like-for-like; needs run_min_date spanning 2+ years (docs/LOGIC_FLOW.md: Comparable pairs)
-        "enabled": False,
-        "kinds": ["ytd"],  # any of COMPARABLE_KINDS_ALL
+        "enabled": True,  # same product x store pairs every year: scope is today's snapshot, so plain YoY is mostly scope growth
+        "kinds": ["ytd", "yoy"],  # any of COMPARABLE_KINDS_ALL
         "grain": "product_store",  # or "product"
         "pair_days": "unblocked",  # pairs present on "unblocked" days in every year, or on "all" (incl. blocked)
     },
@@ -335,16 +360,16 @@ CONFIG: Dict[str, Any] = {
     # =============================================================================
     "output": {  # Delta saves (docs/OUTPUTS.md: Output saves)
         "save_outputs": True,
-        "path_segments": ["analysis", "kpi_reports", "outputs"],  # output folder under the bucket
+        "path_segments": ["temp", "firatg", "retail_insights_kpi", CHANNEL],  # prod scratch only, one folder per channel
         "run_date": None,  # run_date partition written; None = as_of_date
-        "save_mode": "initial",  # "initial" | "incremental" | "full_refresh"
+        "save_mode": "full_refresh",  # "initial" | "incremental" | "full_refresh"; scratch output, re-runs replace it
         "allow_overwrite_existing": True,  # incremental: replace periods already saved
         "recompute_comparisons_from_history": True,  # incremental: rebuild comparisons from the merged history
     },
     "html_report": {  # docs/HTML_REPORT.md: HTML report
         "enabled": True,
-        "filename": "kpi_report_{customer}_{report_end}.html",  # placeholders {customer} and {report_end} only
-        "report_title": "KPI Report",
+        "filename": f"kpi_report_{{customer}}_{CHANNEL}_{{report_end}}.html",  # placeholders {customer} and {report_end} only
+        "report_title": f"Tecovas KPI Report - {_CHANNEL_LABEL[CHANNEL]}",
         "output_path_segments": None,  # None = local only; else a datastore folder to save to as well
         "metric_definitions": {},  # overrides of the Metric Details tab text
         "weekly_display_weeks": 5,  # periods shown per tab; None = all
@@ -353,7 +378,7 @@ CONFIG: Dict[str, Any] = {
         "half_display_halves": 4,
         "yearly_display_years": None,
         "root_labels": {},  # root id -> tab label
-        "dimension_labels": {},  # slice dimension -> tab label, e.g. {"brand": "Banner"}
+        "dimension_labels": {"product_group_1_description": "Division"},  # slice dimension -> tab label
     },
 }
 
