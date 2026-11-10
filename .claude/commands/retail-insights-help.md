@@ -703,6 +703,12 @@ Environment override: `KPI_RUN_MODE=html_only`
     "yearly_display_years": None,      # Annual tab: most recent N years; None = all
     "root_labels": {},                 # root id -> tab label, e.g. {"comp": "LFL", "nvrout": "NVROUT"}
     "dimension_labels": {},            # slice dimension name -> tab label (display only), e.g. {"brand": "Banner"}; dict of str -> str or materialize() raises
+    "banner_division_tab": {           # Banner x Division tab per root; disabled in config.py, enabled for tbretail (docs/HTML_REPORT.md)
+        "enabled": False, "label": "Banner x Division",
+        "banner_dimension": "...", "banner_division_dimension": "...",  # slice dims; the second is derived: <banner><separator><division>
+        "separator": " | ", "banner_order": [], "division_order": [], "division_labels": {},
+        "quarters": 4, "halves": 4, "years": 2,  # recent complete periods per sub-tab (Quarters / Halves / YTD / Years radios; YTD uses years), independent of *_display_*; each sub-tab has a like-for-like table below from comparable_comparison_* (kinds not in comparable_pairs.kinds show a note)
+    },
     # No display-count trim setting for the YTD tab yet — it always shows every year present.
 }
 ```
@@ -716,7 +722,7 @@ Each root's period tabs (seven top-level tabs when it's the only/outermost level
 - **Half** (only with `fiscal_calendar.half_periods`) — KPI table by half, **value trend only** (most recent N halves, default 4, complete halves only) (+ comparable `half`, one block per half number, when enabled)
 - **Monthly** — KPI table by month, **value trend only** (most recent N months, default 5, and only fully-elapsed months — see §3.1) — no comparison table. Column header text is the real calendar month (e.g. "2026-Aug"), which can differ from the fiscal month *number* underlying the grouping — see §3.1's fiscal-calendar note.
 - **Weekly** — KPI table for the **most recent N fiscal weeks** (default 5; sorted by `week_start_date`), **value trend only** — no comparison table
-- **Metric Details** — plain-English definition, store scope, and formula for every active metric, and a separate auto-generated **Methodology** tab before it (business-wording cards, including a "Reading the trends" card that says the report is an observational study (no control group; like-for-like removes the mix effect but not season, promotions, assortment, pricing or the market), plus a per-metric table of source, filters, blocked days and stock in transit; `html_report._methodology_html`) (single root only; a peer of the root tabs, not the period tabs, when there's more than one root) The Methodology tab ends with a **data section** (`html_report._coverage_html`, built by `inputs.collect_data_coverage` on the first report of a run): per source its table, the first and last date of each measure it carries (daily data: every row, rows kept by the filters, sales, inventory; lost sales weeks; DC inventory; goods in transit by destination; transactional sales under gross; blocked days; a weekly scope's weeks) and the `input_filters` in force, printed as configured. A daily scope has no dates (one scope applied back over the window), so it shows the pair start dates. Dates span the whole source table, not only the report window: one aggregation per source, run when the report is built (also in html_only mode, except blocked days and pair start dates, which need a full run).
+- **Metric Details** — plain-English definition, store scope, and formula for every active metric, and a separate auto-generated **Methodology** tab before it (business-wording cards, including a "Reading the trends" card that says the report is an observational study (no control group; like-for-like removes the mix effect but not season, promotions, assortment, pricing or the market), plus a per-metric table of source, filters, blocked days and stock in transit; `html_report._methodology_html`) (single root only; a peer of the root tabs, not the period tabs, when there's more than one root) The Methodology tab ends with a **data section** (`html_report._coverage_html`, built by `inputs.collect_data_coverage` on the first report of a run): per source its table, the first and last date of each measure it carries (daily data: rows kept by the filters, sales, inventory; lost sales weeks and weeks with lost sales above 0; DC inventory; goods in transit by destination, dated by the day each snapshot describes (`date_shift_days`); transactional sales under gross; blocked days; a weekly scope's weeks) and the `input_filters` in force, printed as configured. A daily scope has no dates (one scope applied back over the window), so it shows the pair start dates. Dates are clipped to the report window (`EFFECTIVE_REPORT_START_DATE` to `REPORT_END_DATE`), so a source that starts late or ends early inside it stands out; history before it, loads after it and forecast weeks are left out; pair start dates are not clipped. One aggregation per source, run when the report of a full run is built. `html_only` leaves the data section out: reading the sources then would date them by the day the HTML is built, not by the saved run.
 
 Within each period tab, navigation is three levels:
 1. **Period** (horizontal) — Annual / YTD / Quarter / Half / Monthly / Weekly
@@ -1220,6 +1226,7 @@ For a quick distinct product/store count of the scope at each removal stage (ove
 | `KPI_HTML_QUARTERLY_QUARTERS` | `html_report.quarterly_display_quarters` (`null`/empty = all) |
 | `KPI_HTML_HALF_HALVES` | `html_report.half_display_halves` (`null`/empty = all) |
 | `KPI_HTML_YEARLY_YEARS` | `html_report.yearly_display_years` (`null`/empty = all) |
+| `KPI_HTML_BANNER_DIVISION_ENABLED`, `_QUARTERS`, `_HALVES`, `_YEARS` | `html_report.banner_division_tab.enabled` / `quarters` / `halves` / `years` |
 | `KPI_RUN_MODE` | `run.mode` (`full` or `html_only`) |
 
 ---

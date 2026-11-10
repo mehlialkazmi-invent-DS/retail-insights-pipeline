@@ -350,6 +350,19 @@ CONFIG: Dict[str, Any] = {
         "yearly_display_years": None,
         "root_labels": {},  # root id -> tab label
         "dimension_labels": {},  # slice dimension -> tab label, e.g. {"brand": "Banner"}
+        "banner_division_tab": {  # docs/HTML_REPORT.md: Banner x Division tab, one table per banner
+            "enabled": False,
+            "label": "Banner x Division",  # tab label
+            "banner_dimension": "example_derived",  # slice dimension whose values are the banners (the total column)
+            "banner_division_dimension": "example_banner_division",  # derived dimension: <banner><separator><division>
+            "separator": " | ",  # must be the one slices.derived_dimensions[banner_division_dimension] joins with
+            "banner_order": [],  # banners listed first, in this order; the rest sorted
+            "division_order": [],  # divisions listed first, in this order; the rest in sorted code order
+            "division_labels": {},  # division value -> column title; unlisted ones show the raw value
+            "quarters": 4,  # most recent complete periods shown; independent of the *_display_* keys above
+            "halves": 4,
+            "years": 2,
+        },
     },
 }
 
@@ -442,7 +455,44 @@ _ENV_OVERRIDES = (
     ("KPI_HTML_QUARTERLY_QUARTERS", ("html_report", "quarterly_display_quarters"), _optional_int),
     ("KPI_HTML_HALF_HALVES", ("html_report", "half_display_halves"), _optional_int),
     ("KPI_HTML_YEARLY_YEARS", ("html_report", "yearly_display_years"), _optional_int),
+    ("KPI_HTML_BANNER_DIVISION_ENABLED", ("html_report", "banner_division_tab", "enabled"), _parse_bool),
+    ("KPI_HTML_BANNER_DIVISION_QUARTERS", ("html_report", "banner_division_tab", "quarters"), int),
+    ("KPI_HTML_BANNER_DIVISION_HALVES", ("html_report", "banner_division_tab", "halves"), int),
+    ("KPI_HTML_BANNER_DIVISION_YEARS", ("html_report", "banner_division_tab", "years"), int),
 )
+
+
+def _validate_banner_division_tab(tab: Dict[str, Any], slice_dimensions: List[str], derived_dimensions: Dict[str, str]) -> None:
+    """Raise when an enabled html_report.banner_division_tab does not fit slices: both dimensions must be slice
+    dimensions, the banner x division one derived, and its expression must contain the separator."""
+    if not tab["enabled"]:
+        return
+    for key in ("banner_dimension", "banner_division_dimension"):
+        if tab[key] not in list(slice_dimensions) + list(derived_dimensions):
+            raise ValueError(
+                f"html_report.banner_division_tab.{key} {tab[key]!r} is not in slices.dimensions or slices.derived_dimensions"
+            )
+    banner_division_sql = derived_dimensions.get(tab["banner_division_dimension"])
+    if banner_division_sql is None:
+        raise ValueError(
+            f"html_report.banner_division_tab.banner_division_dimension {tab['banner_division_dimension']!r} "
+            "must be a slices.derived_dimensions entry"
+        )
+    if tab["separator"] not in banner_division_sql:
+        raise ValueError(
+            f"slices.derived_dimensions[{tab['banner_division_dimension']!r}] must join banner and division with "
+            f"html_report.banner_division_tab.separator {tab['separator']!r}"
+        )
+    for key in ("quarters", "halves", "years"):
+        if type(tab[key]) is not int or tab[key] < 1:
+            raise ValueError(f"html_report.banner_division_tab.{key} must be a positive integer; got {tab[key]!r}")
+    for key in ("banner_order", "division_order"):
+        if not isinstance(tab[key], list) or not all(isinstance(v, str) for v in tab[key]):
+            raise ValueError(f"html_report.banner_division_tab.{key} must be a list of strings")
+    if not isinstance(tab["division_labels"], dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in tab["division_labels"].items()
+    ):
+        raise ValueError("html_report.banner_division_tab.division_labels must be a dict of division value -> label (str -> str)")
 
 
 def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1125,6 +1175,10 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         isinstance(k, str) and isinstance(v, str) for k, v in dimension_labels.items()
     ):
         raise ValueError("html_report.dimension_labels must be a dict of slice dimension name -> tab label (str -> str)")
+    banner_division_tab = html_cfg["banner_division_tab"]
+    _validate_banner_division_tab(
+        banner_division_tab, cfg["slices"]["dimensions"], cfg["slices"]["derived_dimensions"]
+    )
     html_output_segs = html_cfg["output_path_segments"]
     html_output_dir = fund_paste(bucket, *html_output_segs) if html_output_segs else None
 
@@ -1203,4 +1257,5 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "HTML_REPORT_YEARLY_DISPLAY_YEARS": html_cfg.get("yearly_display_years"),
         "HTML_REPORT_ROOT_LABELS": html_cfg["root_labels"],
         "HTML_REPORT_DIMENSION_LABELS": dimension_labels,
+        "HTML_REPORT_BANNER_DIVISION_TAB": banner_division_tab,
     }

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+#### Methodology tab: data section clipped to the report window (TBRCS-820) - 2026-11-10
+
+The "Data available, by source (for checking)" table showed each source's whole table, so it was full of dates outside the report (daily data from 2021, lost-sales forecast weeks to 2027, loads after the as-of date). `inputs.collect_data_coverage` now clips every span to the report window (`_span_rows(..., window)`; scope pair start dates excepted) and drops the "Every row in the table" rows; lost sales shows weeks with lost sales above 0 instead of any non-null value. The goods-in-transit note was inverted: it said a snapshot dated D describes the end of day `D - (-1)` (D + 1), while the pipeline reads it as the end of day D + `date_shift_days` (D - 1 for tbretail); the note now reads "D - 1" and the dates are the days described. `html_only` no longer builds the section (`runner.build_html_report`): it read the sources when the HTML was built, so the dates were today's, not the saved run's. The heading is now "Data available in the report window, by source (for checking)".
+
+**Affected:** `kpi_pipeline/inputs.py`, `kpi_pipeline/runner.py`, `kpi_pipeline/html_report.py`, `docs/HTML_REPORT.md`, `.claude/commands/retail-insights-help.md`
+
+#### Fixed: `run.mode = "html_only"` stopped in `main.ipynb` before the HTML cell (TBRCS-820) - 2026-11-10
+
+Notebook cells assumed a full run: two made an `html_only` run fail before Cell 6 (no report written), two printed a wrong reason:
+
+- **Hybrid scope summary cell** (`display(runner.hybrid_scope_summary())`): `html_only` builds no scope, so `ctx.hybrid_scope_keys` is `None` and `scope.scope_summary_by_origin` raised `AttributeError: 'NoneType' object has no attribute 'sparkSession'`. The cell now skips with a note in `html_only`, as the scope debug cell already did.
+- **Scope diff cell** (`display(ctx.scope_diff)`): `io.load_saved_outputs` loads an unsaved table (here `scope_diff`, with `scope.run_scope_diff` off) as an empty `pd.DataFrame()`, not `None`, so the `is not None` check passed and Databricks `display` raised `IndexError: list index out of range` on a frame without columns. The cell now also checks `.empty`.
+- **Overall YoY / YTD and comparable YTD display cells**: `html_only` never builds `ctx.yoy_display`, `ctx.ytd_display` or `ctx.comparable_ytd_display` (they stay `None`; the saved `comparison_*` tables are loaded instead), so the cells printed `skipped: needs >= 2 years of history.` while the slice tables below showed YoY / YTD rows, and the YTD line printed `available_fiscal_months ... None`. In `html_only` they now print a note that these display tables are built by the pipeline and not saved. No crash, notebook messages only; the HTML report was not affected.
+
+Found on the TBRCS-820 `html_only` reruns (Databricks runs `1062963982034233`, `880299138065852`).
+
+**Affected:** `main.ipynb` (scope summary, scope diff, overall YoY / YTD and comparable YTD cells), `docs/TROUBLESHOOTING.md`
+
+#### Banner x Division tab: banner sub-tabs, like-for-like below, YTD, cleaner layout (TBRCS-820) - 2026-11-10
+
+Each banner (KNG, TMW, JAB, MSP) is now its own CSS-only sub-tab instead of all four stacked, and a **YTD** sub-tab joins Quarters / Halves / Years; the controls stay pinned while scrolling. Under every banner and period kind, in every root, a **Like-for-like** table (the comparable-pairs section of the period tabs) follows the values: per shown period with a link, prior value, current value and change over the products and stores present in both, from the saved `comparable_comparison_*` tables. A kind not in `comparable_pairs.kinds` (tbretail: quarter, half) shows a note to add it and rerun. Styling: segmented tab bars, right-aligned tabular numbers, shaded Δ columns, a shadow on the sticky Banner total. HTML only; Years and YTD render from the saved 2026-11-07 outputs with `run.mode = "html_only"`.
+
+**Affected:** `kpi_pipeline/html_report.py`, `docs/HTML_REPORT.md`, `.claude/commands/retail-insights-help.md`
+
+#### Banner x Division scorecard tab in the HTML report (TBRCS-820) - 2026-11-09
+
+New `html_report.banner_division_tab` (disabled in `config.py`, enabled for tbretail): one extra tab in every root with, per banner, a wide table of the report's metrics: the Banner total block sticky on the left, then a block of period columns per division scrolling right (2026-11-07 report: KNG 20 divisions, TMW 7, JAB 6, MSP 7). CSS-only radio sub-tabs Quarters / Halves / Years (Quarters first) each show their kind's most recent periods (4 / 4 / 2, complete periods only, independent of the `*_display_*` keys), years with their YoY change column, and a CSS-only checkbox per period hides or shows it within its sub-tab. The data side is config only: tbretail adds the derived dimension `BANNER_DIVISION` (`CONCAT(brand, ' | ', product_group_3_code)`, one banner per brand: KNG, TMW, JAB, MSP; brand prefix kept) to `slices.derived_dimensions`; it is hidden from the dimension tabs while the tab is enabled. Keys: `label`, `banner_dimension`, `banner_division_dimension`, `separator`, `banner_order`, `division_order`, `division_labels`, `quarters`, `halves`, `years`; env `KPI_HTML_BANNER_DIVISION_ENABLED` / `_QUARTERS` / `_HALVES` / `_YEARS`; `materialize()` validates the block when enabled. Checked with `py_compile` and a synthetic `kpi_long` render; not run on Spark. Disabled, the report differs from before only by the tab's static CSS.
+
+**Affected:** `kpi_pipeline/html_report.py`, `config.py`, `tbretail_config.py`, `docs/HTML_REPORT.md`, `docs/CONFIG.md`, `.claude/commands/retail-insights-help.md`
+
+**Date:** 2026-11-09
+
 ## [1.0.0] - 2026-11-08
 
 First release. The entries below record the development leading up to it.

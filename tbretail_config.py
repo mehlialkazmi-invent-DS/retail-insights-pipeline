@@ -75,7 +75,7 @@ CONFIG: Dict[str, Any] = {
         "mode": "full",  # "full" computes from the source tables; "html_only" renders saved outputs
     },
     "reporting_window": {  # docs/LOGIC_FLOW.md: Reporting window and report end
-        "as_of_date": "2026-10-02",  # last day of data to report; update before each run
+        "as_of_date": "2026-11-07",  # last day of data to report; update before each run
         "run_min_date": "2024-02-06",  # resolves to Sunday 2024-02-04
         "report_end": "latest_day",  # YTD to as_of_date; fiscal_cal upload must extend past it
     },
@@ -134,7 +134,7 @@ CONFIG: Dict[str, Any] = {
     # (or removed, e.g. usable = 1) is added as a sales-only day: no inventory, no daily-data filter, no ECOM or blocked-day
     # removal -- only the family-main roll-up (item_family_rollup.transactional_sales, which must equal daily_data), the
     # scope and the active filter. Changes what saved kpi_long means: use output.save_mode "full_refresh" when you change it.
-    "sales_basis": "net",
+    "sales_basis": "gross",
     # =============================================================================
     # 3. SCOPE -- which product x store pairs count, and on which days
     # =============================================================================
@@ -177,8 +177,9 @@ CONFIG: Dict[str, Any] = {
     # Needs scope.columns.start and store. Sales units / revenue, AUR, AUC, distinct counts and
     # lost_sales_pct keep blocked days: a blocked pair can still sell its existing stock.
     "blocked_scope": {
-        # Airflow variable ui_parameters_path (the newest folder, 2026-09-30-204511_..., has only solution 51 blocks)
-        "ui_parameters_path": "ui-data/parameter_config/2026-10-02-065120_9b661f5c-9e01-4431-8f8e-9a415d5cb4e7",
+        # production's folder: rocket_pandas_input/last_run_args.json -> last_ui_request_id.parameter_config
+        # (most parameter_config folders are partial UI saves, e.g. blocked_scope only)
+        "ui_parameters_path": "ui-data/parameter_config/2026-11-09-151331_fa543c62-7673-4d40-87bc-c93242489f0b",
         "rule": "after_scope_start",  # or "all"
         "folder": "blocked_scope",  # store blocks folder under ui_parameters_path; None = store blocks not read
         "dc_folder": "dc_blocked_scope",  # DC blocks folder under ui_parameters_path; None = DC blocks not read
@@ -271,7 +272,10 @@ CONFIG: Dict[str, Any] = {
     # =============================================================================
     "slices": {  # brand: products column; SMW: KNG vs SMW (docs/LOGIC_FLOW.md: Roots and cuts)
         "dimensions": ["brand"],
-        "derived_dimensions": {"SMW": "CASE WHEN brand = 'KNG' THEN 'KNG' ELSE 'SMW' END"},
+        "derived_dimensions": {
+            "SMW": "CASE WHEN brand = 'KNG' THEN 'KNG' ELSE 'SMW' END",
+            "BANNER_DIVISION": "CONCAT(brand, ' | ', product_group_3_code)",
+        },
         "value_filters": {},  # per-dimension include / exclude of values (docs/LOGIC_FLOW.md: Value filters)
     },
     # External tables that add root tabs (docs/LOGIC_FLOW.md: Dimension sources). IS_NVROUT: 'yes' = NVROUT root.
@@ -357,7 +361,7 @@ CONFIG: Dict[str, Any] = {
     },
     "comparable_pairs": {  # like-for-like; needs run_min_date spanning 2+ years (docs/LOGIC_FLOW.md: Comparable pairs)
         "enabled": True,
-        "kinds": ["ytd", "yoy", "quarter", "half"],  # any of COMPARABLE_KINDS_ALL
+        "kinds": ["ytd", "yoy"],  # any of COMPARABLE_KINDS_ALL
         "grain": "product_store",  # or "product"
         "pair_days": "unblocked",  # pairs present on "unblocked" days in every year, or on "all" (incl. blocked)
     },
@@ -367,7 +371,7 @@ CONFIG: Dict[str, Any] = {
     "output": {  # Delta saves (docs/OUTPUTS.md: Output saves)
         "save_outputs": True,
         "path_segments": ["analysis", "tbretail_kpis", "outputs"],  # output folder under the bucket
-        "run_date": "2026-10-02",  # run_date partition written; None = as_of_date
+        "run_date": "2026-11-07",  # run_date partition written; None = as_of_date
         "save_mode": "full_refresh",  # "initial" | "incremental" | "full_refresh"
         "allow_overwrite_existing": True,  # incremental: replace periods already saved
         "recompute_comparisons_from_history": True,  # incremental: rebuild comparisons from the merged history
@@ -385,6 +389,19 @@ CONFIG: Dict[str, Any] = {
         "yearly_display_years": None,
         "root_labels": {"comp": "LFL", "nvrout": "NVROUT"},  # root id -> tab label
         "dimension_labels": {"brand": "Banner"},  # slice dimension -> tab label
+        "banner_division_tab": {  # docs/HTML_REPORT.md: Banner x Division tab, one table per banner
+            "enabled": True,
+            "label": "Banner x Division",  # tab label
+            "banner_dimension": "brand",  # slice dimension whose values are the banners (the total column)
+            "banner_division_dimension": "BANNER_DIVISION",  # derived dimension: <banner><separator><division>
+            "separator": " | ",  # must be the one slices.derived_dimensions[banner_division_dimension] joins with
+            "banner_order": ["KNG", "TMW", "JAB", "MSP"],  # banners listed first, in this order; the rest sorted
+            "division_order": [],  # divisions listed first, in this order; the rest in sorted code order
+            "division_labels": {},  # division value -> column title; unlisted ones show the raw value
+            "quarters": 4,  # most recent complete periods shown; independent of the *_display_* keys above
+            "halves": 4,
+            "years": 2,
+        },
     },
 }
 
@@ -471,7 +488,44 @@ _ENV_OVERRIDES = (
     ("KPI_HTML_QUARTERLY_QUARTERS", ("html_report", "quarterly_display_quarters"), _optional_int),
     ("KPI_HTML_HALF_HALVES", ("html_report", "half_display_halves"), _optional_int),
     ("KPI_HTML_YEARLY_YEARS", ("html_report", "yearly_display_years"), _optional_int),
+    ("KPI_HTML_BANNER_DIVISION_ENABLED", ("html_report", "banner_division_tab", "enabled"), _parse_bool),
+    ("KPI_HTML_BANNER_DIVISION_QUARTERS", ("html_report", "banner_division_tab", "quarters"), int),
+    ("KPI_HTML_BANNER_DIVISION_HALVES", ("html_report", "banner_division_tab", "halves"), int),
+    ("KPI_HTML_BANNER_DIVISION_YEARS", ("html_report", "banner_division_tab", "years"), int),
 )
+
+
+def _validate_banner_division_tab(tab: Dict[str, Any], slice_dimensions: List[str], derived_dimensions: Dict[str, str]) -> None:
+    """Raise when an enabled html_report.banner_division_tab does not fit slices: both dimensions must be slice
+    dimensions, the banner x division one derived, and its expression must contain the separator."""
+    if not tab["enabled"]:
+        return
+    for key in ("banner_dimension", "banner_division_dimension"):
+        if tab[key] not in list(slice_dimensions) + list(derived_dimensions):
+            raise ValueError(
+                f"html_report.banner_division_tab.{key} {tab[key]!r} is not in slices.dimensions or slices.derived_dimensions"
+            )
+    banner_division_sql = derived_dimensions.get(tab["banner_division_dimension"])
+    if banner_division_sql is None:
+        raise ValueError(
+            f"html_report.banner_division_tab.banner_division_dimension {tab['banner_division_dimension']!r} "
+            "must be a slices.derived_dimensions entry"
+        )
+    if tab["separator"] not in banner_division_sql:
+        raise ValueError(
+            f"slices.derived_dimensions[{tab['banner_division_dimension']!r}] must join banner and division with "
+            f"html_report.banner_division_tab.separator {tab['separator']!r}"
+        )
+    for key in ("quarters", "halves", "years"):
+        if type(tab[key]) is not int or tab[key] < 1:
+            raise ValueError(f"html_report.banner_division_tab.{key} must be a positive integer; got {tab[key]!r}")
+    for key in ("banner_order", "division_order"):
+        if not isinstance(tab[key], list) or not all(isinstance(v, str) for v in tab[key]):
+            raise ValueError(f"html_report.banner_division_tab.{key} must be a list of strings")
+    if not isinstance(tab["division_labels"], dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in tab["division_labels"].items()
+    ):
+        raise ValueError("html_report.banner_division_tab.division_labels must be a dict of division value -> label (str -> str)")
 
 
 def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1154,6 +1208,10 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         isinstance(k, str) and isinstance(v, str) for k, v in dimension_labels.items()
     ):
         raise ValueError("html_report.dimension_labels must be a dict of slice dimension name -> tab label (str -> str)")
+    banner_division_tab = html_cfg["banner_division_tab"]
+    _validate_banner_division_tab(
+        banner_division_tab, cfg["slices"]["dimensions"], cfg["slices"]["derived_dimensions"]
+    )
     html_output_segs = html_cfg["output_path_segments"]
     html_output_dir = fund_paste(bucket, *html_output_segs) if html_output_segs else None
 
@@ -1232,4 +1290,5 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "HTML_REPORT_YEARLY_DISPLAY_YEARS": html_cfg.get("yearly_display_years"),
         "HTML_REPORT_ROOT_LABELS": html_cfg["root_labels"],
         "HTML_REPORT_DIMENSION_LABELS": dimension_labels,
+        "HTML_REPORT_BANNER_DIVISION_TAB": banner_division_tab,
     }
