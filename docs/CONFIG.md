@@ -521,7 +521,7 @@ See [HTML report](HTML_REPORT.md#html-report).
 },
 ```
 
-`dimensions` are breakdown (cut) columns from the products table; `derived_dimensions` maps a new cut name to a Spark SQL expression over the products table. `value_filters` restricts which values of a cut appear (see [Value filters](LOGIC_FLOW.md#value-filters-restrict-cut-values--drop-the-null-bucket)). Cuts are applied within every root ([Roots and cuts](LOGIC_FLOW.md#roots-and-cuts-report-structure)). **Every cut column (`dimensions` and `derived_dimensions`) must be a string column**: a number, date or boolean cut raises a `ValueError`; cast it in `derived_dimensions`, e.g. `CAST(col AS STRING)`. Env: `KPI_SLICE_DIMENSIONS`.
+`dimensions` are breakdown (cut) columns from the products table; `derived_dimensions` maps a new cut name to a Spark SQL expression over the products table. `value_filters` restricts which values of a cut appear (see [Value filters](LOGIC_FLOW.md#value-filters-restrict-cut-values--drop-the-null-bucket)). Cuts are applied within every root ([Roots and cuts](LOGIC_FLOW.md#roots-and-cuts-report-structure)). **Every cut column (`dimensions` and `derived_dimensions`) must be a string column**: a number, date or boolean cut raises a `ValueError`; cast it in `derived_dimensions`, e.g. `CAST(col AS STRING)`. Env: `KPI_SLICE_DIMENSIONS`. A derived dimension can feed the HTML report's [group breakdown tab](HTML_REPORT.md#group-breakdown-tab) (groups x subgroups, tbretail Banner x Division) (`html_report.group_breakdown_tab`), which then hides it from the dimension tabs.
 
 ## `dimension_sources`
 

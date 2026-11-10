@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -528,12 +528,16 @@ def read_goods_in_transit_source(spark: SparkSession, settings: Dict[str, Any]) 
     return spark.read.format("delta").load(path)
 
 
-def _span_rows(df: DataFrame, spans: List[tuple]) -> List[tuple]:
+def _span_rows(df: DataFrame, spans: List[tuple], window: Optional[Tuple[str, str]] = None) -> List[tuple]:
     """(label, first, last) per (label, column, condition) span of df, from one aggregation; a span with no row
-    has first and last None. A column name is read as a date; a Column expression is used as it is."""
+    has first and last None. A column name is read as a date; a Column expression is used as it is. With
+    ``window`` (first, last date), only dates inside it count."""
     aggs = []
     for index, (_, column, condition) in enumerate(spans):
         parsed = F.to_date(F.col(column)) if isinstance(column, str) else column
+        if window is not None:
+            in_window = parsed.between(F.to_date(F.lit(window[0])), F.to_date(F.lit(window[1])))
+            condition = in_window if condition is None else condition & in_window
         value = parsed if condition is None else F.when(condition, parsed)
         aggs += [F.min(value).alias(f"first_{index}"), F.max(value).alias(f"last_{index}")]
     bounds = df.agg(*aggs).first()
@@ -550,10 +554,11 @@ def _kept_condition(expressions: List[str]):
 
 def collect_data_coverage(ctx) -> List[Dict[str, Any]]:
     """What data each source holds and over which dates, for the report's Methodology tab (debugging): per source
-    its table, the (first, last) date of each measure it carries, and the input filters in force. One
-    aggregation per dated source, over the whole table (not only the report window), so the dates show what the
-    source offers, not only what the report uses. Sources that are switched off are left out; the scope has
-    dates only when it is weekly (a daily scope is one scope applied back over the whole window).
+    its table, the (first, last) date of each measure it carries inside the report window, and the input
+    filters in force. One aggregation per dated source; dates outside the window (history before it, later
+    loads, forecast weeks) are left out, so a source that starts late or ends early inside the window stands
+    out. Sources that are switched off are left out; the scope has dates only when it is weekly (a daily scope
+    is one scope applied back over the whole window), and its pair start dates are not clipped.
     """
     s = ctx.settings
     spark = ctx.spark
@@ -573,11 +578,10 @@ def collect_data_coverage(ctx) -> List[Dict[str, Any]]:
     add(
         "Daily data", s["PATH_DAILY_DATA"],
         _span_rows(daily, [
-            ("Every row in the table", date_col, None),
             ("Rows kept by the filters", date_col, kept),
             ("Sales (units above 0), kept rows", date_col, kept & (F.col("sales_quantity") > 0)),
             ("Inventory recorded, kept rows", date_col, kept & F.col("inventory").isNotNull()),
-        ]),
+        ], window),
         daily_filters,
         ["Sales and inventory come from this table."] if s["SALES_BASIS"] == "net"
         else ["Sales basis is gross: sales come from transactional sales (below); inventory comes from this table."],
@@ -587,8 +591,7 @@ def collect_data_coverage(ctx) -> List[Dict[str, Any]]:
         filters = _input_filters(s, "transactional_sales")
         transactional = spark.read.format("delta").load(s["PATH_TRANSACTIONAL_SALES"])
         add("Transactional sales (gross sales)", s["PATH_TRANSACTIONAL_SALES"],
-            _span_rows(transactional, [("Every row in the table", "date", None),
-                                       ("Rows kept by the filters", "date", _kept_condition(filters))]),
+            _span_rows(transactional, [("Rows kept by the filters", "date", _kept_condition(filters))], window),
             filters)
 
     lost_sales_filters = _input_filters(s, "lost_sales")
@@ -596,18 +599,18 @@ def collect_data_coverage(ctx) -> List[Dict[str, Any]]:
     lost_sales = read_lost_sales_source(spark, s, quiet=True)
     add("Lost sales", s["PATH_LOST_SALES"],
         _span_rows(lost_sales, [("Weeks kept by the filters", "week_start_date", None),
-                                ("Weeks with a lost-sales value", "week_start_date", F.col(lost_sales_col).isNotNull())]),
+                                ("Weeks with lost sales above 0", "week_start_date", F.col(lost_sales_col) > 0)], window),
         lost_sales_filters,
         [f"Lost-sales percentage divides by sales narrowed by: {'; '.join(s['LOST_SALES_SALES_FILTER'])}."]
         if s["LOST_SALES_SALES_FILTER"] else [])
     if s["LOST_SALES_ENSEMBLE_ENABLED"]:
         slow = read_lost_sales_source(spark, s, s["PATH_LOST_SALES_SLOW"], quiet=True)
         add("Lost sales, slow model", s["PATH_LOST_SALES_SLOW"],
-            _span_rows(slow, [("Weeks kept by the filters", "week_start_date", None)]), lost_sales_filters)
+            _span_rows(slow, [("Weeks kept by the filters", "week_start_date", None)], window), lost_sales_filters)
 
     if s["INSTOCK_METHOD"] == "weekly_source":
         add("In-stock source (weekly)", s["PATH_INSTOCK_SOURCE"],
-            _span_rows(read_instock_source(spark, s, quiet=True), [("Weeks", "week_start_date", None)]), [])
+            _span_rows(read_instock_source(spark, s, quiet=True), [("Weeks", "week_start_date", None)], window), [])
 
     scope_cfg = s["SCOPE"]
     scope_filters = _input_filters(s, "scope")
@@ -615,7 +618,7 @@ def collect_data_coverage(ctx) -> List[Dict[str, Any]]:
     if scope_cfg["time"] == "weekly":
         rows_ = read_scope_source(spark, s, scope_cfg["solution_id"], "store_id", quiet=True)
         if scope_cfg["columns"]["date"]:
-            scope_rows = _span_rows(rows_, [("Weeks in the scope table", "scope_date", None)])
+            scope_rows = _span_rows(rows_, [("Weeks in the scope table", "scope_date", None)], window)
         else:
             scope_rows = _span_rows(
                 rows_, [("Weeks in the scope table", F.format_string("%04d-W%02d", F.col("Year"), F.col("Week")), None)]
@@ -634,17 +637,21 @@ def collect_data_coverage(ctx) -> List[Dict[str, Any]]:
         filters = _input_filters(s, "inventory_warehouse")
         warehouse = spark.read.format("delta").load(s["PATH_INVENTORY_WAREHOUSE"])
         add("DC inventory", s["PATH_INVENTORY_WAREHOUSE"],
-            _span_rows(warehouse, [("Every row in the table", "date", None),
-                                   ("Rows kept by the filters", "date", _kept_condition(filters))]),
+            _span_rows(warehouse, [("Rows kept by the filters", "date", _kept_condition(filters))], window),
             filters)
 
     git = s["GOODS_IN_TRANSIT"]
     if git["date_shift_days"] is not None:
+        shift = git["date_shift_days"]
         transit = spark.read.format("delta").load(s["PATH_GOODS_IN_TRANSIT"])
+        # Dated by the day each snapshot describes, as the pipeline reads it (pipeline._goods_in_transit_quantity).
+        described_day = F.date_add(F.to_date(F.col("date")), shift)
+        snapshot_day = "D" if shift == 0 else f"D {'+' if shift > 0 else '-'} {abs(shift)}"
         add("Goods in transit", s["PATH_GOODS_IN_TRANSIT"],
-            _span_rows(transit, [("To stores (quantity above 0)", "date", (F.col("destination_type") == 0) & (F.col("quantity") > 0)),
-                                 ("To warehouses (quantity above 0)", "date", (F.col("destination_type") == 1) & (F.col("quantity") > 0))]),
-            [], [f"A snapshot dated D describes the end of day D - ({git['date_shift_days']})."])
+            _span_rows(transit, [("To stores (quantity above 0)", described_day, (F.col("destination_type") == 0) & (F.col("quantity") > 0)),
+                                 ("To warehouses (quantity above 0)", described_day, (F.col("destination_type") == 1) & (F.col("quantity") > 0))],
+                       window),
+            [], [f"A snapshot dated D describes the end of day {snapshot_day}; dates are the days described."])
 
     blocked = s["BLOCKED_SCOPE"]
     blocked_rows = []

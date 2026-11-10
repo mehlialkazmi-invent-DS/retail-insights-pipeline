@@ -350,6 +350,20 @@ CONFIG: Dict[str, Any] = {
         "yearly_display_years": None,
         "root_labels": {},  # root id -> tab label
         "dimension_labels": {},  # slice dimension -> tab label, e.g. {"brand": "Banner"}
+        "group_breakdown_tab": {  # docs/HTML_REPORT.md: Group breakdown tab, one table per group
+            "enabled": False,
+            "label": "Group breakdown",  # tab label
+            "group_dimension": "example_group",  # slice dimension whose values are the groups (the sticky total block)
+            "group_subgroup_dimension": "example_group_subgroup",  # derived dimension: <group><separator><subgroup>
+            "separator": " | ",  # must be the one slices.derived_dimensions[group_subgroup_dimension] joins with
+            "group_order": [],  # groups listed first, in this order; the rest sorted
+            "subgroup_order": [],  # subgroups listed first, in this order; the rest in sorted code order
+            "subgroup_labels": {},  # subgroup value -> column title; unlisted ones show the raw value
+            "subgroups_label": "subgroups",  # word for the subgroups in the section notes, e.g. "divisions"
+            "quarters": 4,  # most recent complete periods shown; independent of the *_display_* keys above
+            "halves": 4,
+            "years": 2,
+        },
     },
 }
 
@@ -442,7 +456,46 @@ _ENV_OVERRIDES = (
     ("KPI_HTML_QUARTERLY_QUARTERS", ("html_report", "quarterly_display_quarters"), _optional_int),
     ("KPI_HTML_HALF_HALVES", ("html_report", "half_display_halves"), _optional_int),
     ("KPI_HTML_YEARLY_YEARS", ("html_report", "yearly_display_years"), _optional_int),
+    ("KPI_HTML_GROUP_BREAKDOWN_ENABLED", ("html_report", "group_breakdown_tab", "enabled"), _parse_bool),
+    ("KPI_HTML_GROUP_BREAKDOWN_QUARTERS", ("html_report", "group_breakdown_tab", "quarters"), int),
+    ("KPI_HTML_GROUP_BREAKDOWN_HALVES", ("html_report", "group_breakdown_tab", "halves"), int),
+    ("KPI_HTML_GROUP_BREAKDOWN_YEARS", ("html_report", "group_breakdown_tab", "years"), int),
 )
+
+
+def _validate_group_breakdown_tab(tab: Dict[str, Any], slice_dimensions: List[str], derived_dimensions: Dict[str, str]) -> None:
+    """Raise when an enabled html_report.group_breakdown_tab does not fit slices: both dimensions must be slice
+    dimensions, the group x subgroup one derived, and its expression must contain the separator."""
+    if not tab["enabled"]:
+        return
+    for key in ("group_dimension", "group_subgroup_dimension"):
+        if tab[key] not in list(slice_dimensions) + list(derived_dimensions):
+            raise ValueError(
+                f"html_report.group_breakdown_tab.{key} {tab[key]!r} is not in slices.dimensions or slices.derived_dimensions"
+            )
+    group_subgroup_sql = derived_dimensions.get(tab["group_subgroup_dimension"])
+    if group_subgroup_sql is None:
+        raise ValueError(
+            f"html_report.group_breakdown_tab.group_subgroup_dimension {tab['group_subgroup_dimension']!r} "
+            "must be a slices.derived_dimensions entry"
+        )
+    if tab["separator"] not in group_subgroup_sql:
+        raise ValueError(
+            f"slices.derived_dimensions[{tab['group_subgroup_dimension']!r}] must join group and subgroup with "
+            f"html_report.group_breakdown_tab.separator {tab['separator']!r}"
+        )
+    for key in ("quarters", "halves", "years"):
+        if type(tab[key]) is not int or tab[key] < 1:
+            raise ValueError(f"html_report.group_breakdown_tab.{key} must be a positive integer; got {tab[key]!r}")
+    for key in ("group_order", "subgroup_order"):
+        if not isinstance(tab[key], list) or not all(isinstance(v, str) for v in tab[key]):
+            raise ValueError(f"html_report.group_breakdown_tab.{key} must be a list of strings")
+    if not isinstance(tab["subgroup_labels"], dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in tab["subgroup_labels"].items()
+    ):
+        raise ValueError("html_report.group_breakdown_tab.subgroup_labels must be a dict of subgroup value -> label (str -> str)")
+    if not isinstance(tab["subgroups_label"], str) or not tab["subgroups_label"].strip():
+        raise ValueError("html_report.group_breakdown_tab.subgroups_label must be a non-empty string")
 
 
 def _apply_env_overrides(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1125,6 +1178,10 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         isinstance(k, str) and isinstance(v, str) for k, v in dimension_labels.items()
     ):
         raise ValueError("html_report.dimension_labels must be a dict of slice dimension name -> tab label (str -> str)")
+    group_breakdown_tab = html_cfg["group_breakdown_tab"]
+    _validate_group_breakdown_tab(
+        group_breakdown_tab, cfg["slices"]["dimensions"], cfg["slices"]["derived_dimensions"]
+    )
     html_output_segs = html_cfg["output_path_segments"]
     html_output_dir = fund_paste(bucket, *html_output_segs) if html_output_segs else None
 
@@ -1203,4 +1260,5 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         "HTML_REPORT_YEARLY_DISPLAY_YEARS": html_cfg.get("yearly_display_years"),
         "HTML_REPORT_ROOT_LABELS": html_cfg["root_labels"],
         "HTML_REPORT_DIMENSION_LABELS": dimension_labels,
+        "HTML_REPORT_GROUP_BREAKDOWN_TAB": group_breakdown_tab,
     }

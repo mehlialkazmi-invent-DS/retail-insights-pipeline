@@ -457,7 +457,8 @@ class KPIRunner:
             customer=self.settings["CUSTOMER"], report_end=self.settings["REPORT_END_DATE"]
         )
         out_path = Path(local_dir) / filename
-        if self.ctx.data_coverage is None:
+        # html_only renders saved outputs: reading the sources now would date them by today, not by the run.
+        if self.ctx.data_coverage is None and self.settings["RUN_MODE"] != "html_only":
             self.ctx.data_coverage = collect_data_coverage(self.ctx)
         written = render_kpi_html(
             self.ctx,
