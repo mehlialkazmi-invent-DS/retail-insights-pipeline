@@ -14,19 +14,17 @@
 #   Sales       sales_basis "net": noob/daily-data sales, net of returns
 #   Channel     CHANNEL filters scope, daily-data and lost sales to the channel's stores (master-data/stores
 #               channel_type: 57 eCommerce, 71 Wholesale, 82 Corporate Sales, every other store Retail)
-#   Window      civil calendar (no fiscal_cal upload at Tecovas), 2024-01-01 to the last complete week
+#   Calendar    Tecovas' own calendar: Monday-Sunday weeks, year / week as in noob/daily-data (ISO), months of
+#               whole weeks (tecovas_fiscal_cal.py writes it; Tecovas has no one_time_uploads/fiscal_cal)
+#   Window      2024-01-01 (Monday) to the last complete Monday-Sunday week
 #   In-stock    instock.method "lost_sales_source" (noob/lost-sales model_id=top_down)
 #   Lost sales  noob/lost-sales model_id=top_down; lost_sales_ensemble OFF
 #   Blocked     blocked_scope OFF
-#   GIT         goods_in_transit OFF (needs a fiscal calendar)
+#   GIT         goods_in_transit OFF
 #   Comparable  YoY and YTD comparisons; like-for-like comparable_pairs OFF
 #   Dimensions  division (products.product_group_1_description); dimension_sources OFF
 #   Output      Delta saves to temp/firatg/retail_insights_kpi/<channel>, never to analysis/
 #   Report      Tecovas KPI Report; dc_in_stock_rate not reported (dc_instock OFF)
-#
-# Tecovas weeks run Monday-Sunday (noob/daily-data week, lost-sales week_start_date) while this pipeline's
-# window helpers assume Sunday-Saturday: the window starts on a Sunday stub day and ends on a Saturday, so
-# the first and last weeks of the report are partial. Annual / YTD / monthly totals are unaffected.
 
 import copy
 import datetime
@@ -65,6 +63,9 @@ INSTOCK_METHODS = ("daily", "weekly_source", "lost_sales_source")
 # non-return rows of operation/transactional_sales, every day of them (docs/CONFIG.md: sales_basis).
 SALES_BASES = ("net", "gross")
 
+# The day every week starts on: fiscal_calendar.week_start_day, as its Python weekday.
+WEEK_START_DAYS = {"sunday": 6, "monday": 0}
+
 # =============================================================================
 # CHANNEL -- which Tecovas stores one run reports on (one HTML per channel)
 # =============================================================================
@@ -98,11 +99,12 @@ CONFIG: Dict[str, Any] = {
     },
     "reporting_window": {  # docs/LOGIC_FLOW.md: Reporting window and report end
         "as_of_date": "2026-11-08",  # last day of data to report; update before each run
-        "run_min_date": "2024-01-01",  # lost-sales starts 2023-12-25; resolves to Sunday 2023-12-31
+        "run_min_date": "2024-01-01",  # Monday, first day of Tecovas year 2024; lost-sales starts 2023-12-25
         "report_end": "as_of",  # "as_of" | "complete_month" | "latest_day" ("latest_day" needs instock.method "daily")
     },
     "fiscal_calendar": {  # docs/LOGIC_FLOW.md: Fiscal calendar vs native time grain
-        "use_fiscal_calendar": False,  # Tecovas has no one_time_uploads/fiscal_cal: periods from daily-data dates
+        "week_start_day": "monday",  # a WEEK_START_DAYS key: Tecovas weeks run Monday-Sunday (noob week_start_day 1)
+        "use_fiscal_calendar": True,  # Tecovas' own calendar, built by tecovas_fiscal_cal.py (path_segments.fiscal)
         "half_periods": False,  # True adds the Half tab and the "half" comparable kind
         "column_map": {  # fiscal_cal upload columns; set month_name_col when the fiscal year is offset
             "quarter_col": "Quarter",
@@ -118,7 +120,7 @@ CONFIG: Dict[str, Any] = {
     # 2. SOURCE TABLES -- where each input lives and how it is read
     # =============================================================================
     "path_segments": {  # folders under the datastore bucket
-        "fiscal": ["one_time_uploads", "fiscal_cal"],  # fiscal calendar upload
+        "fiscal": ["temp", "firatg", "retail_insights_kpi", "fiscal_cal"],  # written by tecovas_fiscal_cal.py
         "daily_data": ["noob", "daily-data"],  # store x product daily sales and inventory
         "inventory_warehouse": ["operation", "inventory_warehouse"],  # DC daily inventory
         "item_family": ["operation", "item_family"],  # parent / child product map
@@ -558,18 +560,18 @@ def _validate_scope_diff_metrics(scope_diff_metrics: list, metric_cols: list) ->
         )
 
 
-def _sunday_of_week(d: datetime.date) -> datetime.date:
-    """Sunday that starts the Sun–Sat week containing d (Python weekday: Sun=6)."""
-    return d if d.weekday() == 6 else d - datetime.timedelta(days=d.weekday() + 1)
+def _week_start_of(d: datetime.date, week_start: int) -> datetime.date:
+    """First day of the week containing d; week_start is the Python weekday the week starts on (Sun=6, Mon=0)."""
+    return d - datetime.timedelta(days=(d.weekday() - week_start) % 7)
 
 
-def _saturday_of_week(d: datetime.date) -> datetime.date:
-    return _sunday_of_week(d) + datetime.timedelta(days=6)
+def _week_end_of(d: datetime.date, week_start: int) -> datetime.date:
+    return _week_start_of(d, week_start) + datetime.timedelta(days=6)
 
 
-def _last_completed_saturday(as_of: datetime.date) -> datetime.date:
-    """Saturday ending the last full Sun–Sat week on or before as_of."""
-    week_end = _saturday_of_week(as_of)
+def _last_completed_week_end(as_of: datetime.date, week_start: int) -> datetime.date:
+    """Last day of the last full week on or before as_of."""
+    week_end = _week_end_of(as_of, week_start)
     if as_of >= week_end:
         return week_end
     return week_end - datetime.timedelta(days=7)
@@ -579,17 +581,18 @@ def _resolve_report_window(
     as_of: datetime.date,
     run_min: Optional[str],
     report_end_mode: str,
+    week_start: int,
 ) -> Dict[str, Any]:
-    report_start = _sunday_of_week(datetime.date(as_of.year, 1, 1))
-    report_end = as_of if report_end_mode == "latest_day" else _last_completed_saturday(as_of)
-    run_week_start = _sunday_of_week(as_of)
-    run_week_end = _saturday_of_week(as_of)
+    report_start = _week_start_of(datetime.date(as_of.year, 1, 1), week_start)
+    report_end = as_of if report_end_mode == "latest_day" else _last_completed_week_end(as_of, week_start)
+    run_week_start = _week_start_of(as_of, week_start)
+    run_week_end = _week_end_of(as_of, week_start)
 
-    run_min_resolved = _sunday_of_week(datetime.date.fromisoformat(run_min)) if run_min else None
+    run_min_resolved = _week_start_of(datetime.date.fromisoformat(run_min), week_start) if run_min else None
     if run_min_resolved is not None:
         if run_min_resolved > report_end:
             raise ValueError(
-                f"run_min_date Sunday ({run_min_resolved}) must be <= REPORT_END_DATE ({report_end})."
+                f"run_min_date week start ({run_min_resolved}) must be <= REPORT_END_DATE ({report_end})."
             )
         effective_start = run_min_resolved
     else:
@@ -809,10 +812,17 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         raise ValueError(
             f"reporting_window.report_end must be 'as_of', 'complete_month' or 'latest_day'; got {report_end_mode!r}"
         )
+    week_start_day = cfg["fiscal_calendar"]["week_start_day"]
+    if week_start_day not in WEEK_START_DAYS:
+        raise ValueError(
+            f"fiscal_calendar.week_start_day must be one of {sorted(WEEK_START_DAYS)}; got {week_start_day!r}"
+        )
+    week_start = WEEK_START_DAYS[week_start_day]
     window = _resolve_report_window(
         datetime.date.fromisoformat(rw["as_of_date"]),
         run_min,
         report_end_mode,
+        week_start,
     )
 
     # --- Lost sales ensemble ------------------------------------------------------
@@ -889,8 +899,8 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         raise ValueError("scope.columns.date / year / week apply to scope.time='weekly' only (set them to None)")
     if columns["solution"] and scope["solution_id"] is None:
         raise ValueError("scope.columns.solution requires scope.solution_id")
-    if scope["run_date"] is not None and scope["run_date"].weekday() != 6:
-        raise ValueError(f"scope.run_date must be a Sunday; got {scope['run_date']}")
+    if scope["run_date"] is not None and scope["run_date"].weekday() != week_start:
+        raise ValueError(f"scope.run_date must be a {week_start_day} (fiscal_calendar.week_start_day); got {scope['run_date']}")
     if scope["dc_solution_id"] is not None and not (columns["solution"] and columns["start"] and columns["store"]):
         raise ValueError("scope.dc_solution_id requires scope.columns.solution, start and store")
 
@@ -1168,6 +1178,7 @@ def materialize(fund_paste: Callable[..., str], cfg: Optional[Dict[str, Any]] = 
         **window,
         "REPORT_END_MODE": report_end_mode,
         "USE_FISCAL_CALENDAR": cfg["fiscal_calendar"]["use_fiscal_calendar"],
+        "WEEK_START_WEEKDAY": week_start,
         "HALF_PERIODS": half_periods,
         "FISCAL_QUARTER_COL": column_map.get("quarter_col"),
         "FISCAL_MONTH_COL": column_map.get("month_col"),

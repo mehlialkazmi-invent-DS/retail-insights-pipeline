@@ -414,12 +414,12 @@ def roll_to_item_family_parent(df: DataFrame, ctx) -> DataFrame:
 
 
 def scope_run_date(settings: Dict[str, Any]) -> datetime.date:
-    """scope.run_date, or the latest Sunday on or before today when unset."""
+    """scope.run_date, or the latest week start (fiscal_calendar.week_start_day) on or before today when unset."""
     configured = settings["SCOPE"]["run_date"]
     if configured is not None:
         return configured
     today = datetime.date.today()
-    return today - datetime.timedelta(days=(today.weekday() + 1) % 7)
+    return today - datetime.timedelta(days=(today.weekday() - settings.get("WEEK_START_WEEKDAY", 6)) % 7)
 
 
 def read_scope_source(

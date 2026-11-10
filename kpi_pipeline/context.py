@@ -54,7 +54,7 @@ class KPIContext:
     # report_end="latest_day" only (fiscal.build_latest_day_windows):
     #   ytd_through_day            K, the day of the fiscal year (1-based) of REPORT_END_DATE.
     #   ytd_years                  years whose days 1..K lie inside the window.
-    #   ytd_lost_sales_last_week   fiscal week of the last Saturday on or before REPORT_END_DATE.
+    #   ytd_lost_sales_last_week   fiscal week of the last week end on or before REPORT_END_DATE.
     #   day_calendar               (date, Year, Week, day_index, last_day_index); the week containing K is
     #                              split into the days <= K and the days after.
     ytd_through_day: Optional[int] = None

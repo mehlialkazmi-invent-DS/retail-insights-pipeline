@@ -9,7 +9,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import broadcast
 
 from kpi_pipeline.context import DC_GIT_METRICS, STORE_GIT_METRICS, KPIContext
-from kpi_pipeline.fiscal import last_saturday_on_or_before, week_day_counts
+from kpi_pipeline.fiscal import last_week_end_on_or_before, week_day_counts
 from kpi_pipeline.inputs import (
     apply_input_filters,
     get_daily_data_excluded_days,
@@ -922,12 +922,12 @@ def build_pipeline_frames(ctx: KPIContext, scope_in: DataFrame) -> Dict[str, Dat
             .agg(F.sum("weekly_sales").alias("sales_quantity_weekly"))
             .join(scope_pair_weeks, on=lost_base_keys, how="left_semi")
         )
-    # report_end="latest_day": lost sales only reaches the last Saturday on or before REPORT_END_DATE, so a
-    # later partial week would divide missing lost sales by real sales; every view stops at that Saturday.
+    # report_end="latest_day": lost sales only reaches the last week end on or before REPORT_END_DATE, so a
+    # later partial week would divide missing lost sales by real sales; every view stops at that week end.
     lost_weeks = lost_sales_weekly
     if ctx.settings["REPORT_END_MODE"] == "latest_day":
         lost_weeks = lost_weeks.filter(
-            F.col("week_end_date") <= F.lit(last_saturday_on_or_before(ctx.settings["REPORT_END_DATE"]))
+            F.col("week_end_date") <= F.lit(last_week_end_on_or_before(ctx.settings["REPORT_END_DATE"], ctx.settings))
         )
     lost_base = (
         lost_weeks.select(*lost_base_select_cols)

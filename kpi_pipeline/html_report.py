@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from kpi_pipeline.fiscal import last_saturday_on_or_before
+from kpi_pipeline.fiscal import last_week_end_on_or_before
 
 
 # ---------------------------------------------------------------------------
@@ -337,13 +337,13 @@ def _settings_metric_definitions(settings: Dict[str, Any]) -> Dict[str, Dict[str
             + f" Inventory counts {_GIT_METRIC_NOTES[metric]} goods in transit on top of on-hand.",
         }
     if settings["REPORT_END_MODE"] == "latest_day":
-        last_saturday = last_saturday_on_or_before(settings["REPORT_END_DATE"])
+        last_week_end = last_week_end_on_or_before(settings["REPORT_END_DATE"], settings)
         base = out.get("lost_sales_pct", DEFAULT_METRIC_DEFINITIONS["lost_sales_pct"])
         out["lost_sales_pct"] = {
             **base,
             "definition": base["definition"]
-            + f" Lost sales only has data through the last complete Saturday ({last_saturday}): every tab uses "
-            "whole weeks up to it, and YTD uses weeks 1 to that Saturday's fiscal week of every year, so the "
+            + f" Lost sales only has data through the last complete week ({last_week_end}): every tab uses "
+            "whole weeks up to it, and YTD uses weeks 1 to that week's fiscal week number of every year, so the "
             "days after it never dilute the rate.",
         }
         # YTD stops on the latest day, mid-week: its last fiscal week counts only the days it covers.
@@ -1890,7 +1890,7 @@ def _report_info_html(
     if settings["REPORT_END_MODE"] == "latest_day":
         period_basis = (
             f"YTD to {report_end} (same fiscal day every year); other tabs: complete periods only; "
-            f"lost sales through {last_saturday_on_or_before(settings['REPORT_END_DATE'])}"
+            f"lost sales through {last_week_end_on_or_before(settings['REPORT_END_DATE'], settings)}"
         )
         period_basis_card = f"""
       <div class="meta-card">

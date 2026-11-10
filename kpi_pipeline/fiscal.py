@@ -138,9 +138,16 @@ def _period_key_columns(period_col: str) -> List[str]:
     return ["Year"] if period_col == "Year" else ["Year", period_col]
 
 
-def last_saturday_on_or_before(day: datetime.date) -> datetime.date:
-    """The last Saturday on or before ``day`` (``day`` itself when it is a Saturday)."""
-    return day - datetime.timedelta(days=(day.weekday() + 2) % 7)
+def week_start_weekday(settings: Dict[str, Any]) -> int:
+    """Python weekday every week starts on (fiscal_calendar.week_start_day): Sunday (6) unless configured."""
+    return settings.get("WEEK_START_WEEKDAY", 6)
+
+
+def last_week_end_on_or_before(day: datetime.date, settings: Dict[str, Any]) -> datetime.date:
+    """The last week-end day (Saturday for Sunday weeks, Sunday for Monday weeks) on or before ``day``
+    (``day`` itself when it ends a week)."""
+    week_end = (week_start_weekday(settings) - 1) % 7
+    return day - datetime.timedelta(days=(day.weekday() - week_end) % 7)
 
 
 def _fiscal_period_bounds(ctx: KPIContext, period_col: str) -> DataFrame:
@@ -179,7 +186,7 @@ def _fiscal_period_bounds(ctx: KPIContext, period_col: str) -> DataFrame:
             .withColumn("period_end", F.to_date(F.format_string("%04d-12-31", F.col("Year").cast("int"))))
         )
     if period_col == "Week":
-        # Civil weeks run Sunday to Saturday: a week is whole when its 7 days from its first date fit.
+        # Civil weeks run 7 days from their first date (fiscal_calendar.week_start_day): whole when they fit.
         return (
             ctx.fiscal_week.select("Year", "Week", F.col("week_start_date").alias("period_start"))
             .withColumn("period_end", F.date_add(F.col("period_start"), 6))
@@ -231,7 +238,7 @@ def apply_report_end_mode(ctx: KPIContext) -> None:
     month (idempotent; must run before anything reads REPORT_END_DATE). "as_of" / "latest_day" change nothing.
 
     Fiscal calendar: month bounds from the unclipped upload (_fiscal_period_bounds), which must extend past
-    REPORT_END_DATE; the cut stays a Saturday. Civil calendar: the last day of the previous calendar month
+    REPORT_END_DATE; the cut stays a week end. Civil calendar: the last day of the previous calendar month
     (or REPORT_END_DATE when it is a month end), usually mid-week; kpi_long drops the clipped trailing week.
     Raises when no month ends inside the window or the cut month starts before the window.
     """
@@ -278,7 +285,7 @@ def build_latest_day_windows(ctx: KPIContext) -> None:
     from each year's first date in the unclipped upload, or Jan 1 on the civil calendar), ctx.ytd_years
     (years whose days 1..K are all inside the window), ctx.day_calendar (window dates with day_index and
     last_day_index; the week containing K is split at K) and ctx.ytd_lost_sales_last_week (fiscal week of
-    the last Saturday on or before REPORT_END_DATE, 0 when that Saturday is in the previous fiscal year).
+    the last week end on or before REPORT_END_DATE, 0 when that day is in the previous fiscal year).
     """
     s = ctx.settings
     start, end = s["EFFECTIVE_REPORT_START_DATE"], s["REPORT_END_DATE"]
@@ -316,19 +323,19 @@ def build_latest_day_windows(ctx: KPIContext) -> None:
         if first_dates[y] >= start and first_dates[y] + datetime.timedelta(days=through_day - 1) <= end
     ]
 
-    last_saturday = last_saturday_on_or_before(end)
-    saturday_row = ctx.fiscal_cal.filter(F.col("date") == F.lit(last_saturday)).first()
-    if saturday_row is None:
+    last_week_end = last_week_end_on_or_before(end, s)
+    week_end_row = ctx.fiscal_cal.filter(F.col("date") == F.lit(last_week_end)).first()
+    if week_end_row is None:
         raise ValueError(
-            f"report_end='latest_day': the last Saturday on or before REPORT_END_DATE {end} ({last_saturday}) "
+            f"report_end='latest_day': the last week end on or before REPORT_END_DATE {end} ({last_week_end}) "
             f"is before the report start {start}; lost sales has no complete week in the window. Widen "
             "run_min_date or move as_of_date."
         )
-    ctx.ytd_lost_sales_last_week = int(saturday_row["Week"]) if saturday_row["Year"] == end_year else 0
+    ctx.ytd_lost_sales_last_week = int(week_end_row["Week"]) if week_end_row["Year"] == end_year else 0
     print(
         f"report_end=latest_day: YTD through fiscal day {through_day} of REPORT_END_DATE {end} | YTD years: "
         f"{ctx.ytd_years} (years not in the window from day 1: "
-        f"{[int(y) for y in window_years if int(y) not in ctx.ytd_years]}) | lost sales through {last_saturday} "
+        f"{[int(y) for y in window_years if int(y) not in ctx.ytd_years]}) | lost sales through {last_week_end} "
         f"(YTD weeks 1..{ctx.ytd_lost_sales_last_week})"
     )
 

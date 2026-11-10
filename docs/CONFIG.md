@@ -51,6 +51,7 @@ Every config section and key of `config.py` (the generic reference template) and
 
 ```python
 "fiscal_calendar": {
+    "week_start_day": "sunday",   # "sunday" (Sun-Sat weeks) | "monday" (Mon-Sun weeks)
     "use_fiscal_calendar": True,  # True = periods from the fiscal_cal upload; False = from daily-data dates
     "half_periods": False,        # True adds the Half tab and the "half" comparable kind
     "column_map": {               # fiscal_cal upload columns; set month_name_col when the fiscal year is offset
@@ -64,6 +65,8 @@ Every config section and key of `config.py` (the generic reference template) and
     },
 },
 ```
+
+**`week_start_day`** sets the day every week starts on: the window start (`run_min_date` and the YTD start resolve to that day), the last complete week (`report_end` `"as_of"`), the last week end lost sales reaches (`"latest_day"`) and the default `scope.run_date` (the latest week start; a configured one must be that weekday). It must match the weeks of the fiscal_cal upload / daily-data and of the lost-sales `week_start_date`. Tecovas uses `"monday"`.
 
 Behaviour of `use_fiscal_calendar` and `half_periods` is explained in [Fiscal calendar vs native time grain](LOGIC_FLOW.md#fiscal-calendar-vs-native-time-grain) and [Half periods](LOGIC_FLOW.md#half-periods-h1--h2). Env: `KPI_USE_FISCAL_CALENDAR`, `KPI_HALF_PERIODS`.
 

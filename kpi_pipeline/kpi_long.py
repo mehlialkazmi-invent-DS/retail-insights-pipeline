@@ -14,7 +14,7 @@ from pyspark.sql.types import StringType
 
 from kpi_pipeline.context import KPIContext, release_frames
 from kpi_pipeline.filters import value_filter_condition
-from kpi_pipeline.fiscal import _period_key_columns, last_saturday_on_or_before, week_day_counts
+from kpi_pipeline.fiscal import _period_key_columns, last_week_end_on_or_before, week_day_counts
 from kpi_pipeline.metrics import KPI_FRAMES, build_kpi_table, collapse_frames
 
 PERIODS: List[Tuple[str, str]] = [
@@ -67,11 +67,11 @@ def _drop_incomplete_periods(
 
 
 def _drop_partial_trailing_week(ctx: KPIContext, frames: Dict[str, DataFrame]) -> Dict[str, DataFrame]:
-    """Weekly tab: keep only the weeks ending on or before the last Saturday on or before REPORT_END_DATE
+    """Weekly tab: keep only the weeks ending on or before the last week end on or before REPORT_END_DATE
     (report_end="complete_month" on the civil calendar cuts at a month end, usually mid-week)."""
-    last_saturday = last_saturday_on_or_before(ctx.settings["REPORT_END_DATE"])
+    last_week_end = last_week_end_on_or_before(ctx.settings["REPORT_END_DATE"], ctx.settings)
     whole_weeks = F.broadcast(
-        ctx.fiscal_week.filter(F.col("week_end_date") <= F.lit(last_saturday)).select("Year_Week")
+        ctx.fiscal_week.filter(F.col("week_end_date") <= F.lit(last_week_end)).select("Year_Week")
     )
     out = dict(frames)
     for key in _METRIC_FRAMES:
@@ -82,7 +82,7 @@ def _drop_partial_trailing_week(ctx: KPIContext, frames: Dict[str, DataFrame]) -
 def _ytd_latest_day_frames(ctx: KPIContext, frames: Dict[str, DataFrame]) -> Dict[str, DataFrame]:
     """report_end="latest_day" YTD: days 1..K of the fiscal year (K = ctx.ytd_through_day) of every year in
     ctx.ytd_years. Daily frames filter on day_index, the pair-week in-stock frames on last_day_index (the
-    week containing K was split at K when built). Lost sales is weekly and only reaches the last Saturday,
+    week containing K was split at K when built). Lost sales is weekly and only reaches the last week end,
     so its YTD is whole weeks 1..ctx.ytd_lost_sales_last_week.
     """
     in_ytd_year = F.col("Year").isin(ctx.ytd_years)
@@ -186,7 +186,7 @@ def trim_periods_to_recent(kpi_long: pd.DataFrame, ctx: KPIContext) -> pd.DataFr
             if settings["REPORT_END_MODE"] == "latest_day":
                 # The trailing partial week is not a Weekly column and takes no slot.
                 fiscal_week = fiscal_week.filter(
-                    F.col("week_end_date") <= F.lit(last_saturday_on_or_before(settings["REPORT_END_DATE"]))
+                    F.col("week_end_date") <= F.lit(last_week_end_on_or_before(settings["REPORT_END_DATE"], settings))
                 )
             fw_pd = fiscal_week.select("Year_Week", "week_start_date").toPandas()
             recent = set(fw_pd.sort_values("week_start_date", ascending=False).head(n)["Year_Week"].tolist())
