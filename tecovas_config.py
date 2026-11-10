@@ -21,7 +21,7 @@
 #   Lost sales  noob/lost-sales model_id=top_down; lost_sales_ensemble OFF
 #   Blocked     blocked_scope OFF
 #   GIT         goods_in_transit OFF
-#   Comparable  YoY and YTD comparisons; like-for-like comparable_pairs OFF
+#   Comparable  YoY and YTD comparisons; like-for-like comparable_pairs ytd + yoy (product x store)
 #   Dimensions  division (products.product_group_1_description); dimension_sources OFF
 #   Output      Delta saves to temp/firatg/retail_insights_kpi/<channel>, never to analysis/
 #   Report      Tecovas KPI Report; dc_in_stock_rate not reported (dc_instock OFF)
@@ -350,8 +350,8 @@ CONFIG: Dict[str, Any] = {
         "enabled": ["yoy", "ytd"],  # any of COMPARISON_KINDS_ALL
     },
     "comparable_pairs": {  # like-for-like; needs run_min_date spanning 2+ years (docs/LOGIC_FLOW.md: Comparable pairs)
-        "enabled": False,
-        "kinds": ["ytd"],  # any of COMPARABLE_KINDS_ALL
+        "enabled": True,  # same product x store pairs every year: scope is today's snapshot, so plain YoY is mostly scope growth
+        "kinds": ["ytd", "yoy"],  # any of COMPARABLE_KINDS_ALL
         "grain": "product_store",  # or "product"
         "pair_days": "unblocked",  # pairs present on "unblocked" days in every year, or on "all" (incl. blocked)
     },
