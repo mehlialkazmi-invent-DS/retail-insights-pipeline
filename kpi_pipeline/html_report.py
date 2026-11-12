@@ -1758,14 +1758,12 @@ def _methodology_cards(settings: Dict[str, Any], metric_cols: List[str], labels:
             f" ({', '.join(settings['COMPARABLE_KINDS'])} views), so range changes do not distort the trend.",
         ]))
     reading = [
-        "This report is an observational study, not a controlled experiment. There is no control group, so changes over"
-        " time are associations and cannot be attributed to the replenishment system alone. Season, promotions,"
-        " assortment, pricing and the wider market also move the numbers.",
+        "This report is an observational study.",
     ]
     if settings["COMPARABLE_PAIRS_ENABLED"]:
         reading.append(
             f"Like-for-like views compare the same {unit} in every compared period ({', '.join(settings['COMPARABLE_KINDS'])})."
-            " This removes the effect of items entering or leaving the range, but it does not control for the other drivers."
+            " This removes the effect of items entering or leaving the range."
         )
         reading.append("The other views are not restricted to a fixed set of items: the items counted can differ between periods.")
     if scope["time"] == "daily":

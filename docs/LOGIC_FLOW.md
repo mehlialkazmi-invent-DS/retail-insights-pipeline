@@ -768,7 +768,7 @@ To leave a labelled group out of one metric, use `metrics.population_filters`; t
 
 ## Comparable pairs (like-for-like: ytd / yoy / quarter / half)
 
-**Gated, opt-in** (default off; or `KPI_COMPARABLE_PAIRS=true`). Metrics are recomputed over **only the `(product_id, store_id)` pairs present in EVERY qualifying year**, isolating like-for-like movement from newly listed or closed pairs. Like-for-like removes the mix effect of pairs entering or leaving the population; it does not control for season, promotions, assortment, pricing or the market, so the report is an observational study, not a controlled experiment (see the Methodology tab's "Reading the trends" card). `comparable_pairs.kinds` selects among four kinds; each kind is gated by that list only, not by `comparisons.enabled`. There is no comparable QoQ/MoM/WoW.
+**Gated, opt-in** (default off; or `KPI_COMPARABLE_PAIRS=true`). Metrics are recomputed over **only the `(product_id, store_id)` pairs present in EVERY qualifying year**, isolating like-for-like movement from newly listed or closed pairs. Like-for-like removes the mix effect of pairs entering or leaving the population; the report is an observational study (see the Methodology tab's "Reading the trends" card). `comparable_pairs.kinds` selects among four kinds; each kind is gated by that list only, not by `comparisons.enabled`. There is no comparable QoQ/MoM/WoW.
 
 | Kind | Population | Chained links |
 |---|---|---|
