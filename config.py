@@ -17,7 +17,7 @@
 #   Calendar    Tecovas' own calendar: Monday-Sunday weeks, year / week as in noob/daily-data (ISO), months of
 #               whole weeks (tecovas_fiscal_cal.py writes it; Tecovas has no one_time_uploads/fiscal_cal)
 #   Window      2024-01-01 (Monday) to the last complete Monday-Sunday week
-#   In-stock    instock.method "lost_sales_source" (noob/lost-sales model_id=top_down)
+#   In-stock    instock.method "daily": built from noob/daily-data inventory over the scope pairs (usable = 1 days)
 #   Lost sales  noob/lost-sales model_id=top_down; lost_sales_ensemble OFF
 #   Blocked     blocked_scope OFF
 #   GIT         goods_in_transit OFF
@@ -218,7 +218,7 @@ CONFIG: Dict[str, Any] = {
     #   "weekly_source"      read from a separate weekly table (weekly_source below)
     #   "lost_sales_source"  read from lost_sales_source's in_stock_col / total_days_col
     "instock": {
-        "method": "lost_sales_source",
+        "method": "daily",
         "daily": {
             "count_start": "first_daily_row",  # or "scope_start" / "earliest" (need scope.columns.start)
             "require_daily_data": True,  # drop pairs with no daily-data row at all
